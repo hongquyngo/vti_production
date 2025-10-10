@@ -1,28 +1,62 @@
-# modules/inventory.py - Enhanced Inventory Management Integration
-import pandas as pd
-from datetime import datetime, date, timedelta
-from utils.db import get_db_engine
-from sqlalchemy import text
+# modules/inventory.py - Simplified Inventory Management
+"""
+Inventory Management Module
+Essential functions for production stock tracking and FEFO management.
+"""
+
 import logging
+from datetime import datetime, date, timedelta
+from decimal import Decimal
+from typing import Dict, List, Optional, Tuple, Any
+from enum import Enum
+
+import pandas as pd
+from sqlalchemy import text
+from sqlalchemy.exc import DatabaseError
+
+from utils.db import get_db_engine
 
 logger = logging.getLogger(__name__)
 
 
+# ==================== Enums ====================
+
+class TransactionType(Enum):
+    """Inventory transaction types"""
+    STOCK_IN_PRODUCTION = "stockInProduction"
+    STOCK_OUT_PRODUCTION = "stockOutProduction"
+    STOCK_IN_RETURN = "stockInProductionReturn"
+
+
+class ExpiryStatus(Enum):
+    """Expiry status"""
+    OK = "OK"
+    WARNING = "WARNING"  # Within 30 days
+    CRITICAL = "CRITICAL"  # Within 7 days
+    EXPIRED = "EXPIRED"
+
+
+# ==================== Main Manager ====================
+
 class InventoryManager:
-    """Enhanced Inventory Management for Manufacturing"""
+    """Inventory Management for Production"""
     
     def __init__(self):
         self.engine = get_db_engine()
+        self.expiry_warning_days = 30
+        self.expiry_critical_days = 7
     
-    def get_stock_balance(self, product_id, warehouse_id=None):
-        """Get current stock balance for a product"""
+    # ==================== Stock Balance ====================
+    
+    def get_stock_balance(self, product_id: int, 
+                         warehouse_id: Optional[int] = None) -> Decimal:
+        """Get current stock balance"""
         query = """
-        SELECT 
-            COALESCE(SUM(remain), 0) as stock_balance
-        FROM inventory_histories
-        WHERE product_id = %s
-        AND remain > 0
-        AND delete_flag = 0
+            SELECT COALESCE(SUM(remain), 0) as stock_balance
+            FROM inventory_histories
+            WHERE product_id = %s
+                AND remain > 0
+                AND delete_flag = 0
         """
         
         params = [product_id]
@@ -33,89 +67,219 @@ class InventoryManager:
         
         try:
             result = pd.read_sql(query, self.engine, params=tuple(params))
-            return float(result['stock_balance'].iloc[0]) if not result.empty else 0.0
+            return Decimal(str(result['stock_balance'].iloc[0]))
         except Exception as e:
             logger.error(f"Error getting stock balance: {e}")
-            return 0.0
+            return Decimal('0')
     
-    def get_stock_by_batch(self, product_id, warehouse_id):
-        """Get stock details by batch with FEFO order"""
+    def get_stock_by_batch(self, product_id: int, warehouse_id: int) -> pd.DataFrame:
+        """Get stock by batch with FEFO order"""
         query = """
-        SELECT 
-            batch_no,
-            SUM(remain) as available_qty,
-            expired_date,
-            CASE 
-                WHEN expired_date < CURDATE() THEN 'EXPIRED'
-                WHEN expired_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY) THEN 'CRITICAL'
-                WHEN expired_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY) THEN 'WARNING'
-                ELSE 'OK'
-            END as expiry_status
-        FROM inventory_histories
-        WHERE product_id = %s
-        AND warehouse_id = %s
-        AND remain > 0
-        AND delete_flag = 0
-        GROUP BY batch_no, expired_date
-        ORDER BY expired_date ASC, batch_no ASC
+            SELECT 
+                id,
+                batch_no,
+                SUM(remain) as available_qty,
+                expired_date,
+                CASE 
+                    WHEN expired_date IS NULL THEN 'OK'
+                    WHEN expired_date < CURDATE() THEN 'EXPIRED'
+                    WHEN expired_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY) THEN 'CRITICAL'
+                    WHEN expired_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY) THEN 'WARNING'
+                    ELSE 'OK'
+                END as expiry_status,
+                DATEDIFF(expired_date, CURDATE()) as days_to_expiry
+            FROM inventory_histories
+            WHERE product_id = %s
+                AND warehouse_id = %s
+                AND remain > 0
+                AND delete_flag = 0
+            GROUP BY id, batch_no, expired_date
+            ORDER BY 
+                CASE WHEN expired_date IS NULL THEN 1 ELSE 0 END,
+                expired_date ASC,
+                created_date ASC
         """
         
         try:
-            return pd.read_sql(query, self.engine, params=(product_id, warehouse_id))
+            return pd.read_sql(
+                query, 
+                self.engine, 
+                params=(
+                    self.expiry_critical_days,
+                    self.expiry_warning_days,
+                    product_id,
+                    warehouse_id
+                )
+            )
         except Exception as e:
             logger.error(f"Error getting stock by batch: {e}")
             return pd.DataFrame()
     
-    def preview_fefo_issue(self, product_id, quantity, warehouse_id):
-        """Preview which batches would be issued using FEFO"""
+    # ==================== FEFO Preview ====================
+    
+    def preview_fefo_issue(self, product_id: int, quantity: Decimal,
+                          warehouse_id: int) -> pd.DataFrame:
+        """Preview FEFO batch selection"""
         try:
-            # Get available batches
             batches = self.get_stock_by_batch(product_id, warehouse_id)
             
             if batches.empty:
                 return pd.DataFrame()
             
-            remaining_qty = quantity
+            remaining_qty = float(quantity)
             selected_batches = []
             
             for _, batch in batches.iterrows():
                 if remaining_qty <= 0:
                     break
                 
-                # Skip expired if not allowed (configuration based)
+                # Skip expired batches
                 if batch['expiry_status'] == 'EXPIRED':
                     logger.warning(f"Skipping expired batch {batch['batch_no']}")
                     continue
                 
-                take_qty = min(remaining_qty, batch['available_qty'])
+                take_qty = min(remaining_qty, float(batch['available_qty']))
+                
                 selected_batches.append({
+                    'batch_id': batch['id'],
                     'batch_no': batch['batch_no'],
                     'quantity': take_qty,
+                    'available': batch['available_qty'],
                     'expired_date': batch['expired_date'],
-                    'expiry_status': batch['expiry_status']
+                    'expiry_status': batch['expiry_status'],
+                    'days_to_expiry': batch['days_to_expiry']
                 })
                 
                 remaining_qty -= take_qty
             
-            return pd.DataFrame(selected_batches)
+            result_df = pd.DataFrame(selected_batches)
+            
+            # Add warning if insufficient stock
+            if remaining_qty > 0:
+                logger.warning(
+                    f"Insufficient stock: requested {quantity}, "
+                    f"available {quantity - Decimal(str(remaining_qty))}"
+                )
+            
+            return result_df
             
         except Exception as e:
             logger.error(f"Error in FEFO preview: {e}")
             return pd.DataFrame()
     
-    def get_warehouses(self):
-        """Get list of active warehouses"""
+    # ==================== Stock Movement ====================
+    
+    def record_stock_out(self, product_id: int, warehouse_id: int,
+                        quantity: float, batch_no: str,
+                        reference_type: str, reference_id: int,
+                        created_by: Optional[str] = None) -> int:
+        """Record stock out for production"""
+        with self.engine.begin() as conn:
+            try:
+                query = text("""
+                    INSERT INTO inventory_histories (
+                        type, product_id, warehouse_id, quantity, remain,
+                        batch_no, reference_type, reference_id,
+                        created_by, created_date, delete_flag
+                    ) VALUES (
+                        :type, :product_id, :warehouse_id, :quantity, 0,
+                        :batch_no, :ref_type, :ref_id,
+                        :created_by, NOW(), 0
+                    )
+                """)
+                
+                result = conn.execute(query, {
+                    'type': TransactionType.STOCK_OUT_PRODUCTION.value,
+                    'product_id': product_id,
+                    'warehouse_id': warehouse_id,
+                    'quantity': -abs(quantity),  # Negative for stock out
+                    'batch_no': batch_no,
+                    'ref_type': reference_type,
+                    'ref_id': reference_id,
+                    'created_by': created_by
+                })
+                
+                return result.lastrowid
+                
+            except Exception as e:
+                logger.error(f"Error recording stock out: {e}")
+                raise
+    
+    def record_stock_in(self, product_id: int, warehouse_id: int,
+                       quantity: float, batch_no: str,
+                       expired_date: Optional[date],
+                       reference_type: str, reference_id: int,
+                       transaction_type: str = "stockInProduction",
+                       created_by: Optional[str] = None) -> int:
+        """Record stock in for production or return"""
+        with self.engine.begin() as conn:
+            try:
+                query = text("""
+                    INSERT INTO inventory_histories (
+                        type, product_id, warehouse_id, quantity, remain,
+                        batch_no, expired_date, reference_type, reference_id,
+                        created_by, created_date, delete_flag
+                    ) VALUES (
+                        :type, :product_id, :warehouse_id, :quantity, :quantity,
+                        :batch_no, :expired_date, :ref_type, :ref_id,
+                        :created_by, NOW(), 0
+                    )
+                """)
+                
+                result = conn.execute(query, {
+                    'type': transaction_type,
+                    'product_id': product_id,
+                    'warehouse_id': warehouse_id,
+                    'quantity': abs(quantity),  # Positive for stock in
+                    'batch_no': batch_no,
+                    'expired_date': expired_date,
+                    'ref_type': reference_type,
+                    'ref_id': reference_id,
+                    'created_by': created_by
+                })
+                
+                return result.lastrowid
+                
+            except Exception as e:
+                logger.error(f"Error recording stock in: {e}")
+                raise
+    
+    def update_batch_remain(self, inventory_history_id: int, 
+                           quantity_used: float) -> bool:
+        """Update batch remaining quantity after issue"""
+        with self.engine.begin() as conn:
+            try:
+                query = text("""
+                    UPDATE inventory_histories
+                    SET remain = GREATEST(0, remain - :quantity),
+                        updated_date = NOW()
+                    WHERE id = :id
+                """)
+                
+                result = conn.execute(query, {
+                    'quantity': abs(quantity_used),
+                    'id': inventory_history_id
+                })
+                
+                return result.rowcount > 0
+                
+            except Exception as e:
+                logger.error(f"Error updating batch remain: {e}")
+                return False
+    
+    # ==================== Warehouse Methods ====================
+    
+    def get_warehouses(self) -> pd.DataFrame:
+        """Get active warehouses"""
         query = """
-        SELECT 
-            w.id,
-            w.name,
-            w.address,
-            w.company_id,
-            c.english_name as company_name
-        FROM warehouses w
-        LEFT JOIN companies c ON w.company_id = c.id
-        WHERE w.delete_flag = 0
-        ORDER BY w.name
+            SELECT 
+                id,
+                name,
+                warehouse_type,
+                is_active
+            FROM warehouses
+            WHERE delete_flag = 0 AND is_active = 1
+            ORDER BY name
         """
         
         try:
@@ -124,358 +288,103 @@ class InventoryManager:
             logger.error(f"Error getting warehouses: {e}")
             return pd.DataFrame()
     
-    def check_stock_availability(self, materials_list, warehouse_id):
-        """Check if multiple materials are available"""
-        availability_results = []
-        
-        for material in materials_list:
-            stock = self.get_stock_balance(material['product_id'], warehouse_id)
-            required = material.get('quantity', 0)
-            
-            availability_results.append({
-                'product_id': material['product_id'],
-                'product_name': material.get('product_name', ''),
-                'required_qty': required,
-                'available_qty': stock,
-                'is_sufficient': stock >= required,
-                'shortage': max(0, required - stock)
-            })
-        
-        return pd.DataFrame(availability_results)
+    # ==================== Expiry Analysis ====================
     
-    def get_batch_info(self, batch_no):
-        """Get comprehensive batch information"""
+    def get_expiring_items(self, days_ahead: int = 30,
+                          warehouse_id: Optional[int] = None) -> pd.DataFrame:
+        """Get products approaching expiry"""
         query = """
-        SELECT 
-            ih.batch_no,
-            ih.product_id,
-            p.name as product_name,
-            p.pt_code as product_code,
-            ih.warehouse_id,
-            w.name as warehouse_name,
-            SUM(CASE WHEN ih.type LIKE 'stockIn%' THEN ih.quantity ELSE 0 END) as total_in,
-            SUM(CASE WHEN ih.type LIKE 'stockOut%' THEN ABS(ih.quantity) ELSE 0 END) as total_out,
-            MAX(ih.remain) as current_qty,
-            ih.expired_date,
-            MIN(ih.created_date) as created_date,
-            ih.uom
-        FROM inventory_histories ih
-        JOIN products p ON ih.product_id = p.id
-        JOIN warehouses w ON ih.warehouse_id = w.id
-        WHERE ih.batch_no = %s
-        GROUP BY ih.batch_no, ih.product_id, p.name, p.pt_code, 
-                 ih.warehouse_id, w.name, ih.expired_date, ih.uom
+            SELECT 
+                p.name as product_name,
+                p.pt_code as product_code,
+                ih.batch_no,
+                SUM(ih.remain) as quantity,
+                ih.expired_date,
+                w.name as warehouse,
+                CASE 
+                    WHEN ih.expired_date < CURDATE() THEN 'EXPIRED'
+                    WHEN ih.expired_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY) THEN 'CRITICAL'
+                    WHEN ih.expired_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY) THEN 'WARNING'
+                    ELSE 'OK'
+                END as expiry_status,
+                DATEDIFF(ih.expired_date, CURDATE()) as days_to_expiry
+            FROM inventory_histories ih
+            JOIN products p ON ih.product_id = p.id
+            JOIN warehouses w ON ih.warehouse_id = w.id
+            WHERE ih.remain > 0
+                AND ih.delete_flag = 0
+                AND ih.expired_date IS NOT NULL
+                AND ih.expired_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY)
+        """
+        
+        params = [self.expiry_critical_days, 
+                 self.expiry_warning_days,
+                 days_ahead]
+        
+        if warehouse_id:
+            query += " AND ih.warehouse_id = %s"
+            params.append(warehouse_id)
+        
+        query += """
+            GROUP BY p.name, p.pt_code, ih.batch_no, ih.expired_date, w.name
+            ORDER BY ih.expired_date ASC
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine, params=tuple(params))
+        except Exception as e:
+            logger.error(f"Error getting expiring items: {e}")
+            return pd.DataFrame()
+    
+    # ==================== Batch Info ====================
+    
+    def get_batch_info(self, batch_no: str) -> Optional[Dict[str, Any]]:
+        """Get batch information"""
+        query = """
+            SELECT 
+                ih.batch_no,
+                ih.product_id,
+                p.name as product_name,
+                p.pt_code as product_code,
+                ih.warehouse_id,
+                w.name as warehouse_name,
+                SUM(ih.remain) as current_qty,
+                ih.expired_date,
+                MIN(ih.created_date) as created_date
+            FROM inventory_histories ih
+            JOIN products p ON ih.product_id = p.id
+            JOIN warehouses w ON ih.warehouse_id = w.id
+            WHERE ih.batch_no = %s
+                AND ih.delete_flag = 0
+            GROUP BY 
+                ih.batch_no, ih.product_id, p.name, p.pt_code,
+                ih.warehouse_id, w.name, ih.expired_date
         """
         
         try:
             result = pd.read_sql(query, self.engine, params=(batch_no,))
+            
             if not result.empty:
                 batch_data = result.iloc[0].to_dict()
-                # Calculate actual remaining
-                batch_data['quantity'] = batch_data['current_qty']
+                
+                # Add expiry status
+                if batch_data['expired_date']:
+                    days_to_expiry = (batch_data['expired_date'] - date.today()).days
+                    if days_to_expiry < 0:
+                        batch_data['expiry_status'] = ExpiryStatus.EXPIRED.value
+                    elif days_to_expiry <= self.expiry_critical_days:
+                        batch_data['expiry_status'] = ExpiryStatus.CRITICAL.value
+                    elif days_to_expiry <= self.expiry_warning_days:
+                        batch_data['expiry_status'] = ExpiryStatus.WARNING.value
+                    else:
+                        batch_data['expiry_status'] = ExpiryStatus.OK.value
+                else:
+                    batch_data['expiry_status'] = ExpiryStatus.OK.value
+                
                 return batch_data
+            
             return None
+            
         except Exception as e:
             logger.error(f"Error getting batch info: {e}")
             return None
-    
-    def get_batch_sources(self, batch_no):
-        """Get source materials for a production batch (genealogy)"""
-        query = """
-        SELECT 
-            p.name as material_name,
-            p.pt_code as material_code,
-            mid.quantity,
-            mid.batch_no as source_batch,
-            ih_source.expired_date
-        FROM production_receipts pr
-        JOIN material_issue_details mid ON mid.manufacturing_order_id = pr.manufacturing_order_id
-        JOIN products p ON mid.material_id = p.id
-        LEFT JOIN inventory_histories ih_source ON ih_source.id = mid.inventory_history_id
-        WHERE pr.batch_no = %s
-        ORDER BY p.name
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, params=(batch_no,))
-        except Exception as e:
-            logger.error(f"Error getting batch sources: {e}")
-            return pd.DataFrame()
-    
-    def get_batch_locations(self, batch_no):
-        """Get current locations and quantities of a batch"""
-        query = """
-        SELECT 
-            w.name as warehouse,
-            SUM(ih.remain) as quantity,
-            CASE 
-                WHEN MAX(ih.expired_date) < CURDATE() THEN 'EXPIRED'
-                WHEN SUM(ih.remain) = 0 THEN 'CONSUMED'
-                ELSE 'AVAILABLE'
-            END as status,
-            MAX(ih.updated_date) as last_updated
-        FROM inventory_histories ih
-        JOIN warehouses w ON ih.warehouse_id = w.id
-        WHERE ih.batch_no = %s
-        AND ih.remain > 0
-        GROUP BY w.id, w.name
-        ORDER BY quantity DESC
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, params=(batch_no,))
-        except Exception as e:
-            logger.error(f"Error getting batch locations: {e}")
-            return pd.DataFrame()
-    
-    def get_expiry_status(self, days_ahead=30):
-        """Get products approaching expiry"""
-        query = """
-        SELECT 
-            p.name as product_name,
-            p.pt_code as product_code,
-            ih.batch_no,
-            SUM(ih.remain) as quantity,
-            ih.expired_date,
-            w.name as warehouse,
-            CASE 
-                WHEN ih.expired_date < CURDATE() THEN 'EXPIRED'
-                WHEN ih.expired_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY) THEN 'CRITICAL'
-                WHEN ih.expired_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY) THEN 'WARNING'
-                ELSE 'OK'
-            END as expiry_status,
-            DATEDIFF(ih.expired_date, CURDATE()) as days_to_expiry
-        FROM inventory_histories ih
-        JOIN products p ON ih.product_id = p.id
-        JOIN warehouses w ON ih.warehouse_id = w.id
-        WHERE ih.remain > 0
-        AND ih.delete_flag = 0
-        AND ih.expired_date IS NOT NULL
-        AND ih.expired_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY)
-        GROUP BY p.name, p.pt_code, ih.batch_no, ih.expired_date, w.name
-        ORDER BY ih.expired_date ASC
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, params=(days_ahead, days_ahead))
-        except Exception as e:
-            logger.error(f"Error getting expiry status: {e}")
-            return pd.DataFrame()
-    
-    def get_production_impact(self, start_date, end_date):
-        """Analyze inventory impact from production"""
-        query = """
-        SELECT 
-            p.id as product_id,
-            p.name as product_name,
-            p.pt_code as product_code,
-            SUM(CASE 
-                WHEN ih.type = 'stockInProduction' THEN ih.quantity 
-                ELSE 0 
-            END) as produced,
-            SUM(CASE 
-                WHEN ih.type = 'stockOutProduction' THEN ABS(ih.quantity) 
-                ELSE 0 
-            END) as consumed,
-            SUM(CASE 
-                WHEN ih.type = 'stockInProductionReturn' THEN ih.quantity
-                ELSE 0
-            END) as returned,
-            SUM(CASE 
-                WHEN ih.type = 'stockInProduction' THEN ih.quantity
-                WHEN ih.type = 'stockOutProduction' THEN ih.quantity
-                WHEN ih.type = 'stockInProductionReturn' THEN ih.quantity
-                ELSE 0
-            END) as net_change
-        FROM inventory_histories ih
-        JOIN products p ON ih.product_id = p.id
-        WHERE ih.type IN ('stockInProduction', 'stockOutProduction', 'stockInProductionReturn')
-        AND DATE(ih.created_date) BETWEEN %s AND %s
-        AND ih.delete_flag = 0
-        GROUP BY p.id, p.name, p.pt_code
-        HAVING net_change != 0
-        ORDER BY ABS(net_change) DESC
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, params=(start_date, end_date))
-        except Exception as e:
-            logger.error(f"Error getting production impact: {e}")
-            return pd.DataFrame()
-    
-    def get_low_stock_items(self, threshold_qty=50):
-        """Get items below minimum stock level"""
-        query = """
-        WITH current_stock AS (
-            SELECT 
-                p.id as product_id,
-                p.name as product_name,
-                p.pt_code as product_code,
-                p.uom,
-                w.id as warehouse_id,
-                w.name as warehouse,
-                COALESCE(SUM(ih.remain), 0) as current_stock
-            FROM products p
-            CROSS JOIN warehouses w
-            LEFT JOIN inventory_histories ih ON ih.product_id = p.id 
-                AND ih.warehouse_id = w.id 
-                AND ih.remain > 0
-                AND ih.delete_flag = 0
-            WHERE p.delete_flag = 0
-            AND p.approval_status = 1
-            AND p.is_service = 0
-            AND w.delete_flag = 0
-            GROUP BY p.id, p.name, p.pt_code, p.uom, w.id, w.name
-        )
-        SELECT 
-            product_name,
-            product_code,
-            warehouse,
-            current_stock,
-            uom,
-            %s as threshold,
-            (%s - current_stock) as shortage
-        FROM current_stock
-        WHERE current_stock < %s
-        ORDER BY shortage DESC, product_name
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, 
-                             params=(threshold_qty, threshold_qty, threshold_qty))
-        except Exception as e:
-            logger.error(f"Error getting low stock items: {e}")
-            return pd.DataFrame()
-    
-    def get_batches_by_date(self, start_date, end_date):
-        """Get batches created within date range"""
-        query = """
-        SELECT 
-            pr.batch_no,
-            pr.receipt_date,
-            p.name as product_name,
-            p.pt_code as product_code,
-            pr.quantity,
-            pr.uom,
-            pr.quality_status,
-            mo.order_no,
-            b.bom_type,
-            w.name as warehouse
-        FROM production_receipts pr
-        JOIN products p ON pr.product_id = p.id
-        JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
-        JOIN bom_headers b ON mo.bom_header_id = b.id
-        JOIN warehouses w ON pr.warehouse_id = w.id
-        WHERE DATE(pr.receipt_date) BETWEEN %s AND %s
-        ORDER BY pr.receipt_date DESC
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, params=(start_date, end_date))
-        except Exception as e:
-            logger.error(f"Error getting batches by date: {e}")
-            return pd.DataFrame()
-    
-    def get_inventory_turnover(self, product_id, warehouse_id, days=30):
-        """Calculate inventory turnover rate"""
-        query = """
-        WITH movements AS (
-            SELECT 
-                DATE(created_date) as movement_date,
-                SUM(CASE 
-                    WHEN type LIKE 'stockOut%' THEN ABS(quantity) 
-                    ELSE 0 
-                END) as daily_consumption
-            FROM inventory_histories
-            WHERE product_id = %s
-            AND warehouse_id = %s
-            AND created_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
-            AND delete_flag = 0
-            GROUP BY DATE(created_date)
-        ),
-        avg_stock AS (
-            SELECT AVG(remain) as avg_inventory
-            FROM inventory_histories
-            WHERE product_id = %s
-            AND warehouse_id = %s
-            AND remain > 0
-            AND delete_flag = 0
-        )
-        SELECT 
-            COALESCE(SUM(m.daily_consumption), 0) as total_consumption,
-            COALESCE(a.avg_inventory, 0) as average_inventory,
-            CASE 
-                WHEN a.avg_inventory > 0 
-                THEN (SUM(m.daily_consumption) * 365 / %s) / a.avg_inventory
-                ELSE 0 
-            END as turnover_rate,
-            CASE 
-                WHEN SUM(m.daily_consumption) > 0
-                THEN a.avg_inventory / (SUM(m.daily_consumption) / %s)
-                ELSE 999
-            END as days_of_stock
-        FROM movements m
-        CROSS JOIN avg_stock a
-        GROUP BY a.avg_inventory
-        """
-        
-        try:
-            result = pd.read_sql(query, self.engine, 
-                               params=(product_id, warehouse_id, days, 
-                                     product_id, warehouse_id, days, days))
-            return result.iloc[0].to_dict() if not result.empty else {
-                'total_consumption': 0,
-                'average_inventory': 0,
-                'turnover_rate': 0,
-                'days_of_stock': 999
-            }
-        except Exception as e:
-            logger.error(f"Error calculating inventory turnover: {e}")
-            return {
-                'total_consumption': 0,
-                'average_inventory': 0,
-                'turnover_rate': 0,
-                'days_of_stock': 999
-            }
-    
-    def validate_batch_availability(self, batch_no, warehouse_id):
-        """Validate if a specific batch is available"""
-        query = """
-        SELECT 
-            SUM(remain) as available_qty,
-            expired_date,
-            CASE 
-                WHEN expired_date < CURDATE() THEN 'EXPIRED'
-                ELSE 'OK'
-            END as status
-        FROM inventory_histories
-        WHERE batch_no = %s
-        AND warehouse_id = %s
-        AND remain > 0
-        AND delete_flag = 0
-        GROUP BY expired_date
-        """
-        
-        try:
-            result = pd.read_sql(query, self.engine, params=(batch_no, warehouse_id))
-            if not result.empty:
-                return {
-                    'available': True,
-                    'quantity': float(result['available_qty'].iloc[0]),
-                    'expired_date': result['expired_date'].iloc[0],
-                    'status': result['status'].iloc[0]
-                }
-            return {
-                'available': False,
-                'quantity': 0,
-                'expired_date': None,
-                'status': 'NOT_FOUND'
-            }
-        except Exception as e:
-            logger.error(f"Error validating batch: {e}")
-            return {
-                'available': False,
-                'quantity': 0,
-                'expired_date': None,
-                'status': 'ERROR'
-            }
