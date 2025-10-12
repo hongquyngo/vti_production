@@ -6,7 +6,7 @@ Formatting, UI helpers, and product queries
 
 import logging
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Union, Optional
+from typing import Union, Optional, Dict, List, Any, Tuple
 from io import BytesIO
 
 import pandas as pd
@@ -81,7 +81,7 @@ def create_status_indicator(status: str) -> str:
         Status with emoji
     """
     status_icons = {
-        'DRAFT': '📝',
+        'DRAFT': '🔵',
         'ACTIVE': '🟢',
         'INACTIVE': '⭕',
         'CONFIRMED': '✅',
@@ -121,203 +121,6 @@ def get_status_color(status: str) -> str:
     return status_colors.get(status.upper(), 'gray')
 
 
-# ==================== UI Helper Class ====================
-
-class UIHelpers:
-    """Streamlit UI helper functions"""
-    
-    @staticmethod
-    def show_message(message: str, type: str = "info", icon: Optional[str] = None):
-        """
-        Show message in Streamlit
-        
-        Args:
-            message: Message text
-            type: Message type (success, error, warning, info)
-            icon: Optional icon
-        """
-        message_functions = {
-            "success": st.success,
-            "error": st.error,
-            "warning": st.warning,
-            "info": st.info
-        }
-        
-        show_func = message_functions.get(type, st.info)
-        
-        if icon:
-            message = f"{icon} {message}"
-        
-        show_func(message)
-    
-    @staticmethod
-    def confirm_action(message: str, key: str) -> bool:
-        """
-        Show confirmation dialog
-        
-        Args:
-            message: Confirmation message
-            key: Unique key for buttons
-        
-        Returns:
-            True if confirmed
-        """
-        col1, col2, col3 = st.columns([3, 1, 1])
-        
-        with col1:
-            st.warning(f"⚠️ {message}")
-        
-        with col2:
-            confirm = st.button(
-                "✓ Confirm", 
-                key=f"{key}_yes", 
-                type="primary",
-                use_container_width=True
-            )
-        
-        with col3:
-            cancel = st.button(
-                "✗ Cancel", 
-                key=f"{key}_no",
-                use_container_width=True
-            )
-        
-        return confirm and not cancel
-    
-    @staticmethod
-    def show_loading(message: str = "Processing..."):
-        """Show loading spinner"""
-        return st.spinner(message)
-    
-    @staticmethod
-    def show_success_animation():
-        """Show success animation"""
-        st.balloons()
-    
-    @staticmethod
-    def create_info_box(title: str, items: dict):
-        """
-        Create info box with key-value pairs
-        
-        Args:
-            title: Box title
-            items: Dict of label: value pairs
-        """
-        with st.container():
-            st.markdown(f"**{title}**")
-            
-            for label, value in items.items():
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.text(f"{label}:")
-                with col2:
-                    st.text(str(value))
-    
-    @staticmethod
-    def create_metric_cards(metrics: dict, columns: int = 4):
-        """
-        Create metric cards in columns
-        
-        Args:
-            metrics: Dict of label: value pairs
-            columns: Number of columns
-        """
-        cols = st.columns(columns)
-        
-        for idx, (label, value) in enumerate(metrics.items()):
-            with cols[idx % columns]:
-                st.metric(label, value)
-    
-    @staticmethod
-    def show_error_details(error: Exception, show_traceback: bool = False):
-        """
-        Show error details with expandable section
-        
-        Args:
-            error: Exception object
-            show_traceback: Whether to show full traceback
-        """
-        st.error(f"❌ **Error:** {str(error)}")
-        
-        if show_traceback:
-            import traceback
-            with st.expander("🔍 Error Details"):
-                st.code(traceback.format_exc())
-
-
-# ==================== Excel Export ====================
-
-def export_to_excel(dataframes: Union[pd.DataFrame, dict],
-                   include_index: bool = False,
-                   sheet_name: str = "Sheet1") -> bytes:
-    """
-    Export DataFrame(s) to Excel
-    
-    Args:
-        dataframes: Single DataFrame or dict of {sheet_name: DataFrame}
-        include_index: Whether to include DataFrame index
-        sheet_name: Sheet name for single DataFrame
-    
-    Returns:
-        Excel file as bytes
-    """
-    output = BytesIO()
-    
-    # Convert single DataFrame to dict
-    if isinstance(dataframes, pd.DataFrame):
-        dataframes = {sheet_name: dataframes}
-    
-    try:
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            for name, df in dataframes.items():
-                # Clean sheet name (Excel has restrictions)
-                clean_name = name[:31]  # Max 31 chars
-                clean_name = clean_name.replace('/', '-').replace('\\', '-')
-                
-                df.to_excel(
-                    writer, 
-                    sheet_name=clean_name, 
-                    index=include_index
-                )
-                
-                # Auto-adjust column width
-                worksheet = writer.sheets[clean_name]
-                for idx, col in enumerate(df.columns):
-                    max_len = max(
-                        df[col].astype(str).str.len().max(),
-                        len(str(col))
-                    )
-                    worksheet.set_column(idx, idx, min(max_len + 2, 50))
-        
-        return output.getvalue()
-    
-    except Exception as e:
-        logger.error(f"Error exporting to Excel: {e}")
-        raise
-
-
-def create_download_button(data: bytes, 
-                           filename: str, 
-                           label: str = "📥 Download",
-                           mime: str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"):
-    """
-    Create download button for file
-    
-    Args:
-        data: File data as bytes
-        filename: Download filename
-        label: Button label
-        mime: MIME type
-    """
-    st.download_button(
-        label=label,
-        data=data,
-        file_name=filename,
-        mime=mime,
-        use_container_width=True
-    )
-
-
 # ==================== Product Queries ====================
 
 def get_products(active_only: bool = True, 
@@ -342,24 +145,7 @@ def get_products(active_only: bool = True,
             p.uom,
             p.shelf_life,
             p.approval_status,
-            p.is_service,
-            COALESCE(
-                (SELECT SUM(ih.remain) 
-                 FROM inventory_histories ih 
-                 WHERE ih.product_id = p.id 
-                   AND ih.remain > 0 
-                   AND ih.delete_flag = 0), 
-                0
-            ) as total_stock,
-            COALESCE(
-                (SELECT ih.landed_cost 
-                 FROM inventory_histories ih 
-                 WHERE ih.product_id = p.id 
-                   AND ih.delete_flag = 0 
-                 ORDER BY ih.created_date DESC 
-                 LIMIT 1), 
-                0
-            ) as latest_cost
+            p.is_service
         FROM products p
         WHERE p.delete_flag = 0
     """
@@ -478,64 +264,362 @@ def validate_date_range(start_date, end_date) -> bool:
         return False
 
 
-# ==================== Data Transformation ====================
+# ==================== Excel Export ====================
 
-def prepare_display_dataframe(df: pd.DataFrame, 
-                             format_columns: dict = None) -> pd.DataFrame:
+def export_to_excel(dataframes: Union[pd.DataFrame, dict],
+                   include_index: bool = False,
+                   sheet_name: str = "Sheet1") -> bytes:
     """
-    Prepare DataFrame for display
+    Export DataFrame(s) to Excel
     
     Args:
-        df: Input DataFrame
-        format_columns: Dict of {column: formatter_function}
+        dataframes: Single DataFrame or dict of {sheet_name: DataFrame}
+        include_index: Whether to include DataFrame index
+        sheet_name: Sheet name for single DataFrame
     
     Returns:
-        Formatted DataFrame
+        Excel file as bytes
     """
-    display_df = df.copy()
+    output = BytesIO()
     
-    if format_columns:
-        for col, formatter in format_columns.items():
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(formatter)
+    # Convert single DataFrame to dict
+    if isinstance(dataframes, pd.DataFrame):
+        dataframes = {sheet_name: dataframes}
     
-    return display_df
+    try:
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            for name, df in dataframes.items():
+                # Clean sheet name (Excel has restrictions)
+                clean_name = name[:31]  # Max 31 chars
+                clean_name = clean_name.replace('/', '-').replace('\\', '-')
+                
+                df.to_excel(
+                    writer, 
+                    sheet_name=clean_name, 
+                    index=include_index
+                )
+                
+                # Auto-adjust column width
+                worksheet = writer.sheets[clean_name]
+                for idx, col in enumerate(df.columns):
+                    max_len = max(
+                        df[col].astype(str).str.len().max(),
+                        len(str(col))
+                    )
+                    worksheet.set_column(idx, idx, min(max_len + 2, 50))
+        
+        return output.getvalue()
+    
+    except Exception as e:
+        logger.error(f"Error exporting to Excel: {e}")
+        raise
 
 
-def clean_dataframe_for_export(df: pd.DataFrame) -> pd.DataFrame:
+def create_download_button(data: bytes, 
+                           filename: str, 
+                           label: str = "📥 Download",
+                           mime: str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"):
     """
-    Clean DataFrame for export
+    Create download button for file
     
     Args:
-        df: Input DataFrame
+        data: File data as bytes
+        filename: Download filename
+        label: Button label
+        mime: MIME type
+    """
+    st.download_button(
+        label=label,
+        data=data,
+        file_name=filename,
+        mime=mime,
+        use_container_width=True
+    )
+
+
+# ==================== NEW: Dialog UI Helpers ====================
+
+def render_material_selector(key: str, 
+                             label: str = "Material",
+                             default_index: int = 0) -> Optional[int]:
+    """
+    Render product/material selector dropdown
+    
+    Args:
+        key: Unique key for widget
+        label: Label for dropdown
+        default_index: Default selection index
     
     Returns:
-        Cleaned DataFrame
+        Selected product ID or None
     """
-    export_df = df.copy()
+    products = get_products()
     
-    # Remove internal columns
-    internal_cols = ['id', 'delete_flag', 'created_by', 'updated_by']
-    export_df = export_df.drop(columns=internal_cols, errors='ignore')
+    if products.empty:
+        st.error("❌ No products found")
+        return None
     
-    # Clean column names
-    export_df.columns = [col.replace('_', ' ').title() for col in export_df.columns]
+    product_options = {
+        f"{row['name']} ({row['code']})": row['id']
+        for _, row in products.iterrows()
+    }
     
-    return export_df
+    selected = st.selectbox(
+        label,
+        options=list(product_options.keys()),
+        index=default_index,
+        key=key
+    )
+    
+    return product_options.get(selected)
 
 
-# ==================== Cache Decorators ====================
+def render_material_table(materials: pd.DataFrame,
+                          show_stock: bool = True,
+                          editable: bool = False) -> pd.DataFrame:
+    """
+    Render materials table (read-only or editable)
+    
+    Args:
+        materials: DataFrame with material data
+        show_stock: Whether to show stock column
+        editable: Whether table is editable
+    
+    Returns:
+        DataFrame (modified if editable)
+    """
+    if materials.empty:
+        st.info("ℹ️ No materials")
+        return materials
+    
+    # Prepare display columns
+    display_cols = ['material_name', 'material_code', 'material_type', 
+                   'quantity', 'uom', 'scrap_rate']
+    
+    if show_stock and 'current_stock' in materials.columns:
+        display_cols.append('current_stock')
+    
+    # Format display
+    display_df = materials[display_cols].copy()
+    
+    # Show table
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    return materials
 
-def cache_product_data(ttl: int = 300):
-    """Cache decorator for product data (5 min default)"""
-    def decorator(func):
-        return st.cache_data(ttl=ttl)(func)
-    return decorator
+
+def render_material_add_form(key_prefix: str,
+                             on_add_callback=None) -> Optional[Dict[str, Any]]:
+    """
+    Render add material inline form
+    
+    Args:
+        key_prefix: Prefix for widget keys
+        on_add_callback: Optional callback when material added
+    
+    Returns:
+        Material data dict if added, None otherwise
+    """
+    col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
+    
+    with col1:
+        material_id = render_material_selector(
+            key=f"{key_prefix}_material",
+            label="Material"
+        )
+    
+    with col2:
+        material_type = st.selectbox(
+            "Type",
+            ["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"],
+            key=f"{key_prefix}_type"
+        )
+    
+    with col3:
+        quantity = st.number_input(
+            "Quantity",
+            min_value=0.0001,
+            value=1.0,
+            step=0.1,
+            format="%.4f",
+            key=f"{key_prefix}_qty"
+        )
+    
+    with col4:
+        if material_id:
+            product = get_product_by_id(material_id)
+            uom = product['uom'] if product else 'PCS'
+        else:
+            uom = 'PCS'
+        st.text_input("UOM", value=uom, disabled=True, key=f"{key_prefix}_uom")
+    
+    with col5:
+        scrap_rate = st.number_input(
+            "Scrap %",
+            min_value=0.0,
+            max_value=100.0,
+            value=0.0,
+            step=0.5,
+            key=f"{key_prefix}_scrap"
+        )
+    
+    if st.button("➕ Add", key=f"{key_prefix}_add_btn", use_container_width=True):
+        if material_id:
+            material_data = {
+                'material_id': material_id,
+                'material_type': material_type,
+                'quantity': quantity,
+                'uom': uom,
+                'scrap_rate': scrap_rate
+            }
+            
+            if on_add_callback:
+                on_add_callback(material_data)
+            
+            return material_data
+    
+    return None
 
 
-def cache_resource_data(func):
-    """Cache decorator for resource data"""
-    return st.cache_resource(func)
+def show_toast(message: str, 
+               toast_type: str = "success",
+               icon: Optional[str] = None):
+    """
+    Show toast message
+    
+    Args:
+        message: Message to display
+        toast_type: Type (success, error, warning, info)
+        icon: Optional custom icon
+    """
+    if icon:
+        message = f"{icon} {message}"
+    
+    if toast_type == "success":
+        st.success(message)
+    elif toast_type == "error":
+        st.error(message)
+    elif toast_type == "warning":
+        st.warning(message)
+    else:
+        st.info(message)
+
+
+def render_confirmation_checkbox(key: str,
+                                 label: str = "I understand the consequences") -> bool:
+    """
+    Render confirmation checkbox
+    
+    Args:
+        key: Unique key for checkbox
+        label: Checkbox label
+    
+    Returns:
+        True if checked
+    """
+    return st.checkbox(label, key=key)
+
+
+def render_action_buttons(actions: List[Dict[str, Any]],
+                          columns: Optional[int] = None):
+    """
+    Render action buttons in columns
+    
+    Args:
+        actions: List of action dicts with {label, key, callback, type}
+        columns: Number of columns (default: len(actions))
+    """
+    if not actions:
+        return
+    
+    if columns is None:
+        columns = len(actions)
+    
+    cols = st.columns(columns)
+    
+    for idx, action in enumerate(actions):
+        with cols[idx % columns]:
+            button_type = action.get('type', 'secondary')
+            
+            if st.button(
+                action['label'],
+                key=action['key'],
+                type=button_type,
+                use_container_width=True
+            ):
+                if 'callback' in action:
+                    action['callback']()
+
+
+def render_step_indicator(current_step: int, total_steps: int):
+    """
+    Render step indicator for wizard
+    
+    Args:
+        current_step: Current step number (1-based)
+        total_steps: Total number of steps
+    """
+    steps = []
+    for i in range(1, total_steps + 1):
+        if i < current_step:
+            steps.append(f"✅ Step {i}")
+        elif i == current_step:
+            steps.append(f"🔵 **Step {i}**")
+        else:
+            steps.append(f"⭕ Step {i}")
+    
+    st.markdown(" → ".join(steps))
+
+
+def render_bom_summary(bom_info: Dict[str, Any]):
+    """
+    Render BOM information summary
+    
+    Args:
+        bom_info: Dictionary with BOM information
+    """
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("**Basic Info**")
+        st.write(f"Code: {bom_info.get('bom_code', 'N/A')}")
+        st.write(f"Name: {bom_info.get('bom_name', 'N/A')}")
+        st.write(f"Type: {bom_info.get('bom_type', 'N/A')}")
+    
+    with col2:
+        st.markdown("**Product**")
+        st.write(f"Product: {bom_info.get('product_name', 'N/A')}")
+        st.write(f"Output: {bom_info.get('output_qty', 0)} {bom_info.get('uom', 'PCS')}")
+        status = bom_info.get('status', 'N/A')
+        st.write(f"Status: {create_status_indicator(status)}")
+    
+    with col3:
+        st.markdown("**Details**")
+        st.write(f"Effective: {bom_info.get('effective_date', 'N/A')}")
+        st.write(f"Version: {bom_info.get('version', 1)}")
+        st.write(f"Materials: {bom_info.get('material_count', 0)}")
+
+
+def format_material_for_display(material: Dict[str, Any]) -> str:
+    """
+    Format material info for display
+    
+    Args:
+        material: Material dictionary
+    
+    Returns:
+        Formatted string
+    """
+    name = material.get('material_name', 'Unknown')
+    code = material.get('material_code', '')
+    qty = material.get('quantity', 0)
+    uom = material.get('uom', 'PCS')
+    
+    return f"{name} ({code}) - {qty} {uom}"
 
 
 # ==================== Constants ====================
