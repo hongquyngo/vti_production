@@ -293,49 +293,372 @@ def render_action_buttons(bom_id: int, bom_data: pd.Series):
 
 def export_bom(bom_id: int, bom_data: pd.Series):
     """
-    Export BOM to Excel
+    Export BOM to Excel with complete information (MINIMAL template)
+    
+    Includes:
+    - BOM header information (code, name, type, status, version)
+    - Output product details
+    - Materials table with formatting
+    - Summary statistics
+    - Notes section
+    - Creator information
+    - Generation timestamp
     
     Args:
-        bom_id: BOM ID
-        bom_data: BOM data
+        bom_id: BOM ID to export
+        bom_data: BOM data series from main table
     """
     try:
-        from utils.bom.common import export_to_excel, create_download_button
+        import pandas as pd
+        from io import BytesIO
+        from datetime import datetime
+        from utils.db import get_db_engine
         
-        # Get BOM details
+        # ==================== DATA COLLECTION ====================
+        
+        # Get full BOM data
+        bom_info = bom_manager.get_bom_info(bom_id)
         bom_details = bom_manager.get_bom_details(bom_id)
+        
+        # Validation
+        if not bom_info:
+            st.error("❌ BOM not found")
+            return
         
         if bom_details.empty:
             st.warning("⚠️ No materials to export")
             return
         
-        # Prepare export data
-        export_df = bom_details[[
-            'material_name', 'material_code', 'material_type',
-            'quantity', 'uom', 'scrap_rate'
-        ]].copy()
+        # ==================== CREATOR INFORMATION ====================
         
-        export_df.columns = [
-            'Material Name', 'Code', 'Type',
-            'Quantity', 'UOM', 'Scrap Rate (%)'
-        ]
+        # Get creator name with proper fallbacks
+        created_info = "N/A"
+        created_date = str(bom_info.get('created_date', ''))[:10] if bom_info.get('created_date') else 'Unknown'
         
-        # Export
-        excel_data = export_to_excel(
-            export_df,
-            sheet_name=f"BOM_{bom_data['bom_code']}"
-        )
+        if bom_info.get('created_by'):
+            try:
+                creator_query = f"""
+                    SELECT 
+                        COALESCE(
+                            CONCAT(e.first_name, ' ', e.last_name),
+                            u.username,
+                            'Unknown User'
+                        ) as full_name
+                    FROM users u
+                    LEFT JOIN employees e ON u.employee_id = e.id
+                    WHERE u.id = {bom_info['created_by']}
+                """
+                engine = get_db_engine()
+                creator_result = pd.read_sql(creator_query, engine)
+                
+                if not creator_result.empty:
+                    creator_name = creator_result.iloc[0]['full_name']
+                    if creator_name and creator_name not in ['Unknown User', 'None', '']:
+                        created_info = f"{creator_name} on {created_date}"
+                    else:
+                        created_info = f"User ID {bom_info['created_by']} on {created_date}"
+                else:
+                    created_info = f"User ID {bom_info['created_by']} on {created_date}"
+            except Exception as e:
+                logger.warning(f"Could not fetch creator info: {e}")
+                created_info = f"User ID {bom_info['created_by']} on {created_date}"
+        else:
+            created_info = f"System on {created_date}"
         
-        # Download button
+        # ==================== EXCEL GENERATION ====================
+        
+        output = BytesIO()
+        
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            worksheet = workbook.add_worksheet('BOM')
+            
+            # ==================== FORMAT DEFINITIONS ====================
+            
+            # Title format (large, bold, blue background)
+            header_format = workbook.add_format({
+                'bold': True,
+                'font_size': 14,
+                'align': 'center',
+                'valign': 'vcenter',
+                'bg_color': '#4472C4',
+                'font_color': 'white',
+                'border': 1
+            })
+            
+            # Section header format (bold, light blue)
+            section_format = workbook.add_format({
+                'bold': True,
+                'font_size': 11,
+                'align': 'left',
+                'valign': 'vcenter',
+                'bg_color': '#4472C4',
+                'font_color': 'white',
+                'border': 1
+            })
+            
+            # Label format (bold, gray background)
+            label_format = workbook.add_format({
+                'bold': True,
+                'align': 'left',
+                'valign': 'vcenter',
+                'bg_color': '#D9E1F2',
+                'border': 1
+            })
+            
+            # Value format (standard)
+            value_format = workbook.add_format({
+                'align': 'left',
+                'valign': 'vcenter',
+                'border': 1
+            })
+            
+            # Table header format (bold, centered, blue)
+            table_header_format = workbook.add_format({
+                'bold': True,
+                'align': 'center',
+                'valign': 'vcenter',
+                'bg_color': '#4472C4',
+                'font_color': 'white',
+                'border': 1
+            })
+            
+            # Table cell format (standard)
+            table_cell_format = workbook.add_format({
+                'align': 'left',
+                'valign': 'vcenter',
+                'border': 1
+            })
+            
+            # Number format (right-aligned, 4 decimals)
+            number_format = workbook.add_format({
+                'align': 'right',
+                'valign': 'vcenter',
+                'border': 1,
+                'num_format': '0.0000'
+            })
+            
+            # Percentage format (right-aligned, 2 decimals)
+            percent_format = workbook.add_format({
+                'align': 'right',
+                'valign': 'vcenter',
+                'border': 1,
+                'num_format': '0.00"%"'
+            })
+            
+            # Notes format (wrapped text)
+            notes_format = workbook.add_format({
+                'align': 'left',
+                'valign': 'top',
+                'border': 1,
+                'text_wrap': True
+            })
+            
+            # Footer format (small, italic)
+            footer_format = workbook.add_format({
+                'italic': True,
+                'font_size': 9,
+                'align': 'left',
+                'valign': 'vcenter',
+                'font_color': '#666666'
+            })
+            
+            # ==================== CONTENT GENERATION ====================
+            
+            row = 0  # Current row tracker
+            
+            # --- SECTION 1: TITLE ---
+            worksheet.merge_range(row, 0, row, 6, 'BILL OF MATERIALS', header_format)
+            worksheet.set_row(row, 25)
+            row += 2
+            
+            # --- SECTION 2: BOM INFORMATION ---
+            worksheet.merge_range(row, 0, row, 6, 'BOM INFORMATION', section_format)
+            row += 1
+            
+            # Code & Status
+            worksheet.write(row, 0, 'Code:', label_format)
+            worksheet.write(row, 1, bom_info['bom_code'], value_format)
+            worksheet.write(row, 3, 'Status:', label_format)
+            status_text = f"● {bom_info['status']}"
+            worksheet.write(row, 4, status_text, value_format)
+            row += 1
+            
+            # Name & Version
+            worksheet.write(row, 0, 'Name:', label_format)
+            worksheet.merge_range(row, 1, row, 2, bom_info['bom_name'], value_format)
+            worksheet.write(row, 3, 'Version:', label_format)
+            worksheet.write(row, 4, bom_info.get('version', 1), value_format)
+            row += 1
+            
+            # Type & Effective Date
+            worksheet.write(row, 0, 'Type:', label_format)
+            worksheet.write(row, 1, bom_info['bom_type'], value_format)
+            worksheet.write(row, 3, 'Effective Date:', label_format)
+            
+            eff_date = bom_info.get('effective_date', '')
+            if eff_date and not pd.isna(eff_date):
+                eff_date = str(eff_date)
+            else:
+                eff_date = '-'
+            worksheet.write(row, 4, eff_date, value_format)
+            row += 2
+            
+            # --- SECTION 3: OUTPUT PRODUCT ---
+            worksheet.merge_range(row, 0, row, 6, 'OUTPUT PRODUCT', section_format)
+            row += 1
+            
+            # Product
+            worksheet.write(row, 0, 'Product:', label_format)
+            product_text = f"{bom_info['product_name']} ({bom_info['product_code']})"
+            worksheet.merge_range(row, 1, row, 4, product_text, value_format)
+            row += 1
+            
+            # Quantity
+            worksheet.write(row, 0, 'Quantity:', label_format)
+            qty_text = f"{float(bom_info['output_qty']):.2f} {bom_info['uom']}"
+            worksheet.write(row, 1, qty_text, value_format)
+            row += 2
+            
+            # --- SECTION 4: CREATOR INFORMATION ---
+            worksheet.write(row, 0, 'Created:', label_format)
+            worksheet.merge_range(row, 1, row, 4, created_info, value_format)
+            row += 2
+            
+            # --- SECTION 5: MATERIALS TABLE ---
+            worksheet.merge_range(row, 0, row, 6, 'MATERIALS REQUIRED', section_format)
+            row += 1
+            
+            # Table headers
+            headers = ['No', 'Code', 'Material Name', 'Type', 'Quantity', 'UOM', 'Scrap %']
+            for col, header in enumerate(headers):
+                worksheet.write(row, col, header, table_header_format)
+            row += 1
+            
+            # Material rows
+            material_counts = {
+                'RAW_MATERIAL': 0,
+                'PACKAGING': 0,
+                'CONSUMABLE': 0
+            }
+            
+            for idx, material in bom_details.iterrows():
+                # Row number
+                worksheet.write(row, 0, idx + 1, table_cell_format)
+                
+                # Material code
+                worksheet.write(row, 1, material['material_code'], table_cell_format)
+                
+                # Material name
+                worksheet.write(row, 2, material['material_name'], table_cell_format)
+                
+                # Material type (shortened)
+                type_map = {
+                    'RAW_MATERIAL': 'RAW',
+                    'PACKAGING': 'PKG',
+                    'CONSUMABLE': 'CONS'
+                }
+                type_short = type_map.get(material['material_type'], material['material_type'])
+                worksheet.write(row, 3, type_short, table_cell_format)
+                
+                # Quantity (4 decimals)
+                worksheet.write(row, 4, float(material['quantity']), number_format)
+                
+                # UOM
+                worksheet.write(row, 5, material['uom'], table_cell_format)
+                
+                # Scrap rate (percentage)
+                worksheet.write(row, 6, float(material['scrap_rate']), percent_format)
+                
+                # Count materials by type
+                mat_type = material['material_type']
+                material_counts[mat_type] = material_counts.get(mat_type, 0) + 1
+                
+                row += 1
+            
+            row += 1
+            
+            # --- SECTION 6: SUMMARY ---
+            worksheet.merge_range(row, 0, row, 6, 'SUMMARY', section_format)
+            row += 1
+            
+            # Total materials
+            total_materials = len(bom_details)
+            worksheet.write(row, 0, '• Total Materials:', label_format)
+            worksheet.write(row, 1, total_materials, value_format)
+            row += 1
+            
+            # Raw materials count
+            worksheet.write(row, 0, '  - Raw Materials:', value_format)
+            worksheet.write(row, 1, material_counts['RAW_MATERIAL'], value_format)
+            row += 1
+            
+            # Packaging count
+            worksheet.write(row, 0, '  - Packaging:', value_format)
+            worksheet.write(row, 1, material_counts['PACKAGING'], value_format)
+            row += 1
+            
+            # Consumables count
+            worksheet.write(row, 0, '  - Consumables:', value_format)
+            worksheet.write(row, 1, material_counts['CONSUMABLE'], value_format)
+            row += 2
+            
+            # --- SECTION 7: NOTES (if available) ---
+            if bom_info.get('notes') and str(bom_info['notes']).strip():
+                worksheet.merge_range(row, 0, row, 6, 'NOTES', section_format)
+                row += 1
+                
+                # Write notes with text wrapping
+                worksheet.merge_range(row, 0, row + 2, 6, 
+                                    str(bom_info['notes']), notes_format)
+                worksheet.set_row(row, 45)
+                row += 3
+            
+            row += 1
+            
+            # --- SECTION 8: FOOTER ---
+            generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            generated_by = st.session_state.get('username', 'System')
+            footer_text = (f"Generated: {generated_time} by {generated_by} | "
+                          f"Document: BOM-{bom_info['bom_code']}-v{bom_info.get('version', 1)}")
+            
+            worksheet.merge_range(row, 0, row, 6, footer_text, footer_format)
+            
+            # ==================== COLUMN WIDTHS ====================
+            
+            worksheet.set_column('A:A', 18)  # Labels / No
+            worksheet.set_column('B:B', 12)  # Code
+            worksheet.set_column('C:C', 35)  # Material Name
+            worksheet.set_column('D:D', 8)   # Type
+            worksheet.set_column('E:E', 10)  # Quantity
+            worksheet.set_column('F:F', 8)   # UOM
+            worksheet.set_column('G:G', 10)  # Scrap %
+        
+        # ==================== FILE DOWNLOAD ====================
+        
+        # Get file bytes
+        excel_data = output.getvalue()
+        
+        # Generate filename
+        version = bom_info.get('version', 1)
+        date_str = datetime.now().strftime('%Y%m%d')
+        filename = f"BOM_{bom_info['bom_code']}_v{version}_{date_str}.xlsx"
+        
+        # Create download button
+        from utils.bom.common import create_download_button
+        
         create_download_button(
-            excel_data,
-            filename=f"BOM_{bom_data['bom_code']}.xlsx",
-            label=f"📥 Download {bom_data['bom_code']}"
+            data=excel_data,
+            filename=filename,
+            label=f"📥 Download {bom_info['bom_code']}"
         )
+        
+        st.success(f"✅ Excel file ready! ({len(bom_details)} materials)")
     
     except Exception as e:
-        logger.error(f"Error exporting BOM: {e}")
-        st.error(f"❌ Export error: {str(e)}")
+        logger.error(f"Error exporting BOM {bom_id}: {e}", exc_info=True)
+        st.error(f"❌ Export failed: {str(e)}")
+        st.info("💡 Please try again or contact support if the issue persists.")
 
 
 def render_active_dialog():
