@@ -1,6 +1,6 @@
 # utils/bom/dialogs/create.py
 """
-Create BOM Dialog
+Create BOM Dialog - FIXED BUTTON KEYS
 2-step wizard: Header information → Materials
 """
 
@@ -15,7 +15,6 @@ from utils.bom.common import (
     get_products,
     get_product_by_id,
     render_step_indicator,
-    render_material_selector,
     validate_quantity,
     validate_percentage
 )
@@ -149,7 +148,7 @@ def _render_step1_header(state: StateManager):
     col1, col2 = st.columns([3, 1])
     
     with col2:
-        if st.button("Next: Add Materials →", type="primary", use_container_width=True):
+        if st.button("Next: Add Materials →", type="primary", use_container_width=True, key="create_step1_next"):
             # Validate step 1
             errors = _validate_step1(bom_name, product_id, output_qty)
             
@@ -173,7 +172,7 @@ def _render_step1_header(state: StateManager):
                 st.rerun()
     
     with col1:
-        if st.button("❌ Cancel", use_container_width=True):
+        if st.button("❌ Cancel", use_container_width=True, key="create_step1_cancel"):
             state.close_dialog()
             st.rerun()
 
@@ -223,16 +222,16 @@ def _render_step2_materials(state: StateManager, manager: BOMManager):
     col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
-        if st.button("← Back to Information", use_container_width=True):
+        if st.button("← Back to Information", use_container_width=True, key="create_step2_back"):
             state.set_create_step(1)
             st.rerun()
     
     with col2:
-        if st.button("✅ Create BOM", type="primary", use_container_width=True):
+        if st.button("✅ Create BOM", type="primary", use_container_width=True, key="create_step2_create"):
             _handle_create_bom(state, manager)
     
     with col3:
-        if st.button("❌ Cancel", use_container_width=True):
+        if st.button("❌ Cancel", use_container_width=True, key="create_step2_cancel"):
             state.close_dialog()
             st.rerun()
 
@@ -280,7 +279,7 @@ def _render_material_list(materials: list, state: StateManager):
             st.text(f"{material['scrap_rate']:.2f}%")
         
         with col6:
-            if st.button("🗑️", key=f"remove_mat_{idx}", help="Remove"):
+            if st.button("🗑️", key=f"create_remove_mat_{idx}", help="Remove"):
                 state.remove_create_material(idx)
                 st.rerun()
 
@@ -309,7 +308,7 @@ def _render_add_material_form(state: StateManager):
         selected_material = st.selectbox(
             "Material",
             options=list(product_options.keys()),
-            key="add_material_select",
+            key="create_add_material_select",
             label_visibility="collapsed"
         )
         
@@ -319,7 +318,7 @@ def _render_add_material_form(state: StateManager):
         material_type = st.selectbox(
             "Type",
             options=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"],
-            key="add_material_type",
+            key="create_add_material_type",
             label_visibility="collapsed"
         )
     
@@ -330,7 +329,7 @@ def _render_add_material_form(state: StateManager):
             value=1.0,
             step=0.1,
             format="%.4f",
-            key="add_material_qty",
+            key="create_add_material_qty",
             label_visibility="collapsed"
         )
     
@@ -340,7 +339,7 @@ def _render_add_material_form(state: StateManager):
             mat_uom = product['uom'] if product else 'PCS'
         else:
             mat_uom = 'PCS'
-        st.text_input("UOM", value=mat_uom, disabled=True, key="add_material_uom")
+        st.text_input("UOM", value=mat_uom, disabled=True, key="create_add_material_uom")
     
     with col5:
         scrap_rate = st.number_input(
@@ -349,11 +348,11 @@ def _render_add_material_form(state: StateManager):
             max_value=100.0,
             value=0.0,
             step=0.5,
-            key="add_material_scrap",
+            key="create_add_material_scrap",
             label_visibility="collapsed"
         )
     
-    if st.button("➕ Add Material", key="add_material_btn", use_container_width=True):
+    if st.button("➕ Add Material", key="create_add_material_btn", use_container_width=True):
         if not material_id:
             st.error("❌ Please select a material")
             return

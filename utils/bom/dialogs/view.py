@@ -1,6 +1,6 @@
 # utils/bom/dialogs/view.py
 """
-View BOM Details Dialog
+View BOM Details Dialog - FIXED VERSION
 Read-only display of BOM information with action buttons
 """
 
@@ -13,7 +13,6 @@ from utils.bom.state import StateManager
 from utils.bom.common import (
     create_status_indicator,
     format_number,
-    render_material_table,
     render_bom_summary
 )
 
@@ -38,7 +37,7 @@ def show_view_dialog(bom_id: int):
         
         if not bom_info:
             st.error("❌ BOM not found")
-            if st.button("Close"):
+            if st.button("Close", key=f"view_notfound_close_{bom_id}"):
                 st.rerun()
             return
         
@@ -70,7 +69,7 @@ def show_view_dialog(bom_id: int):
         st.markdown("---")
         
         # Close button
-        if st.button("✓ Close", use_container_width=True):
+        if st.button("✔ Close", use_container_width=True, key=f"view_main_close_{bom_id}"):
             state.close_dialog()
             st.rerun()
     
@@ -78,7 +77,7 @@ def show_view_dialog(bom_id: int):
         logger.error(f"Error in view dialog: {e}")
         st.error(f"❌ Error loading BOM details: {str(e)}")
         
-        if st.button("Close"):
+        if st.button("Close", key=f"view_error_close_{bom_id}"):
             st.rerun()
 
 
@@ -94,19 +93,19 @@ def _render_action_buttons(bom_id: int, bom_info: dict, state: StateManager):
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.button("✏️ Edit", use_container_width=True):
+        if st.button("✏️ Edit", use_container_width=True, key=f"view_edit_{bom_id}"):
             state.close_dialog()
             state.open_dialog(state.DIALOG_EDIT, bom_id)
             st.rerun()
     
     with col2:
-        if st.button("🔄 Change Status", use_container_width=True):
+        if st.button("🔄 Change Status", use_container_width=True, key=f"view_status_{bom_id}"):
             state.close_dialog()
             state.open_dialog(state.DIALOG_STATUS, bom_id)
             st.rerun()
     
     with col3:
-        if st.button("🔍 Where Used", use_container_width=True):
+        if st.button("🔍 Where Used", use_container_width=True, key=f"view_whereused_{bom_id}"):
             # Pre-fill product for where used search
             state.set_where_used_product(bom_info['product_id'])
             state.close_dialog()
@@ -114,7 +113,7 @@ def _render_action_buttons(bom_id: int, bom_info: dict, state: StateManager):
             st.rerun()
     
     with col4:
-        if st.button("🗑️ Delete", use_container_width=True, type="secondary"):
+        if st.button("🗑️ Delete", use_container_width=True, type="secondary", key=f"view_delete_{bom_id}"):
             state.close_dialog()
             state.open_dialog(state.DIALOG_DELETE, bom_id)
             st.rerun()

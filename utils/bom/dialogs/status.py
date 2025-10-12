@@ -1,6 +1,6 @@
 # utils/bom/dialogs/status.py
 """
-Change BOM Status Dialog
+Change BOM Status Dialog - FIXED BUTTON KEYS
 Status transition with validation
 """
 
@@ -31,7 +31,8 @@ def show_status_dialog(bom_id: int):
         
         if not bom_info:
             st.error("❌ BOM not found")
-            if st.button("Close"):
+            if st.button("Close", key=f"status_notfound_close_{bom_id}"):
+                state.close_dialog()
                 st.rerun()
             return
         
@@ -65,7 +66,7 @@ def show_status_dialog(bom_id: int):
         if not allowed_statuses:
             st.warning(f"⚠️ No status transitions available from {current_status}")
             
-            if st.button("Close", use_container_width=True):
+            if st.button("Close", use_container_width=True, key=f"status_notransition_close_{bom_id}"):
                 state.close_dialog()
                 st.rerun()
             return
@@ -101,12 +102,13 @@ def show_status_dialog(bom_id: int):
                 "✅ Update Status",
                 type="primary",
                 disabled=not can_transition,
-                use_container_width=True
+                use_container_width=True,
+                key=f"status_update_{bom_id}"
             ):
                 _handle_status_update(bom_id, new_status, bom_info, state, manager)
         
         with col2:
-            if st.button("❌ Cancel", use_container_width=True):
+            if st.button("❌ Cancel", use_container_width=True, key=f"status_cancel_{bom_id}"):
                 state.close_dialog()
                 st.rerun()
     
@@ -114,7 +116,8 @@ def show_status_dialog(bom_id: int):
         logger.error(f"Error in status dialog: {e}")
         st.error(f"❌ Error: {str(e)}")
         
-        if st.button("Close"):
+        if st.button("Close", key=f"status_exception_close_{bom_id}"):
+            state.close_dialog()
             st.rerun()
 
 

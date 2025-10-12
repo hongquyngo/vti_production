@@ -1,6 +1,6 @@
 # utils/bom/dialogs/delete.py
 """
-Delete BOM Confirmation Dialog
+Delete BOM Confirmation Dialog - FIXED IMPORT
 Simple confirmation dialog with safety checks
 """
 
@@ -9,7 +9,7 @@ import streamlit as st
 
 from utils.bom.manager import BOMManager, BOMException, BOMValidationError, BOMNotFoundError
 from utils.bom.state import StateManager
-from utils.bom.common import show_toast, render_confirmation_checkbox
+from utils.bom.common import render_confirmation_checkbox
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def show_delete_dialog(bom_id: int):
         
         if not bom_info:
             st.error("❌ BOM not found")
-            if st.button("Close"):
+            if st.button("Close", key=f"delete_notfound_close_{bom_id}"):
                 st.rerun()
             return
         
@@ -62,7 +62,8 @@ def show_delete_dialog(bom_id: int):
         if not can_delete:
             st.error(f"❌ {error_msg}")
             
-            if st.button("Close", use_container_width=True):
+            if st.button("Close", use_container_width=True, key=f"delete_error_close_{bom_id}"):
+                state.close_dialog()
                 st.rerun()
             return
         
@@ -82,12 +83,13 @@ def show_delete_dialog(bom_id: int):
                 "🗑️ Confirm Delete",
                 type="primary",
                 disabled=not confirmed,
-                use_container_width=True
+                use_container_width=True,
+                key=f"delete_confirm_btn_{bom_id}"
             ):
                 _handle_delete(bom_id, bom_info, state, manager)
         
         with col2:
-            if st.button("❌ Cancel", use_container_width=True):
+            if st.button("❌ Cancel", use_container_width=True, key=f"delete_cancel_{bom_id}"):
                 state.close_dialog()
                 st.rerun()
     
@@ -95,7 +97,8 @@ def show_delete_dialog(bom_id: int):
         logger.error(f"Error in delete dialog: {e}")
         st.error(f"❌ Error: {str(e)}")
         
-        if st.button("Close"):
+        if st.button("Close", key=f"delete_exception_close_{bom_id}"):
+            state.close_dialog()
             st.rerun()
 
 

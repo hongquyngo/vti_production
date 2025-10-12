@@ -1,6 +1,6 @@
 # utils/bom/state.py
 """
-Centralized State Management for BOM Module
+Centralized State Management for BOM Module - CLEANED VERSION
 Manages all UI state, dialog states, and user interactions
 """
 
@@ -385,51 +385,3 @@ class StateManager:
     def get_last_action(self) -> Dict[str, Any]:
         """Get last action info"""
         return st.session_state.get(self.LAST_ACTION, {})
-    
-    def clear_last_action(self):
-        """Clear last action"""
-        st.session_state[self.LAST_ACTION] = {
-            'type': None,
-            'bom_id': None,
-            'bom_code': None,
-            'timestamp': None
-        }
-    
-    # ==================== Utility Methods ====================
-    
-    def reset_all(self):
-        """Nuclear option - reset all BOM-related state"""
-        keys_to_clear = [
-            self.CURRENT_BOM_ID,
-            self.DIALOG_OPEN,
-            self.DIALOG_DATA,
-            self.UI_FLAGS,
-            self.LAST_ACTION
-        ]
-        
-        for key in keys_to_clear:
-            if key in st.session_state:
-                del st.session_state[key]
-        
-        self.init_state()
-        logger.warning("All BOM state reset")
-    
-    def get_state_summary(self) -> Dict[str, Any]:
-        """
-        Get summary of all state (for debugging)
-        
-        Returns:
-            Dictionary with state summary
-        """
-        return {
-            'current_bom_id': self.get_current_bom(),
-            'open_dialog': self.get_open_dialog(),
-            'loading': self.is_loading(),
-            'last_action': self.get_last_action(),
-            'dialog_states': {
-                'create_step': self.get_create_step(),
-                'create_materials_count': len(self.get_create_materials()),
-                'edit_tab': self.get_edit_tab(),
-                'has_unsaved': self.has_unsaved_changes()
-            }
-        }

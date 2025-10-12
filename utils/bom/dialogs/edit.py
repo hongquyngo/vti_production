@@ -1,6 +1,6 @@
 # utils/bom/dialogs/edit.py
 """
-Edit BOM Dialog
+Edit BOM Dialog - FIXED BUTTON KEYS
 Tabbed editor: BOM Info / Materials
 Only DRAFT BOMs can be edited
 """
@@ -40,7 +40,8 @@ def show_edit_dialog(bom_id: int):
         
         if not bom_info:
             st.error("❌ BOM not found")
-            if st.button("Close"):
+            if st.button("Close", key=f"edit_notfound_close_{bom_id}"):
+                state.close_dialog()
                 st.rerun()
             return
         
@@ -49,7 +50,7 @@ def show_edit_dialog(bom_id: int):
             st.error(f"❌ Only DRAFT BOMs can be edited. Current status: {bom_info['status']}")
             st.info("💡 Change status to DRAFT first if you need to edit.")
             
-            if st.button("Close", use_container_width=True):
+            if st.button("Close", use_container_width=True, key=f"edit_nondraft_close_{bom_id}"):
                 state.close_dialog()
                 st.rerun()
             return
@@ -60,7 +61,7 @@ def show_edit_dialog(bom_id: int):
         # Tabs
         current_tab = state.get_edit_tab()
         
-        tab1, tab2 = st.tabs(["📝 BOM Information", "🧱 Materials"])
+        tab1, tab2 = st.tabs(["📄 BOM Information", "🧱 Materials"])
         
         with tab1:
             if current_tab != 'info':
@@ -76,7 +77,8 @@ def show_edit_dialog(bom_id: int):
         logger.error(f"Error in edit dialog: {e}")
         st.error(f"❌ Error: {str(e)}")
         
-        if st.button("Close"):
+        if st.button("Close", key=f"edit_exception_close_{bom_id}"):
+            state.close_dialog()
             st.rerun()
 
 
@@ -137,7 +139,7 @@ def _render_info_tab(bom_id: int, bom_info: dict, state: StateManager, manager: 
     col1, col2 = st.columns([3, 1])
     
     with col2:
-        if st.button("💾 Save Changes", type="primary", use_container_width=True):
+        if st.button("💾 Save Changes", type="primary", use_container_width=True, key=f"edit_info_save_{bom_id}"):
             _handle_update_header(
                 bom_id, new_name, new_output_qty, 
                 new_effective_date, new_notes,
@@ -145,7 +147,7 @@ def _render_info_tab(bom_id: int, bom_info: dict, state: StateManager, manager: 
             )
     
     with col1:
-        if st.button("✓ Close", use_container_width=True):
+        if st.button("✔ Close", use_container_width=True, key=f"edit_info_close_{bom_id}"):
             state.close_dialog()
             st.rerun()
 
@@ -167,8 +169,8 @@ def _render_materials_tab(bom_id: int, materials: pd.DataFrame,
     if not materials.empty:
         st.markdown(f"**Current Materials ({len(materials)}):**")
         
-        for _, material in materials.iterrows():
-            _render_material_row(bom_id, material, state, manager)
+        for idx, material in materials.iterrows():
+            _render_material_row(bom_id, idx, material, state, manager)
         
         st.markdown("---")
     else:
@@ -181,18 +183,19 @@ def _render_materials_tab(bom_id: int, materials: pd.DataFrame,
     st.markdown("---")
     
     # Close button
-    if st.button("✓ Close", use_container_width=True):
+    if st.button("✔ Close", use_container_width=True, key=f"edit_materials_close_{bom_id}"):
         state.close_dialog()
         st.rerun()
 
 
-def _render_material_row(bom_id: int, material: pd.Series, 
+def _render_material_row(bom_id: int, idx: int, material: pd.Series, 
                          state: StateManager, manager: BOMManager):
     """
     Render single material row with inline edit
     
     Args:
         bom_id: BOM ID
+        idx: Row index
         material: Material data
         state: State manager
         manager: BOM manager
@@ -215,7 +218,7 @@ def _render_material_row(bom_id: int, material: pd.Series,
                 value=float(material['quantity']),
                 step=0.1,
                 format="%.4f",
-                key=f"mat_qty_{bom_id}_{mat_id}",
+                key=f"mat_qty_{bom_id}_{mat_id}_{idx}",
                 label_visibility="collapsed"
             )
         
@@ -229,7 +232,7 @@ def _render_material_row(bom_id: int, material: pd.Series,
                 max_value=100.0,
                 value=float(material['scrap_rate']),
                 step=0.5,
-                key=f"mat_scrap_{bom_id}_{mat_id}",
+                key=f"mat_scrap_{bom_id}_{mat_id}_{idx}",
                 label_visibility="collapsed"
             )
         
@@ -242,14 +245,14 @@ def _render_material_row(bom_id: int, material: pd.Series,
                 scrap_changed = abs(new_scrap - float(material['scrap_rate'])) > 0.01
                 
                 if qty_changed or scrap_changed:
-                    if st.button("💾", key=f"save_{bom_id}_{mat_id}", help="Save"):
+                    if st.button("💾", key=f"save_{bom_id}_{mat_id}_{idx}", help="Save"):
                         _handle_update_material(
                             bom_id, mat_id, new_qty, new_scrap,
                             state, manager
                         )
             
             with col_delete:
-                if st.button("🗑️", key=f"del_{bom_id}_{mat_id}", help="Delete"):
+                if st.button("🗑️", key=f"del_{bom_id}_{mat_id}_{idx}", help="Delete"):
                     _handle_delete_material(bom_id, mat_id, state, manager)
         
         st.markdown("---")

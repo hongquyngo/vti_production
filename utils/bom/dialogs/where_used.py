@@ -1,6 +1,6 @@
 # utils/bom/dialogs/where_used.py
 """
-Where Used Analysis Dialog
+Where Used Analysis Dialog - FIXED BUTTON KEYS
 Find which BOMs use a specific product/material
 """
 
@@ -49,7 +49,8 @@ def show_where_used_dialog():
         search_clicked = st.button(
             "🔍 Search",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
+            key="where_used_search_btn"
         )
     
     st.markdown("---")
@@ -67,7 +68,7 @@ def show_where_used_dialog():
     st.markdown("---")
     
     # Close button
-    if st.button("✓ Close", use_container_width=True):
+    if st.button("✔ Close", use_container_width=True, key="where_used_close_btn"):
         state.close_dialog()
         st.rerun()
 
@@ -179,7 +180,7 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
         col1, col2 = st.columns([1, 3])
         
         with col1:
-            if st.button("👁️ View BOM", use_container_width=True):
+            if st.button("👁️ View BOM", use_container_width=True, key=f"where_used_view_{selected_bom_id}"):
                 # Close where used dialog and open view dialog
                 state.close_dialog()
                 state.open_dialog(state.DIALOG_VIEW, selected_bom_id)
@@ -190,7 +191,7 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
     # Export option
     st.markdown("### Export Results")
     
-    if st.button("📥 Export to Excel", use_container_width=True):
+    if st.button("📥 Export to Excel", use_container_width=True, key="where_used_export_btn"):
         _export_results(results, state)
 
 
