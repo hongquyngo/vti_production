@@ -213,7 +213,6 @@ def _render_step2_materials(state: StateManager, manager: BOMManager):
     st.markdown("---")
     
     # Add material form
-    st.markdown("**Add Material:**")
     _render_add_material_form(state)
     
     st.markdown("---")
@@ -286,11 +285,28 @@ def _render_material_list(materials: list, state: StateManager):
 
 def _render_add_material_form(state: StateManager):
     """
-    Render add material form
+    Render add material form with clear labels
     
     Args:
         state: State manager
     """
+    st.markdown("**Add Material:**")
+    
+    # ✅ ADD HEADER ROW FOR CLARITY
+    col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
+    
+    with col1:
+        st.markdown("**Material**")
+    with col2:
+        st.markdown("**Type**")
+    with col3:
+        st.markdown("**Quantity**")
+    with col4:
+        st.markdown("**UOM**")
+    with col5:
+        st.markdown("**Scrap %**")
+    
+    # Input row
     col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
     
     with col1:
@@ -309,7 +325,8 @@ def _render_add_material_form(state: StateManager):
             "Material",
             options=list(product_options.keys()),
             key="create_add_material_select",
-            label_visibility="collapsed"
+            label_visibility="collapsed",  # Hide redundant label since we have header
+            help="Select the material/component to add"
         )
         
         material_id = product_options.get(selected_material)
@@ -319,18 +336,20 @@ def _render_add_material_form(state: StateManager):
             "Type",
             options=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"],
             key="create_add_material_type",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            help="Material classification type"
         )
     
     with col3:
         quantity = st.number_input(
-            "Qty",
+            "Quantity",
             min_value=0.0001,
             value=1.0,
             step=0.1,
             format="%.4f",
             key="create_add_material_qty",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            help="Required quantity per output unit"
         )
     
     with col4:
@@ -339,19 +358,27 @@ def _render_add_material_form(state: StateManager):
             mat_uom = product['uom'] if product else 'PCS'
         else:
             mat_uom = 'PCS'
-        st.text_input("UOM", value=mat_uom, disabled=True, key="create_add_material_uom")
+        st.text_input(
+            "UOM", 
+            value=mat_uom, 
+            disabled=True, 
+            key="create_add_material_uom",
+            label_visibility="collapsed"
+        )
     
     with col5:
         scrap_rate = st.number_input(
-            "Scrap %",
+            "Scrap Rate (%)",
             min_value=0.0,
             max_value=100.0,
             value=0.0,
             step=0.5,
             key="create_add_material_scrap",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            help="Expected waste/scrap percentage (0-100%)"  # ✅ Clear explanation
         )
     
+    # Add button
     if st.button("➕ Add Material", key="create_add_material_btn", use_container_width=True):
         if not material_id:
             st.error("❌ Please select a material")
@@ -369,7 +396,7 @@ def _render_add_material_form(state: StateManager):
             return
         
         if not validate_percentage(scrap_rate):
-            st.error("❌ Invalid scrap rate")
+            st.error("❌ Invalid scrap rate (must be 0-100%)")
             return
         
         # Add material
@@ -384,7 +411,6 @@ def _render_add_material_form(state: StateManager):
         state.add_create_material(material_data)
         st.success("✅ Material added!")
         st.rerun()
-
 
 def _validate_step1(bom_name: str, product_id: int, output_qty: float) -> list:
     """

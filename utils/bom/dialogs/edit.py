@@ -202,6 +202,24 @@ def _render_material_row(bom_id: int, idx: int, material: pd.Series,
     """
     mat_id = material['material_id']
     
+    # ✅ Show header for first row only
+    if idx == 0:
+        col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
+        
+        with col1:
+            st.markdown("**Material Name**")
+        with col2:
+            st.markdown("**Type**")
+        with col3:
+            st.markdown("**Quantity**")
+        with col4:
+            st.markdown("**UOM**")
+        with col5:
+            st.markdown("**Scrap %**")
+        with col6:
+            st.markdown("**Actions**")
+    
+    # Data row
     with st.container():
         col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
         
@@ -219,21 +237,23 @@ def _render_material_row(bom_id: int, idx: int, material: pd.Series,
                 step=0.1,
                 format="%.4f",
                 key=f"mat_qty_{bom_id}_{mat_id}_{idx}",
-                label_visibility="collapsed"
-            )
+                label_visibility="collapsed",
+                help="Quantity per output unit"
+        )
         
         with col4:
             st.text(material['uom'])
         
         with col5:
             new_scrap = st.number_input(
-                "Scrap",
+                "Scrap %",
                 min_value=0.0,
                 max_value=100.0,
                 value=float(material['scrap_rate']),
                 step=0.5,
                 key=f"mat_scrap_{bom_id}_{mat_id}_{idx}",
-                label_visibility="collapsed"
+                label_visibility="collapsed",
+                help="Expected waste percentage"
             )
         
         with col6:
@@ -245,23 +265,22 @@ def _render_material_row(bom_id: int, idx: int, material: pd.Series,
                 scrap_changed = abs(new_scrap - float(material['scrap_rate'])) > 0.01
                 
                 if qty_changed or scrap_changed:
-                    if st.button("💾", key=f"save_{bom_id}_{mat_id}_{idx}", help="Save"):
+                    if st.button("💾", key=f"save_{bom_id}_{mat_id}_{idx}", help="Save changes"):
                         _handle_update_material(
                             bom_id, mat_id, new_qty, new_scrap,
                             state, manager
                         )
             
             with col_delete:
-                if st.button("🗑️", key=f"del_{bom_id}_{mat_id}_{idx}", help="Delete"):
+                if st.button("🗑️", key=f"del_{bom_id}_{mat_id}_{idx}", help="Delete material"):
                     _handle_delete_material(bom_id, mat_id, state, manager)
         
         st.markdown("---")
 
-
 def _render_add_material_section(bom_id: int, current_materials: pd.DataFrame,
                                  state: StateManager, manager: BOMManager):
     """
-    Render add material section
+    Render add material section with clear labels
     
     Args:
         bom_id: BOM ID
@@ -269,6 +288,23 @@ def _render_add_material_section(bom_id: int, current_materials: pd.DataFrame,
         state: State manager
         manager: BOM manager
     """
+    st.markdown("**Add New Material:**")
+    
+    # ✅ ADD HEADER ROW
+    col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
+    
+    with col1:
+        st.markdown("**Material**")
+    with col2:
+        st.markdown("**Type**")
+    with col3:
+        st.markdown("**Quantity**")
+    with col4:
+        st.markdown("**UOM**")
+    with col5:
+        st.markdown("**Scrap %**")
+    
+    # Input row
     col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
     
     with col1:
@@ -287,7 +323,8 @@ def _render_add_material_section(bom_id: int, current_materials: pd.DataFrame,
             "Material",
             options=list(product_options.keys()),
             key=f"edit_add_mat_{bom_id}",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            help="Select material to add to BOM"
         )
         
         material_id = product_options.get(selected)
@@ -297,18 +334,20 @@ def _render_add_material_section(bom_id: int, current_materials: pd.DataFrame,
             "Type",
             options=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"],
             key=f"edit_add_type_{bom_id}",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            help="Material type classification"
         )
     
     with col3:
         quantity = st.number_input(
-            "Qty",
+            "Quantity",
             min_value=0.0001,
             value=1.0,
             step=0.1,
             format="%.4f",
             key=f"edit_add_qty_{bom_id}",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            help="Quantity required"
         )
     
     with col4:
@@ -317,17 +356,24 @@ def _render_add_material_section(bom_id: int, current_materials: pd.DataFrame,
             mat_uom = product['uom'] if product else 'PCS'
         else:
             mat_uom = 'PCS'
-        st.text_input("UOM", value=mat_uom, disabled=True, key=f"edit_add_uom_{bom_id}")
+        st.text_input(
+            "UOM", 
+            value=mat_uom, 
+            disabled=True, 
+            key=f"edit_add_uom_{bom_id}",
+            label_visibility="collapsed"
+        )
     
     with col5:
         scrap = st.number_input(
-            "Scrap %",
+            "Scrap Rate (%)",
             min_value=0.0,
             max_value=100.0,
             value=0.0,
             step=0.5,
             key=f"edit_add_scrap_{bom_id}",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            help="Expected waste percentage (0-100%)"  # ✅ Clear help text
         )
     
     if st.button("➕ Add Material", key=f"edit_add_btn_{bom_id}", use_container_width=True):
@@ -339,11 +385,11 @@ def _render_add_material_section(bom_id: int, current_materials: pd.DataFrame,
         
         # Validate
         if not validate_quantity(quantity):
-            st.error("❌ Invalid quantity")
+            st.error("❌ Invalid quantity (must be > 0)")
             return
         
         if not validate_percentage(scrap):
-            st.error("❌ Invalid scrap rate")
+            st.error("❌ Invalid scrap rate (must be 0-100%)")
             return
         
         # Add material
@@ -352,7 +398,6 @@ def _render_add_material_section(bom_id: int, current_materials: pd.DataFrame,
             quantity, mat_uom, scrap,
             state, manager
         )
-
 
 def _handle_update_header(bom_id: int, name: str, qty: float, 
                           eff_date: date, notes: str,
