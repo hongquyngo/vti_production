@@ -7,6 +7,7 @@ Core production order CRUD and status management
 import logging
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
+import math
 import pandas as pd
 from sqlalchemy import text
 
@@ -91,7 +92,21 @@ class ProductionManager:
             return pd.DataFrame()
     
     def create_order(self, order_data: Dict[str, Any]) -> str:
-        """Create new production order"""
+        """Create new production order with validation"""
+        # Validate required fields
+        required = ['bom_header_id', 'product_id', 'planned_qty', 'warehouse_id', 
+                   'target_warehouse_id', 'scheduled_date']
+        missing = [f for f in required if f not in order_data or order_data[f] is None]
+        if missing:
+            raise ValueError(f"Missing required fields: {', '.join(missing)}")
+        
+        # Validate values
+        if order_data['planned_qty'] <= 0:
+            raise ValueError("Planned quantity must be positive")
+        
+        if order_data['warehouse_id'] == order_data['target_warehouse_id']:
+            raise ValueError("Source and target warehouse must be different")
+        
         with self.engine.begin() as conn:
             try:
                 # Generate order number
@@ -142,12 +157,16 @@ class ProductionManager:
                 # Create material requirements
                 self._create_material_requirements(conn, order_id, order_data)
                 
-                logger.info(f"Created production order {order_no}")
+                logger.info(f"Created production order {order_no} (ID: {order_id})")
                 return order_no
                 
             except Exception as e:
-                logger.error(f"Error creating order: {e}")
-                raise
+                logger.error(f"Error creating order: {e}", extra={
+                    'bom_id': order_data.get('bom_header_id'),
+                    'product_id': order_data.get('product_id'),
+                    'quantity': order_data.get('planned_qty')
+                })
+                raise ValueError(f"Failed to create production order: {str(e)}") from e
     
     def get_order_details(self, order_id: int) -> Optional[Dict[str, Any]]:
         """Get order details"""
@@ -157,9 +176,7 @@ class ProductionManager:
                 p.name as product_name,
                 b.bom_name,
                 b.bom_type,
-                o.warehouse_id,
                 w1.name as warehouse_name,
-                o.target_warehouse_id,
                 w2.name as target_warehouse_name
             FROM manufacturing_orders o
             JOIN products p ON o.product_id = p.id
@@ -173,7 +190,7 @@ class ProductionManager:
             result = pd.read_sql(query, self.engine, params=(order_id,))
             return result.iloc[0].to_dict() if not result.empty else None
         except Exception as e:
-            logger.error(f"Error getting order details: {e}")
+            logger.error(f"Error getting order details for order {order_id}: {e}")
             return None
     
     def get_order_materials(self, order_id: int) -> pd.DataFrame:
@@ -196,12 +213,21 @@ class ProductionManager:
         try:
             return pd.read_sql(query, self.engine, params=(order_id,))
         except Exception as e:
-            logger.error(f"Error getting order materials: {e}")
+            logger.error(f"Error getting order materials for order {order_id}: {e}")
             return pd.DataFrame()
     
     def calculate_material_requirements(self, bom_id: int, 
                                        quantity: float) -> pd.DataFrame:
-        """Calculate material requirements"""
+        """
+        Calculate material requirements for production order
+        
+        Args:
+            bom_id: ID of the BOM header
+            quantity: Planned production quantity
+            
+        Returns:
+            DataFrame with material requirements including scrap rate
+        """
         query = """
             SELECT 
                 d.material_id,
@@ -218,11 +244,11 @@ class ProductionManager:
         try:
             return pd.read_sql(query, self.engine, params=(quantity, bom_id))
         except Exception as e:
-            logger.error(f"Error calculating requirements: {e}")
+            logger.error(f"Error calculating requirements for BOM {bom_id}: {e}")
             return pd.DataFrame()
     
     def get_active_boms(self, bom_type: Optional[str] = None) -> pd.DataFrame:
-        """Get active BOMs for order creation - Production domain independent"""
+        """Get active BOMs for order creation"""
         query = """
             SELECT 
                 h.id,
@@ -252,7 +278,7 @@ class ProductionManager:
             return pd.DataFrame()
     
     def get_bom_info(self, bom_id: int) -> Optional[Dict]:
-        """Get BOM info for order creation - Production domain independent"""
+        """Get BOM info for order creation"""
         query = """
             SELECT 
                 h.id,
@@ -272,12 +298,16 @@ class ProductionManager:
             result = pd.read_sql(query, self.engine, params=(bom_id,))
             return result.iloc[0].to_dict() if not result.empty else None
         except Exception as e:
-            logger.error(f"Error getting BOM info: {e}")
+            logger.error(f"Error getting BOM info for BOM {bom_id}: {e}")
             return None
     
     def update_order_status(self, order_id: int, new_status: str,
                           user_id: Optional[int] = None) -> bool:
-        """Update order status"""
+        """Update order status with validation"""
+        valid_statuses = ['DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']
+        if new_status not in valid_statuses:
+            raise ValueError(f"Invalid status: {new_status}")
+        
         with self.engine.begin() as conn:
             try:
                 query = text("""
@@ -294,11 +324,17 @@ class ProductionManager:
                     'order_id': order_id
                 })
                 
-                return result.rowcount > 0
+                success = result.rowcount > 0
+                if success:
+                    logger.info(f"Updated order {order_id} status to {new_status}")
+                else:
+                    logger.warning(f"No order found with ID {order_id}")
+                
+                return success
                 
             except Exception as e:
                 logger.error(f"Error updating order status: {e}")
-                return False
+                raise
     
     def _generate_order_number(self, conn) -> str:
         """Generate unique order number"""
@@ -315,19 +351,12 @@ class ProductionManager:
         
         result = conn.execute(query, {'pattern': f'MO-{timestamp}-%'})
         next_num = result.fetchone()['next_num']
-        
-        # Convert to int for format string
-        if next_num is None:
-            next_num = 1
-        else:
-            next_num = int(next_num)
+        next_num = int(next_num) if next_num is not None else 1
         
         return f"MO-{timestamp}-{next_num:04d}"
     
     def _create_material_requirements(self, conn, order_id: int, order_data: Dict):
         """Create material requirements from BOM"""
-        import math
-        
         bom_query = text("""
             SELECT 
                 d.material_id,
@@ -347,6 +376,7 @@ class ProductionManager:
         })
         
         for mat in materials:
+            # Calculate required quantity with scrap
             production_cycles = float(mat['planned_qty']) / float(mat['output_qty'])
             base_material = production_cycles * float(mat['quantity'])
             with_scrap = base_material * (1 + float(mat['scrap_rate']) / 100)

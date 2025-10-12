@@ -1,7 +1,7 @@
 # utils/production/materials.py
 """
 Material Issue, Return, and Production Completion Logic
-Complex FEFO issue logic and material return validation
+FEFO-based material issuing and production completion
 """
 
 import logging
@@ -17,12 +17,17 @@ logger = logging.getLogger(__name__)
 
 
 def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
-    """Issue materials for production using FEFO"""
+    """
+    Issue materials for production using FEFO (First Expiry, First Out)
+    
+    Raises:
+        ValueError: If order not found, invalid status, or insufficient stock
+    """
     engine = get_db_engine()
     
     with engine.begin() as conn:
         try:
-            # Get order info
+            # Get order info with lock
             order = _get_order_info(conn, order_id)
             if not order:
                 raise ValueError(f"Order {order_id} not found")
@@ -77,7 +82,7 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
             """)
             conn.execute(status_query, {'order_id': order_id})
             
-            logger.info(f"Issued materials for order {order_id}")
+            logger.info(f"Issued materials for order {order_id}, issue no: {issue_no}")
             
             return {
                 'issue_no': issue_no,
@@ -86,13 +91,24 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
             }
             
         except Exception as e:
-            logger.error(f"Error issuing materials: {e}")
+            logger.error(f"Error issuing materials for order {order_id}: {e}")
             raise
 
 
 def return_materials(order_id: int, returns: List[Dict],
                     reason: str, user_id: int) -> Dict[str, Any]:
-    """Return unused materials with validation"""
+    """
+    Return unused materials with validation
+    
+    Args:
+        order_id: Production order ID
+        returns: List of return items with issue_detail_id, quantity, etc.
+        reason: Return reason code
+        user_id: User performing the return
+        
+    Returns:
+        Dictionary with return_no and details
+    """
     engine = get_db_engine()
     
     with engine.begin() as conn:
@@ -202,7 +218,7 @@ def return_materials(order_id: int, returns: List[Dict],
                     'condition': ret.get('condition', 'GOOD')
                 })
             
-            logger.info(f"Returned materials for order {order_id}")
+            logger.info(f"Returned materials for order {order_id}, return no: {return_no}")
             
             return {
                 'return_no': return_no,
@@ -211,7 +227,7 @@ def return_materials(order_id: int, returns: List[Dict],
             }
             
         except Exception as e:
-            logger.error(f"Error returning materials: {e}")
+            logger.error(f"Error returning materials for order {order_id}: {e}")
             raise
 
 
@@ -219,7 +235,21 @@ def complete_production(order_id: int, produced_qty: float,
                        batch_no: str, quality_status: str,
                        notes: str, user_id: int,
                        expired_date: Optional[date] = None) -> Dict[str, Any]:
-    """Complete production order"""
+    """
+    Complete production order and create finished goods receipt
+    
+    Args:
+        order_id: Production order ID
+        produced_qty: Actual quantity produced
+        batch_no: Batch number for finished goods
+        quality_status: Quality check result (PASSED/FAILED/PENDING)
+        notes: Production notes
+        user_id: User completing the order
+        expired_date: Optional expiry date for finished goods
+        
+    Returns:
+        Dictionary with receipt details
+    """
     engine = get_db_engine()
     
     with engine.begin() as conn:
@@ -231,6 +261,9 @@ def complete_production(order_id: int, produced_qty: float,
             
             if order['status'] != 'IN_PROGRESS':
                 raise ValueError(f"Cannot complete {order['status']} order")
+            
+            if produced_qty <= 0:
+                raise ValueError("Produced quantity must be positive")
             
             # Generate receipt number
             receipt_no = _generate_receipt_number(conn)
@@ -310,7 +343,7 @@ def complete_production(order_id: int, produced_qty: float,
                 'order_id': order_id
             })
             
-            logger.info(f"Completed production order {order_id}")
+            logger.info(f"Completed production order {order_id}, receipt no: {receipt_no}")
             
             return {
                 'receipt_no': receipt_no,
@@ -321,12 +354,12 @@ def complete_production(order_id: int, produced_qty: float,
             }
             
         except Exception as e:
-            logger.error(f"Error completing production: {e}")
+            logger.error(f"Error completing production for order {order_id}: {e}")
             raise
 
 
 def get_returnable_materials(order_id: int) -> pd.DataFrame:
-    """Get materials that can be returned"""
+    """Get materials that can be returned for an order"""
     engine = get_db_engine()
     
     query = """
@@ -362,14 +395,14 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
     try:
         return pd.read_sql(query, engine, params=(order_id,))
     except Exception as e:
-        logger.error(f"Error getting returnable materials: {e}")
+        logger.error(f"Error getting returnable materials for order {order_id}: {e}")
         return pd.DataFrame()
 
 
 # ==================== Helper Functions ====================
 
 def _get_order_info(conn, order_id: int) -> Optional[Dict]:
-    """Get order information"""
+    """Get order information with lock"""
     query = text("""
         SELECT o.*, b.bom_type, p.shelf_life
         FROM manufacturing_orders o
@@ -405,7 +438,12 @@ def _get_pending_materials(conn, order_id: int) -> pd.DataFrame:
 def _issue_material_fefo(conn, issue_id: int, order_id: int,
                          material: pd.Series, required_qty: float,
                          warehouse_id: int, group_id: str, user_id: int) -> List[Dict]:
-    """Issue single material using FEFO"""
+    """
+    Issue single material using FEFO (First Expiry, First Out)
+    
+    Raises:
+        ValueError: If insufficient stock available
+    """
     # Get available batches
     batch_query = text("""
         SELECT 
@@ -531,9 +569,14 @@ def _issue_material_fefo(conn, issue_id: int, order_id: int,
         
         remaining -= take_qty
     
+    # ⭐ CRITICAL FIX: Raise error if insufficient stock
     if remaining > 0:
-        logger.warning(f"Insufficient stock for material {material['material_id']}: "
-                     f"short by {remaining} {material['uom']}")
+        raise ValueError(
+            f"Insufficient stock for material '{material['material_name']}': "
+            f"Required {required_qty} {material['uom']}, "
+            f"Available {required_qty - remaining} {material['uom']}, "
+            f"Short by {remaining} {material['uom']}"
+        )
     
     return issued_details
 
@@ -584,12 +627,7 @@ def _generate_issue_number(conn) -> str:
     
     result = conn.execute(query, {'pattern': f'MI-{timestamp}-%'})
     next_num = result.fetchone()['next_num']
-    
-    # Convert to int for format string
-    if next_num is None:
-        next_num = 1
-    else:
-        next_num = int(next_num)
+    next_num = int(next_num) if next_num is not None else 1
     
     return f"MI-{timestamp}-{next_num:04d}"
 
@@ -609,12 +647,7 @@ def _generate_return_number(conn) -> str:
     
     result = conn.execute(query, {'pattern': f'MR-{timestamp}-%'})
     next_num = result.fetchone()['next_num']
-    
-    # Convert to int for format string
-    if next_num is None:
-        next_num = 1
-    else:
-        next_num = int(next_num)
+    next_num = int(next_num) if next_num is not None else 1
     
     return f"MR-{timestamp}-{next_num:04d}"
 
@@ -634,11 +667,6 @@ def _generate_receipt_number(conn) -> str:
     
     result = conn.execute(query, {'pattern': f'PR-{timestamp}-%'})
     next_num = result.fetchone()['next_num']
-    
-    # Convert to int for format string
-    if next_num is None:
-        next_num = 1
-    else:
-        next_num = int(next_num)
+    next_num = int(next_num) if next_num is not None else 1
     
     return f"PR-{timestamp}-{next_num:04d}"

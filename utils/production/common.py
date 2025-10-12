@@ -7,7 +7,7 @@ Formatting, validation, UI helpers, and date utilities
 import logging
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, Tuple, Union, Any
+from typing import Dict, Tuple, Union
 from io import BytesIO
 
 import pandas as pd
@@ -22,6 +22,9 @@ class SystemConstants:
     """System constants"""
     DEFAULT_PAGE_SIZE = 100
     EXPIRY_WARNING_DAYS = 30
+    MAX_SCRAP_RATE = 50.0
+    QUANTITY_DECIMALS = 4
+    CURRENCY_DECIMALS = 0  # VND
 
 
 # ==================== Number Formatting ====================
@@ -124,16 +127,34 @@ class UIHelpers:
     
     @staticmethod
     def confirm_action(message: str, key: str) -> bool:
-        """Show confirmation dialog"""
-        col1, col2, col3 = st.columns([3, 1, 1])
-        with col1:
-            st.warning(f"⚠️ {message}")
-        with col2:
-            confirm = st.button("✓ Confirm", key=f"{key}_yes", type="primary")
-        with col3:
-            cancel = st.button("✗ Cancel", key=f"{key}_no")
+        """
+        Show confirmation dialog with proper Streamlit state handling
+        Returns True only after user confirms
+        """
+        # Initialize confirmation state
+        confirm_key = f"{key}_confirm_state"
+        if confirm_key not in st.session_state:
+            st.session_state[confirm_key] = False
         
-        return confirm and not cancel
+        # If already confirmed, reset and return True
+        if st.session_state[confirm_key]:
+            st.session_state[confirm_key] = False
+            return True
+        
+        # Show confirmation UI
+        st.warning(f"⚠️ {message}")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("✓ Confirm", key=f"{key}_yes", type="primary", use_container_width=True):
+                st.session_state[confirm_key] = True
+                st.rerun()
+        
+        with col2:
+            if st.button("✗ Cancel", key=f"{key}_no", use_container_width=True):
+                return False
+        
+        return False
 
 
 def create_status_indicator(status: str) -> str:
@@ -152,7 +173,10 @@ def create_status_indicator(status: str) -> str:
         'LOW': '🔵',
         'NORMAL': '🟡',
         'HIGH': '🟠',
-        'URGENT': '🔴'
+        'URGENT': '🔴',
+        'GOOD': '✅',
+        'DAMAGED': '⚠️',
+        'EXPIRED': '❌'
     }
     
     icon = status_icons.get(status.upper(), '⚪')
@@ -172,10 +196,29 @@ def export_to_excel(dataframes: Union[pd.DataFrame, Dict[str, pd.DataFrame]],
     try:
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             for sheet_name, df in dataframes.items():
-                df.to_excel(writer, sheet_name=sheet_name, index=include_index)
+                # Sanitize sheet name (max 31 chars, no special chars)
+                safe_name = sheet_name[:31].replace('[', '').replace(']', '')
+                df.to_excel(writer, sheet_name=safe_name, index=include_index)
         
         return output.getvalue()
     
     except Exception as e:
         logger.error(f"Error exporting to Excel: {e}")
         raise
+
+
+# ==================== Validation Helpers ====================
+
+def validate_positive_number(value: Union[int, float], field_name: str) -> None:
+    """Validate that a number is positive"""
+    if value <= 0:
+        raise ValueError(f"{field_name} must be positive")
+
+
+def validate_required_fields(data: Dict, required_fields: list) -> None:
+    """Validate that required fields are present and not None"""
+    missing = [field for field in required_fields 
+               if field not in data or data[field] is None]
+    
+    if missing:
+        raise ValueError(f"Missing required fields: {', '.join(missing)}")
