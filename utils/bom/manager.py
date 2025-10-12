@@ -1,7 +1,6 @@
 # utils/bom/manager.py
 """
-Bill of Materials (BOM) Management
-BOM CRUD operations, validation, and analysis
+Bill of Materials (BOM) Management - Complete CRUD
 """
 
 import logging
@@ -15,11 +14,32 @@ from ..db import get_db_engine
 logger = logging.getLogger(__name__)
 
 
+# ==================== Custom Exceptions ====================
+
+class BOMException(Exception):
+    """Base exception for BOM operations"""
+    pass
+
+
+class BOMValidationError(BOMException):
+    """Validation error"""
+    pass
+
+
+class BOMNotFoundError(BOMException):
+    """BOM not found"""
+    pass
+
+
+# ==================== BOM Manager ====================
+
 class BOMManager:
-    """BOM Management for Production"""
+    """Complete BOM Management with CRUD operations"""
     
     def __init__(self):
         self.engine = get_db_engine()
+    
+    # ==================== READ Operations ====================
     
     def get_boms(self, bom_type: Optional[str] = None,
                  status: Optional[str] = None,
@@ -38,9 +58,14 @@ class BOMManager:
                 h.status,
                 h.version,
                 h.effective_date,
+                h.notes,
                 COUNT(DISTINCT d.id) as material_count,
-                (SELECT COUNT(*) FROM manufacturing_orders mo 
-                 WHERE mo.bom_header_id = h.id) as usage_count,
+                COALESCE(
+                    (SELECT COUNT(*) FROM manufacturing_orders mo 
+                     WHERE mo.bom_header_id = h.id 
+                     AND mo.delete_flag = 0), 
+                    0
+                ) as usage_count,
                 h.created_date
             FROM bom_headers h
             JOIN products p ON h.product_id = p.id
@@ -48,45 +73,174 @@ class BOMManager:
             WHERE h.delete_flag = 0
         """
         
-        params = []
+        params = {}
         
         if bom_type:
-            query += " AND h.bom_type = %s"
-            params.append(bom_type)
+            query += " AND h.bom_type = :bom_type"
+            params['bom_type'] = bom_type
         
         if status:
-            query += " AND h.status = %s"
-            params.append(status)
+            query += " AND h.status = :status"
+            params['status'] = status
         
         if search:
-            query += " AND (h.bom_code LIKE %s OR h.bom_name LIKE %s OR p.name LIKE %s)"
-            search_pattern = f"%{search}%"
-            params.extend([search_pattern, search_pattern, search_pattern])
+            query += """ AND (
+                h.bom_code LIKE :search 
+                OR h.bom_name LIKE :search 
+                OR p.name LIKE :search
+            )"""
+            params['search'] = f"%{search}%"
         
         query += """ 
             GROUP BY h.id, h.bom_code, h.bom_name, h.bom_type, h.product_id,
                      p.name, h.output_qty, h.uom, h.status, h.version,
-                     h.effective_date, h.created_date
+                     h.effective_date, h.notes, h.created_date
             ORDER BY h.created_date DESC
         """
         
         try:
-            return pd.read_sql(query, self.engine, 
-                             params=tuple(params) if params else None)
+            with self.engine.connect() as conn:
+                result = conn.execute(text(query), params)
+                df = pd.DataFrame(result.fetchall(), columns=result.keys())
+                return df
         except Exception as e:
             logger.error(f"Error getting BOMs: {e}")
-            return pd.DataFrame()
+            raise BOMException(f"Failed to retrieve BOMs: {str(e)}")
     
-    def get_active_boms(self, bom_type: Optional[str] = None) -> pd.DataFrame:
-        """Get active BOMs only"""
-        return self.get_boms(bom_type=bom_type, status='ACTIVE')
+    def get_bom_info(self, bom_id: int) -> Optional[Dict]:
+        """Get BOM header information"""
+        query = text("""
+            SELECT 
+                h.*,
+                p.name as product_name,
+                p.pt_code as product_code,
+                COALESCE(
+                    (SELECT COUNT(*) FROM manufacturing_orders mo 
+                     WHERE mo.bom_header_id = h.id 
+                     AND mo.delete_flag = 0), 
+                    0
+                ) as total_usage,
+                COALESCE(
+                    (SELECT COUNT(*) FROM manufacturing_orders mo 
+                     WHERE mo.bom_header_id = h.id 
+                     AND mo.status IN ('CONFIRMED', 'IN_PROGRESS')
+                     AND mo.delete_flag = 0), 
+                    0
+                ) as active_orders
+            FROM bom_headers h
+            JOIN products p ON h.product_id = p.id
+            WHERE h.id = :bom_id AND h.delete_flag = 0
+        """)
+        
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {'bom_id': bom_id})
+                row = result.fetchone()
+                if row:
+                    return dict(row._mapping)
+                return None
+        except Exception as e:
+            logger.error(f"Error getting BOM info: {e}")
+            raise BOMException(f"Failed to get BOM info: {str(e)}")
+    
+    def get_bom_details(self, bom_id: int) -> pd.DataFrame:
+        """Get BOM materials"""
+        query = text("""
+            SELECT 
+                d.id,
+                d.bom_header_id,
+                d.material_id,
+                d.material_type,
+                d.quantity,
+                d.uom,
+                d.scrap_rate,
+                d.notes,
+                p.name as material_name,
+                p.pt_code as material_code,
+                p.uom as material_uom,
+                COALESCE(
+                    (SELECT SUM(ih.remain) 
+                     FROM inventory_histories ih 
+                     WHERE ih.product_id = d.material_id 
+                     AND ih.remain > 0 
+                     AND ih.delete_flag = 0), 
+                    0
+                ) as current_stock
+            FROM bom_details d
+            JOIN products p ON d.material_id = p.id
+            WHERE d.bom_header_id = :bom_id
+            ORDER BY d.material_type, p.name
+        """)
+        
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {'bom_id': bom_id})
+                df = pd.DataFrame(result.fetchall(), columns=result.keys())
+                return df
+        except Exception as e:
+            logger.error(f"Error getting BOM details: {e}")
+            raise BOMException(f"Failed to get BOM materials: {str(e)}")
+    
+    def get_where_used(self, product_id: int) -> pd.DataFrame:
+        """Get BOMs where product is used as material"""
+        query = text("""
+            SELECT 
+                h.id as bom_id,
+                h.bom_code,
+                h.bom_name,
+                h.status as bom_status,
+                h.bom_type,
+                p.name as output_product_name,
+                d.material_type,
+                d.quantity,
+                d.uom,
+                d.scrap_rate
+            FROM bom_details d
+            JOIN bom_headers h ON d.bom_header_id = h.id
+            JOIN products p ON h.product_id = p.id
+            WHERE d.material_id = :product_id 
+                AND h.delete_flag = 0
+            ORDER BY h.status DESC, h.bom_name
+        """)
+        
+        try:
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {'product_id': product_id})
+                df = pd.DataFrame(result.fetchall(), columns=result.keys())
+                return df
+        except Exception as e:
+            logger.error(f"Error getting where used: {e}")
+            raise BOMException(f"Failed to get where used: {str(e)}")
+    
+    # ==================== CREATE Operations ====================
     
     def create_bom(self, bom_data: Dict) -> str:
-        """Create new BOM"""
+        """
+        Create new BOM with materials
+        
+        Args:
+            bom_data: {
+                'bom_name': str,
+                'bom_type': str,
+                'product_id': int,
+                'output_qty': float,
+                'uom': str,
+                'effective_date': date,
+                'notes': str,
+                'materials': List[Dict],
+                'created_by': int
+            }
+        
+        Returns:
+            BOM code
+        """
         conn = self.engine.connect()
         trans = conn.begin()
         
         try:
+            # Validate input
+            self._validate_bom_data(bom_data)
+            
             # Generate BOM code
             bom_code = self._generate_bom_code(conn, bom_data['bom_type'])
             
@@ -120,25 +274,43 @@ class BOMManager:
             # Insert materials if provided
             if 'materials' in bom_data and bom_data['materials']:
                 for material in bom_data['materials']:
-                    self._add_material(conn, bom_id, material)
+                    self._add_material_internal(conn, bom_id, material)
             
             trans.commit()
-            logger.info(f"Created BOM {bom_code}")
+            logger.info(f"Created BOM {bom_code} (ID: {bom_id})")
             return bom_code
             
         except Exception as e:
             trans.rollback()
             logger.error(f"Error creating BOM: {e}")
-            raise
+            raise BOMException(f"Failed to create BOM: {str(e)}")
         finally:
             conn.close()
     
     def add_materials(self, bom_id: int, materials: List[Dict]) -> bool:
-        """Add materials to existing BOM"""
+        """
+        Add materials to existing BOM
+        
+        Args:
+            bom_id: BOM ID
+            materials: List of material dicts
+        """
         with self.engine.begin() as conn:
             try:
+                # Check BOM exists and is editable
+                self._check_bom_editable(conn, bom_id)
+                
+                # Get existing materials
+                existing = self.get_bom_details(bom_id)
+                
                 for material in materials:
-                    self._add_material(conn, bom_id, material)
+                    # Check duplicate
+                    if not existing.empty and material['material_id'] in existing['material_id'].values:
+                        raise BOMValidationError(
+                            f"Material ID {material['material_id']} already exists in BOM"
+                        )
+                    
+                    self._add_material_internal(conn, bom_id, material)
                 
                 logger.info(f"Added {len(materials)} materials to BOM {bom_id}")
                 return True
@@ -147,90 +319,166 @@ class BOMManager:
                 logger.error(f"Error adding materials: {e}")
                 raise
     
-    def remove_material(self, bom_id: int, material_id: int) -> bool:
-        """Remove material from BOM"""
+    # ==================== UPDATE Operations ====================
+    
+    def update_bom_header(self, bom_id: int, updates: Dict) -> bool:
+        """
+        Update BOM header information
+        
+        Args:
+            bom_id: BOM ID
+            updates: {
+                'bom_name': str (optional),
+                'output_qty': float (optional),
+                'effective_date': date (optional),
+                'notes': str (optional),
+                'updated_by': int
+            }
+        """
         with self.engine.begin() as conn:
             try:
-                # Check if BOM is in use
-                if self._is_bom_in_use(conn, bom_id):
-                    raise ValueError("Cannot modify BOM - currently in use")
+                # Check BOM exists and is editable
+                self._check_bom_editable(conn, bom_id)
                 
-                query = text("""
-                    DELETE FROM bom_details
+                # Build update query dynamically
+                update_fields = []
+                params = {'bom_id': bom_id}
+                
+                if 'bom_name' in updates:
+                    update_fields.append("bom_name = :bom_name")
+                    params['bom_name'] = updates['bom_name']
+                
+                if 'output_qty' in updates:
+                    update_fields.append("output_qty = :output_qty")
+                    params['output_qty'] = updates['output_qty']
+                
+                if 'effective_date' in updates:
+                    update_fields.append("effective_date = :effective_date")
+                    params['effective_date'] = updates['effective_date']
+                
+                if 'notes' in updates:
+                    update_fields.append("notes = :notes")
+                    params['notes'] = updates['notes']
+                
+                if not update_fields:
+                    return True  # Nothing to update
+                
+                # Always update updated_by and updated_date
+                update_fields.append("updated_by = :updated_by")
+                update_fields.append("updated_date = NOW()")
+                params['updated_by'] = updates.get('updated_by', 1)
+                
+                query = text(f"""
+                    UPDATE bom_headers
+                    SET {', '.join(update_fields)}
+                    WHERE id = :bom_id AND delete_flag = 0
+                """)
+                
+                result = conn.execute(query, params)
+                
+                if result.rowcount == 0:
+                    raise BOMNotFoundError(f"BOM {bom_id} not found")
+                
+                logger.info(f"Updated BOM header {bom_id}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error updating BOM header: {e}")
+                raise
+    
+    def update_material(self, bom_id: int, material_id: int, updates: Dict) -> bool:
+        """
+        Update material in BOM
+        
+        Args:
+            bom_id: BOM ID
+            material_id: Material/Product ID
+            updates: {
+                'quantity': float (optional),
+                'scrap_rate': float (optional),
+                'notes': str (optional)
+            }
+        """
+        with self.engine.begin() as conn:
+            try:
+                # Check BOM exists and is editable
+                self._check_bom_editable(conn, bom_id)
+                
+                # Build update query
+                update_fields = []
+                params = {
+                    'bom_id': bom_id,
+                    'material_id': material_id
+                }
+                
+                if 'quantity' in updates:
+                    if updates['quantity'] <= 0:
+                        raise BOMValidationError("Quantity must be greater than 0")
+                    update_fields.append("quantity = :quantity")
+                    params['quantity'] = updates['quantity']
+                
+                if 'scrap_rate' in updates:
+                    if updates['scrap_rate'] < 0 or updates['scrap_rate'] > 100:
+                        raise BOMValidationError("Scrap rate must be between 0 and 100")
+                    update_fields.append("scrap_rate = :scrap_rate")
+                    params['scrap_rate'] = updates['scrap_rate']
+                
+                if 'notes' in updates:
+                    update_fields.append("notes = :notes")
+                    params['notes'] = updates['notes']
+                
+                if not update_fields:
+                    return True
+                
+                query = text(f"""
+                    UPDATE bom_details
+                    SET {', '.join(update_fields)}
                     WHERE bom_header_id = :bom_id 
                         AND material_id = :material_id
                 """)
                 
-                result = conn.execute(query, {
-                    'bom_id': bom_id,
-                    'material_id': material_id
-                })
+                result = conn.execute(query, params)
                 
-                return result.rowcount > 0
+                if result.rowcount == 0:
+                    raise BOMValidationError(
+                        f"Material {material_id} not found in BOM {bom_id}"
+                    )
+                
+                logger.info(f"Updated material {material_id} in BOM {bom_id}")
+                return True
                 
             except Exception as e:
-                logger.error(f"Error removing material: {e}")
-                return False
-    
-    def get_bom_info(self, bom_id: int) -> Optional[Dict]:
-        """Get BOM header information"""
-        query = """
-            SELECT 
-                h.*,
-                p.name as product_name,
-                p.pt_code as product_code,
-                (SELECT COUNT(*) FROM manufacturing_orders mo 
-                 WHERE mo.bom_header_id = h.id) as total_usage,
-                (SELECT COUNT(*) FROM manufacturing_orders mo 
-                 WHERE mo.bom_header_id = h.id 
-                 AND mo.status IN ('CONFIRMED', 'IN_PROGRESS')) as active_orders
-            FROM bom_headers h
-            JOIN products p ON h.product_id = p.id
-            WHERE h.id = %s AND h.delete_flag = 0
-        """
-        
-        try:
-            result = pd.read_sql(query, self.engine, params=(bom_id,))
-            return result.iloc[0].to_dict() if not result.empty else None
-        except Exception as e:
-            logger.error(f"Error getting BOM info: {e}")
-            return None
-    
-    def get_bom_details(self, bom_id: int) -> pd.DataFrame:
-        """Get BOM materials"""
-        query = """
-            SELECT 
-                d.*,
-                p.name as material_name,
-                p.pt_code as material_code,
-                p.uom as material_uom,
-                COALESCE(
-                    (SELECT SUM(ih.remain) 
-                     FROM inventory_histories ih 
-                     WHERE ih.product_id = d.material_id 
-                     AND ih.remain > 0 
-                     AND ih.delete_flag = 0), 
-                    0
-                ) as current_stock
-            FROM bom_details d
-            JOIN products p ON d.material_id = p.id
-            WHERE d.bom_header_id = %s
-            ORDER BY d.material_type, p.name
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, params=(bom_id,))
-        except Exception as e:
-            logger.error(f"Error getting BOM details: {e}")
-            return pd.DataFrame()
+                logger.error(f"Error updating material: {e}")
+                raise
     
     def update_bom_status(self, bom_id: int, new_status: str, 
                          updated_by: Optional[int] = None) -> bool:
-        """Update BOM status"""
+        """
+        Update BOM status with validation
+        
+        Args:
+            bom_id: BOM ID
+            new_status: New status (DRAFT, ACTIVE, INACTIVE)
+            updated_by: User ID
+        """
         with self.engine.begin() as conn:
             try:
-                # Validate BOM has materials if activating
+                # Get current status
+                bom_info = self.get_bom_info(bom_id)
+                if not bom_info:
+                    raise BOMNotFoundError(f"BOM {bom_id} not found")
+                
+                current_status = bom_info['status']
+                
+                # Validate status transition
+                if not self._is_valid_status_transition(current_status, new_status):
+                    raise BOMValidationError(
+                        f"Invalid status transition: {current_status} → {new_status}"
+                    )
+                
+                # Additional validation for ACTIVE status
                 if new_status == 'ACTIVE':
+                    # Check has materials
                     check_query = text("""
                         SELECT COUNT(*) as count 
                         FROM bom_details 
@@ -239,7 +487,16 @@ class BOMManager:
                     
                     result = conn.execute(check_query, {'bom_id': bom_id})
                     if result.scalar() == 0:
-                        raise ValueError("Cannot activate BOM without materials")
+                        raise BOMValidationError(
+                            "Cannot activate BOM without materials"
+                        )
+                
+                # Additional validation for INACTIVE status
+                if new_status == 'INACTIVE':
+                    if bom_info['active_orders'] > 0:
+                        raise BOMValidationError(
+                            f"Cannot deactivate BOM with {bom_info['active_orders']} active orders"
+                        )
                 
                 # Update status
                 query = text("""
@@ -256,89 +513,69 @@ class BOMManager:
                     'bom_id': bom_id
                 })
                 
-                return result.rowcount > 0
+                if result.rowcount == 0:
+                    raise BOMNotFoundError(f"BOM {bom_id} not found")
+                
+                logger.info(f"Updated BOM {bom_id} status: {current_status} → {new_status}")
+                return True
                 
             except Exception as e:
                 logger.error(f"Error updating BOM status: {e}")
                 raise
     
-    def copy_bom(self, source_bom_id: int, new_name: str, 
-                 created_by: Optional[int] = None) -> str:
-        """Copy existing BOM"""
-        conn = self.engine.connect()
-        trans = conn.begin()
-        
-        try:
-            # Get source BOM
-            source = self.get_bom_info(source_bom_id)
-            if not source:
-                raise ValueError(f"BOM {source_bom_id} not found")
-            
-            # Generate new code
-            new_code = self._generate_bom_code(conn, source['bom_type'])
-            
-            # Copy header
-            header_query = text("""
-                INSERT INTO bom_headers (
-                    bom_code, bom_name, bom_type, product_id,
-                    output_qty, uom, status, version,
-                    effective_date, notes, created_by, created_date
-                )
-                SELECT 
-                    :new_code, :new_name, bom_type, product_id,
-                    output_qty, uom, 'DRAFT', 1,
-                    CURDATE(), 
-                    CONCAT('Copied from ', bom_code),
-                    :created_by, NOW()
-                FROM bom_headers
-                WHERE id = :source_id
-            """)
-            
-            result = conn.execute(header_query, {
-                'new_code': new_code,
-                'new_name': new_name,
-                'created_by': created_by,
-                'source_id': source_bom_id
-            })
-            
-            new_bom_id = result.lastrowid
-            
-            # Copy details
-            detail_query = text("""
-                INSERT INTO bom_details (
-                    bom_header_id, material_id, material_type,
-                    quantity, uom, scrap_rate, notes
-                )
-                SELECT 
-                    :new_bom_id, material_id, material_type,
-                    quantity, uom, scrap_rate, notes
-                FROM bom_details
-                WHERE bom_header_id = :source_id
-            """)
-            
-            conn.execute(detail_query, {
-                'new_bom_id': new_bom_id,
-                'source_id': source_bom_id
-            })
-            
-            trans.commit()
-            logger.info(f"Copied BOM to {new_code}")
-            return new_code
-            
-        except Exception as e:
-            trans.rollback()
-            logger.error(f"Error copying BOM: {e}")
-            raise
-        finally:
-            conn.close()
+    # ==================== DELETE Operations ====================
     
-    def delete_bom(self, bom_id: int, deleted_by: Optional[int] = None) -> bool:
-        """Soft delete BOM"""
+    def remove_material(self, bom_id: int, material_id: int) -> bool:
+        """Remove material from BOM"""
         with self.engine.begin() as conn:
             try:
+                # Check BOM is editable
+                self._check_bom_editable(conn, bom_id)
+                
+                # Delete material
+                query = text("""
+                    DELETE FROM bom_details
+                    WHERE bom_header_id = :bom_id 
+                        AND material_id = :material_id
+                """)
+                
+                result = conn.execute(query, {
+                    'bom_id': bom_id,
+                    'material_id': material_id
+                })
+                
+                if result.rowcount == 0:
+                    raise BOMValidationError(
+                        f"Material {material_id} not found in BOM {bom_id}"
+                    )
+                
+                logger.info(f"Removed material {material_id} from BOM {bom_id}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error removing material: {e}")
+                raise
+    
+    def delete_bom(self, bom_id: int, deleted_by: Optional[int] = None) -> bool:
+        """
+        Soft delete BOM
+        
+        Args:
+            bom_id: BOM ID
+            deleted_by: User ID
+        """
+        with self.engine.begin() as conn:
+            try:
+                # Check BOM exists
+                bom_info = self.get_bom_info(bom_id)
+                if not bom_info:
+                    raise BOMNotFoundError(f"BOM {bom_id} not found")
+                
                 # Check if BOM is in use
-                if self._is_bom_in_use(conn, bom_id):
-                    raise ValueError("Cannot delete BOM - currently in use")
+                if bom_info['total_usage'] > 0:
+                    raise BOMValidationError(
+                        f"Cannot delete BOM - used in {bom_info['total_usage']} manufacturing orders"
+                    )
                 
                 # Soft delete
                 query = text("""
@@ -354,16 +591,32 @@ class BOMManager:
                     'deleted_by': deleted_by
                 })
                 
-                return result.rowcount > 0
+                if result.rowcount == 0:
+                    raise BOMNotFoundError(f"BOM {bom_id} not found")
+                
+                logger.info(f"Deleted BOM {bom_id} ({bom_info['bom_code']})")
+                return True
                 
             except Exception as e:
                 logger.error(f"Error deleting BOM: {e}")
                 raise
     
-    def validate_bom_materials(self, bom_id: int) -> Dict:
-        """Validate BOM materials"""
+    # ==================== Validation ====================
+    
+    def validate_bom(self, bom_id: int) -> Dict:
+        """
+        Comprehensive BOM validation
+        
+        Returns:
+            {
+                'valid': bool,
+                'errors': List[str],
+                'warnings': List[str]
+            }
+        """
         try:
-            details = self.get_bom_details(bom_id)
+            bom_info = self.get_bom_info(bom_id)
+            bom_details = self.get_bom_details(bom_id)
             
             validation = {
                 'valid': True,
@@ -371,29 +624,43 @@ class BOMManager:
                 'warnings': []
             }
             
-            if details.empty:
+            # Check BOM exists
+            if not bom_info:
+                validation['valid'] = False
+                validation['errors'].append("BOM not found")
+                return validation
+            
+            # Check has materials
+            if bom_details.empty:
                 validation['valid'] = False
                 validation['errors'].append("BOM has no materials")
                 return validation
             
             # Check for duplicates
-            duplicates = details[details.duplicated(['material_id'], keep=False)]
+            duplicates = bom_details[bom_details.duplicated(['material_id'], keep=False)]
             if not duplicates.empty:
-                validation['warnings'].append("BOM contains duplicate materials")
+                validation['warnings'].append(
+                    f"BOM contains {len(duplicates)} duplicate materials"
+                )
             
             # Check stock availability
-            for _, material in details.iterrows():
-                if material['current_stock'] <= 0:
-                    validation['warnings'].append(
-                        f"{material['material_name']}: No stock available"
-                    )
+            no_stock = bom_details[bom_details['current_stock'] <= 0]
+            if not no_stock.empty:
+                validation['warnings'].append(
+                    f"{len(no_stock)} material(s) have no stock available"
+                )
             
-            # Check scrap rates
-            high_scrap = details[details['scrap_rate'] > 20]
+            # Check high scrap rates
+            high_scrap = bom_details[bom_details['scrap_rate'] > 20]
             if not high_scrap.empty:
                 validation['warnings'].append(
                     f"{len(high_scrap)} material(s) have scrap rate > 20%"
                 )
+            
+            # Check circular reference (basic check)
+            if self._has_circular_reference(bom_id):
+                validation['valid'] = False
+                validation['errors'].append("Circular BOM reference detected")
             
             return validation
             
@@ -405,74 +672,72 @@ class BOMManager:
                 'warnings': []
             }
     
-    def get_where_used(self, product_id: int) -> pd.DataFrame:
-        """Get BOMs where product is used"""
-        query = """
-            SELECT 
-                h.id as bom_id,
-                h.bom_code,
-                h.bom_name,
-                h.status as bom_status,
-                h.bom_type,
-                p.name as output_product_name,
-                d.quantity,
-                d.uom,
-                d.material_type,
-                d.scrap_rate
-            FROM bom_details d
-            JOIN bom_headers h ON d.bom_header_id = h.id
-            JOIN products p ON h.product_id = p.id
-            WHERE d.material_id = %s AND h.delete_flag = 0
-            ORDER BY h.status DESC, h.bom_name
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, params=(product_id,))
-        except Exception as e:
-            logger.error(f"Error getting where used: {e}")
-            return pd.DataFrame()
+    # ==================== Internal Helper Methods ====================
     
-    def get_material_usage_summary(self) -> pd.DataFrame:
-        """Get material usage summary"""
-        query = """
-            SELECT 
-                p.id as material_id,
-                p.name as material_name,
-                p.pt_code as material_code,
-                COUNT(DISTINCT d.bom_header_id) as usage_count,
-                SUM(d.quantity) as total_base_quantity,
-                AVG(d.scrap_rate) as avg_scrap_rate,
-                SUM(CASE WHEN h.status = 'ACTIVE' THEN 1 ELSE 0 END) as active_bom_count
-            FROM bom_details d
-            JOIN products p ON d.material_id = p.id
-            JOIN bom_headers h ON d.bom_header_id = h.id
-            WHERE h.delete_flag = 0
-            GROUP BY p.id, p.name, p.pt_code
-            ORDER BY usage_count DESC
-        """
+    def _validate_bom_data(self, bom_data: Dict):
+        """Validate BOM creation data"""
+        required_fields = ['bom_name', 'bom_type', 'product_id']
         
-        try:
-            return pd.read_sql(query, self.engine)
-        except Exception as e:
-            logger.error(f"Error getting material usage summary: {e}")
-            return pd.DataFrame()
+        for field in required_fields:
+            if field not in bom_data or not bom_data[field]:
+                raise BOMValidationError(f"Missing required field: {field}")
+        
+        if bom_data['bom_type'] not in ['KITTING', 'CUTTING', 'REPACKING']:
+            raise BOMValidationError(f"Invalid BOM type: {bom_data['bom_type']}")
+        
+        if 'output_qty' in bom_data and bom_data['output_qty'] <= 0:
+            raise BOMValidationError("Output quantity must be greater than 0")
+    
+    def _check_bom_editable(self, conn, bom_id: int):
+        """Check if BOM can be edited"""
+        query = text("""
+            SELECT status 
+            FROM bom_headers 
+            WHERE id = :bom_id AND delete_flag = 0
+        """)
+        
+        result = conn.execute(query, {'bom_id': bom_id})
+        row = result.fetchone()
+        
+        if not row:
+            raise BOMNotFoundError(f"BOM {bom_id} not found")
+        
+        if row[0] != 'DRAFT':
+            raise BOMValidationError(
+                f"Cannot edit BOM with status {row[0]}. Only DRAFT BOMs can be edited."
+            )
+    
+    def _is_valid_status_transition(self, current: str, new: str) -> bool:
+        """Check if status transition is valid"""
+        # Define allowed transitions
+        allowed_transitions = {
+            'DRAFT': ['ACTIVE', 'INACTIVE'],
+            'ACTIVE': ['INACTIVE'],
+            'INACTIVE': ['ACTIVE']
+        }
+        
+        if current == new:
+            return False  # No need to transition to same status
+        
+        return new in allowed_transitions.get(current, [])
     
     def _generate_bom_code(self, conn, bom_type: str) -> str:
-        """Generate unique BOM code"""
+        """Generate unique BOM code with locking"""
         prefix = bom_type[:3].upper() if bom_type else "BOM"
         
+        # Use FOR UPDATE to prevent race condition
         query = text("""
             SELECT COALESCE(MAX(CAST(
                 SUBSTRING(bom_code, LENGTH(:prefix) + 2) AS UNSIGNED)
             ), 0) + 1 as next_seq
             FROM bom_headers
             WHERE bom_code LIKE CONCAT(:prefix, '-%')
+            FOR UPDATE
         """)
         
         result = conn.execute(query, {'prefix': prefix})
         next_seq = result.scalar()
         
-        # Convert to int for format string
         if next_seq is None:
             next_seq = 1
         else:
@@ -480,8 +745,15 @@ class BOMManager:
         
         return f"{prefix}-{next_seq:04d}"
     
-    def _add_material(self, conn, bom_id: int, material: Dict):
-        """Add material to BOM"""
+    def _add_material_internal(self, conn, bom_id: int, material: Dict):
+        """Internal method to add material (called within transaction)"""
+        # Validate material data
+        if material.get('quantity', 0) <= 0:
+            raise BOMValidationError("Material quantity must be greater than 0")
+        
+        if material.get('scrap_rate', 0) < 0 or material.get('scrap_rate', 0) > 100:
+            raise BOMValidationError("Scrap rate must be between 0 and 100")
+        
         query = text("""
             INSERT INTO bom_details (
                 bom_header_id, material_id, material_type,
@@ -502,14 +774,33 @@ class BOMManager:
             'notes': material.get('notes', '')
         })
     
-    def _is_bom_in_use(self, conn, bom_id: int) -> bool:
-        """Check if BOM is used in any orders"""
-        query = text("""
-            SELECT COUNT(*) as count
-            FROM manufacturing_orders
-            WHERE bom_header_id = :bom_id
-                AND delete_flag = 0
-        """)
+    def _has_circular_reference(self, bom_id: int, visited: Optional[set] = None) -> bool:
+        """Check for circular BOM references"""
+        if visited is None:
+            visited = set()
         
-        result = conn.execute(query, {'bom_id': bom_id})
-        return result.scalar() > 0
+        if bom_id in visited:
+            return True
+        
+        visited.add(bom_id)
+        
+        try:
+            # Get BOM output product
+            bom_info = self.get_bom_info(bom_id)
+            if not bom_info:
+                return False
+            
+            output_product_id = bom_info['product_id']
+            
+            # Check if output product is used as material in other BOMs
+            where_used = self.get_where_used(output_product_id)
+            
+            for _, used_bom in where_used.iterrows():
+                if self._has_circular_reference(used_bom['bom_id'], visited.copy()):
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking circular reference: {e}")
+            return False
