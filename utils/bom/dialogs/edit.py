@@ -177,7 +177,6 @@ def _render_materials_tab(bom_id: int, materials: pd.DataFrame,
         st.info("ℹ️ No materials in this BOM")
     
     # Add new material
-    st.markdown("**Add New Material:**")
     _render_add_material_section(bom_id, materials, state, manager)
     
     st.markdown("---")
