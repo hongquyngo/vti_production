@@ -1,4 +1,4 @@
-# pages/1_🏭_Production.py - Complete Production Management UI
+# pages/1_🏭_Production.py - Production Management UI (Updated for Independent Domains)
 """
 Production Management User Interface
 Complete production cycle: Order → Issue → Return → Complete
@@ -11,13 +11,26 @@ from typing import Dict, List, Optional, Tuple
 import time
 import logging
 
+# ==================== UPDATED IMPORTS - PRODUCTION DOMAIN ONLY ====================
 from utils.auth import AuthManager
-from modules.production import ProductionManager
-from modules.inventory import InventoryManager
-from modules.bom import BOMManager
-from modules.common import (
-    format_number, format_currency, create_status_indicator,
-    export_to_excel, get_date_filter_presets, UIHelpers,
+from utils.db import get_db_engine
+
+# Production domain imports - NO BOM IMPORTS!
+from utils.production.manager import ProductionManager
+from utils.production.inventory import InventoryManager
+from utils.production.materials import (
+    issue_materials,
+    return_materials,
+    complete_production,
+    get_returnable_materials
+)
+from utils.production.common import (
+    format_number,
+    create_status_indicator,
+    export_to_excel,
+    get_date_filter_presets,
+    calculate_percentage,
+    UIHelpers,
     SystemConstants
 )
 
@@ -42,13 +55,9 @@ auth.require_auth()
 @st.cache_resource
 def get_managers():
     """Initialize and cache managers"""
-    return (
-        ProductionManager(),
-        InventoryManager(),
-        BOMManager()
-    )
+    return ProductionManager(), InventoryManager()
 
-prod_manager, inv_manager, bom_manager = get_managers()
+prod_manager, inv_manager = get_managers()
 
 # ==================== Session State ====================
 
@@ -171,7 +180,7 @@ def render_order_list():
         in_progress = len(orders[orders['status'] == 'IN_PROGRESS'])
         st.metric("In Progress", in_progress)
     with col4:
-        completion_rate = (completed / len(orders) * 100) if len(orders) > 0 else 0
+        completion_rate = calculate_percentage(completed, len(orders))
         st.metric("Completion Rate", f"{completion_rate:.1f}%")
     
     st.markdown("---")
@@ -267,8 +276,8 @@ def render_create_order():
         ["KITTING", "CUTTING", "REPACKING"]
     )
     
-    # Get BOMs
-    boms = bom_manager.get_active_boms(bom_type=prod_type)
+    # Get BOMs - Using ProductionManager's own method (NO BOM IMPORT!)
+    boms = prod_manager.get_active_boms(bom_type=prod_type)
     
     if boms.empty:
         st.warning(f"No active BOMs found for {prod_type}")
@@ -291,8 +300,8 @@ def render_create_order():
             
             bom_id = bom_options[selected_bom]
             
-            # Get BOM info
-            bom_info = bom_manager.get_bom_info(bom_id)
+            # Get BOM info - Using ProductionManager's own method (NO BOM IMPORT!)
+            bom_info = prod_manager.get_bom_info(bom_id)
             if bom_info:
                 st.info(f"Output: {bom_info['product_name']} - {bom_info['output_qty']} {bom_info['uom']}")
             
@@ -468,7 +477,7 @@ def render_material_issue():
             st.success("✅ All materials available")
             if st.button("📤 Issue Materials", type="primary", use_container_width=True):
                 try:
-                    result = prod_manager.issue_materials(order_id, st.session_state.user_id)
+                    result = issue_materials(order_id, st.session_state.user_id)
                     UIHelpers.show_message(
                         f"✅ Materials issued! Issue No: {result['issue_no']}", 
                         "success"
@@ -513,7 +522,7 @@ def render_material_return():
         order_id = orders.iloc[idx]['id']
         
         # Get returnable materials
-        returnable = prod_manager.get_returnable_materials(order_id)
+        returnable = get_returnable_materials(order_id)
         
         if returnable.empty:
             st.info("No materials available for return")
@@ -571,7 +580,7 @@ def render_material_return():
             
             if submitted and returns:
                 try:
-                    result = prod_manager.return_materials(
+                    result = return_materials(
                         order_id, returns, reason, st.session_state.user_id
                     )
                     UIHelpers.show_message(
@@ -628,7 +637,7 @@ def render_production_completion():
                 produced_qty = st.number_input(
                     "Produced Quantity",
                     min_value=0.0,
-                    max_value=float(order['planned_qty']) * 1.1,  # 10% tolerance
+                    max_value=float(order['planned_qty']) * 1.1,
                     value=float(order['planned_qty']),
                     step=1.0
                 )
@@ -664,7 +673,7 @@ def render_production_completion():
             
             if submitted:
                 try:
-                    result = prod_manager.complete_production(
+                    result = complete_production(
                         order['id'],
                         produced_qty,
                         batch_no,
@@ -788,7 +797,8 @@ def render_dashboard():
         if completed > 0:
             on_time = len(orders[(orders['status'] == 'COMPLETED') & 
                                 (orders['completion_date'] <= orders['scheduled_date'])])
-            st.metric("On-Time Rate", f"{(on_time/completed*100):.1f}%")
+            on_time_rate = calculate_percentage(on_time, completed)
+            st.metric("On-Time Rate", f"{on_time_rate:.1f}%")
         else:
             st.metric("On-Time Rate", "N/A")
     

@@ -1,4 +1,4 @@
-# pages/2_📋_BOM.py - Complete BOM Management UI
+# pages/2_📋_BOM.py - BOM Management UI (Updated for Independent Domains)
 """
 Bill of Materials (BOM) Management UI
 Complete BOM creation, editing, and analysis.
@@ -7,14 +7,16 @@ Complete BOM creation, editing, and analysis.
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import time
 import logging
 
+# ==================== UPDATED IMPORTS - BOM DOMAIN ONLY ====================
 from utils.auth import AuthManager
-from modules.bom import BOMManager
-from modules.inventory import InventoryManager
-from modules.common import (
+
+# BOM domain imports - NO PRODUCTION IMPORTS!
+from utils.bom.manager import BOMManager
+from utils.bom.common import (
     format_number,
     create_status_indicator,
     export_to_excel,
@@ -43,9 +45,9 @@ auth.require_auth()
 @st.cache_resource
 def get_managers():
     """Initialize and cache managers"""
-    return BOMManager(), InventoryManager()
+    return BOMManager()
 
-bom_manager, inv_manager = get_managers()
+bom_manager = get_managers()
 
 # ==================== Session State ====================
 
@@ -273,7 +275,7 @@ def render_create_bom():
                         'uom': uom,
                         'effective_date': effective_date,
                         'notes': notes,
-                        'materials': [],  # Materials will be added via Edit
+                        'materials': [],
                         'created_by': st.session_state.get('user_id', 1)
                     }
                     

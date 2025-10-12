@@ -1,15 +1,16 @@
-# modules/bom.py - Complete BOM Management
+# utils/bom/manager.py
 """
-Bill of Materials (BOM) Management Module
-Handles BOM creation, editing, and material management.
+Bill of Materials (BOM) Management
+BOM CRUD operations, validation, and analysis
 """
 
 import logging
-from datetime import datetime, date
-from typing import Dict, List, Optional, Any
+from datetime import date
+from typing import Dict, List, Optional
 import pandas as pd
 from sqlalchemy import text
-from utils.db import get_db_engine
+
+from ..db import get_db_engine
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,6 @@ class BOMManager:
     
     def __init__(self):
         self.engine = get_db_engine()
-    
-    # ==================== BOM List & Search ====================
     
     def get_boms(self, bom_type: Optional[str] = None,
                  status: Optional[str] = None,
@@ -82,8 +81,6 @@ class BOMManager:
         """Get active BOMs only"""
         return self.get_boms(bom_type=bom_type, status='ACTIVE')
     
-    # ==================== BOM Creation ====================
-    
     def create_bom(self, bom_data: Dict) -> str:
         """Create new BOM"""
         conn = self.engine.connect()
@@ -136,8 +133,6 @@ class BOMManager:
         finally:
             conn.close()
     
-    # ==================== BOM Editing ====================
-    
     def add_materials(self, bom_id: int, materials: List[Dict]) -> bool:
         """Add materials to existing BOM"""
         with self.engine.begin() as conn:
@@ -151,34 +146,6 @@ class BOMManager:
             except Exception as e:
                 logger.error(f"Error adding materials: {e}")
                 raise
-    
-    def update_material(self, bom_id: int, material_id: int, 
-                       updates: Dict) -> bool:
-        """Update material in BOM"""
-        with self.engine.begin() as conn:
-            try:
-                query = text("""
-                    UPDATE bom_details
-                    SET quantity = :quantity,
-                        scrap_rate = :scrap_rate,
-                        notes = :notes
-                    WHERE bom_header_id = :bom_id 
-                        AND material_id = :material_id
-                """)
-                
-                result = conn.execute(query, {
-                    'quantity': updates.get('quantity'),
-                    'scrap_rate': updates.get('scrap_rate', 0),
-                    'notes': updates.get('notes', ''),
-                    'bom_id': bom_id,
-                    'material_id': material_id
-                })
-                
-                return result.rowcount > 0
-                
-            except Exception as e:
-                logger.error(f"Error updating material: {e}")
-                return False
     
     def remove_material(self, bom_id: int, material_id: int) -> bool:
         """Remove material from BOM"""
@@ -204,8 +171,6 @@ class BOMManager:
             except Exception as e:
                 logger.error(f"Error removing material: {e}")
                 return False
-    
-    # ==================== BOM Info & Details ====================
     
     def get_bom_info(self, bom_id: int) -> Optional[Dict]:
         """Get BOM header information"""
@@ -259,8 +224,6 @@ class BOMManager:
             logger.error(f"Error getting BOM details: {e}")
             return pd.DataFrame()
     
-    # ==================== BOM Status Management ====================
-    
     def update_bom_status(self, bom_id: int, new_status: str, 
                          updated_by: Optional[int] = None) -> bool:
         """Update BOM status"""
@@ -298,8 +261,6 @@ class BOMManager:
             except Exception as e:
                 logger.error(f"Error updating BOM status: {e}")
                 raise
-    
-    # ==================== BOM Operations ====================
     
     def copy_bom(self, source_bom_id: int, new_name: str, 
                  created_by: Optional[int] = None) -> str:
@@ -399,8 +360,6 @@ class BOMManager:
                 logger.error(f"Error deleting BOM: {e}")
                 raise
     
-    # ==================== Analysis & Validation ====================
-    
     def validate_bom_materials(self, bom_id: int) -> Dict:
         """Validate BOM materials"""
         try:
@@ -498,8 +457,6 @@ class BOMManager:
             logger.error(f"Error getting material usage summary: {e}")
             return pd.DataFrame()
     
-    # ==================== Helper Methods ====================
-    
     def _generate_bom_code(self, conn, bom_type: str) -> str:
         """Generate unique BOM code"""
         prefix = bom_type[:3].upper() if bom_type else "BOM"
@@ -513,7 +470,13 @@ class BOMManager:
         """)
         
         result = conn.execute(query, {'prefix': prefix})
-        next_seq = result.scalar() or 1
+        next_seq = result.scalar()
+        
+        # Convert to int for format string
+        if next_seq is None:
+            next_seq = 1
+        else:
+            next_seq = int(next_seq)
         
         return f"{prefix}-{next_seq:04d}"
     
