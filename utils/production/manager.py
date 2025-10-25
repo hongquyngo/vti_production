@@ -1,7 +1,8 @@
 # utils/production/manager.py
 """
 Production Order Management
-Core production order CRUD and status management
+Core production order CRUD and status management with BOM alternatives support
+BACKWARD COMPATIBLE - Does not require is_primary column
 """
 
 import logging
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class ProductionManager:
-    """Production Order Management"""
+    """Production Order Management with BOM Alternatives Support"""
     
     def __init__(self):
         self.engine = get_db_engine()
@@ -154,7 +155,7 @@ class ProductionManager:
                 
                 order_id = result.lastrowid
                 
-                # Create material requirements
+                # Create material requirements (all materials from bom_details)
                 self._create_material_requirements(conn, order_id, order_data)
                 
                 logger.info(f"Created production order {order_no} (ID: {order_id})")
@@ -220,6 +221,7 @@ class ProductionManager:
                                        quantity: float) -> pd.DataFrame:
         """
         Calculate material requirements for production order
+        All materials in bom_details are considered primary materials
         
         Args:
             bom_id: ID of the BOM header
@@ -246,6 +248,120 @@ class ProductionManager:
         except Exception as e:
             logger.error(f"Error calculating requirements for BOM {bom_id}: {e}")
             return pd.DataFrame()
+    
+    def get_bom_alternatives(self, bom_detail_id: int) -> pd.DataFrame:
+        """
+        Get alternative materials for a BOM detail, ordered by priority
+        
+        Args:
+            bom_detail_id: ID of the BOM detail (primary material)
+            
+        Returns:
+            DataFrame with alternative materials sorted by priority
+        """
+        query = """
+            SELECT 
+                alt.id as alternative_id,
+                alt.bom_detail_id,
+                alt.alternative_material_id,
+                p.name as alternative_material_name,
+                alt.material_type,
+                alt.quantity,
+                alt.uom,
+                alt.scrap_rate,
+                alt.priority,
+                alt.is_active,
+                alt.notes
+            FROM bom_material_alternatives alt
+            JOIN products p ON alt.alternative_material_id = p.id
+            WHERE alt.bom_detail_id = %s
+                AND alt.is_active = 1
+            ORDER BY alt.priority ASC
+        """
+        
+        try:
+            df = pd.read_sql(query, self.engine, params=(bom_detail_id,))
+            logger.info(f"Found {len(df)} alternatives for BOM detail {bom_detail_id}")
+            return df
+        except Exception as e:
+            logger.error(f"Error getting alternatives for BOM detail {bom_detail_id}: {e}")
+            return pd.DataFrame()
+    
+    def get_bom_detail_with_alternatives(self, bom_id: int, 
+                                        quantity: float) -> List[Dict[str, Any]]:
+        """
+        Get BOM details with their alternatives for a production order
+        
+        Args:
+            bom_id: BOM header ID
+            quantity: Planned production quantity
+            
+        Returns:
+            List of materials with their alternatives
+        """
+        # Get all materials from bom_details (all are primary)
+        primary_query = """
+            SELECT 
+                d.id as bom_detail_id,
+                d.material_id,
+                p.name as material_name,
+                d.quantity,
+                d.uom,
+                d.scrap_rate,
+                h.output_qty
+            FROM bom_details d
+            JOIN bom_headers h ON d.bom_header_id = h.id
+            JOIN products p ON d.material_id = p.id
+            WHERE h.id = %s
+            ORDER BY p.name
+        """
+        
+        try:
+            primaries = pd.read_sql(primary_query, self.engine, params=(bom_id,))
+            
+            materials_list = []
+            for _, primary in primaries.iterrows():
+                # Calculate required quantity for primary
+                production_cycles = quantity / float(primary['output_qty'])
+                base_qty = production_cycles * float(primary['quantity'])
+                with_scrap = base_qty * (1 + float(primary['scrap_rate']) / 100)
+                required_qty = math.ceil(with_scrap)
+                
+                material_data = {
+                    'bom_detail_id': int(primary['bom_detail_id']),
+                    'material_id': int(primary['material_id']),
+                    'material_name': primary['material_name'],
+                    'required_qty': required_qty,
+                    'uom': primary['uom'],
+                    'is_primary': True,
+                    'alternatives': []
+                }
+                
+                # Get alternatives for this material
+                alternatives = self.get_bom_alternatives(int(primary['bom_detail_id']))
+                
+                for _, alt in alternatives.iterrows():
+                    # Calculate required quantity for alternative
+                    alt_base_qty = production_cycles * float(alt['quantity'])
+                    alt_with_scrap = alt_base_qty * (1 + float(alt['scrap_rate']) / 100)
+                    alt_required_qty = math.ceil(alt_with_scrap)
+                    
+                    material_data['alternatives'].append({
+                        'alternative_id': int(alt['alternative_id']),
+                        'material_id': int(alt['alternative_material_id']),
+                        'material_name': alt['alternative_material_name'],
+                        'required_qty': alt_required_qty,
+                        'uom': alt['uom'],
+                        'priority': int(alt['priority'])
+                    })
+                
+                materials_list.append(material_data)
+            
+            return materials_list
+            
+        except Exception as e:
+            logger.error(f"Error getting BOM details with alternatives for BOM {bom_id}: {e}")
+            return []
     
     def get_active_boms(self, bom_type: Optional[str] = None) -> pd.DataFrame:
         """Get active BOMs for order creation"""
@@ -356,7 +472,11 @@ class ProductionManager:
         return f"MO-{timestamp}-{next_num:04d}"
     
     def _create_material_requirements(self, conn, order_id: int, order_data: Dict):
-        """Create material requirements from BOM"""
+        """
+        Create material requirements from BOM
+        All materials in bom_details are primary materials
+        Alternatives will be handled dynamically during material issue
+        """
         bom_query = text("""
             SELECT 
                 d.material_id,

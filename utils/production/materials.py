@@ -1,7 +1,7 @@
 # utils/production/materials.py
 """
 Material Issue, Return, and Production Completion Logic
-FEFO-based material issuing and production completion
+FEFO-based material issuing with automatic alternative substitution
 """
 
 import logging
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
     """
     Issue materials for production using FEFO (First Expiry, First Out)
+    with automatic alternative material substitution
     
     Raises:
         ValueError: If order not found, invalid status, or insufficient stock
@@ -63,16 +64,24 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
             # Get materials to issue
             materials = _get_pending_materials(conn, order_id)
             issue_details = []
+            substitutions = []  # Track any substitutions made
             
-            # Issue each material using FEFO
+            # Issue each material using FEFO with alternative substitution
             for _, mat in materials.iterrows():
                 remaining = mat['required_qty'] - mat['issued_qty']
                 if remaining > 0:
-                    issued = _issue_material_fefo(
-                        conn, issue_id, order_id, mat,
-                        remaining, order['warehouse_id'], group_id, user_id
-                    )
-                    issue_details.extend(issued)
+                    try:
+                        # Try issuing primary material first
+                        issued = _issue_material_with_alternatives(
+                            conn, issue_id, order_id, mat,
+                            remaining, order['warehouse_id'], group_id, user_id
+                        )
+                        issue_details.extend(issued['details'])
+                        if issued['substitutions']:
+                            substitutions.extend(issued['substitutions'])
+                    except ValueError as e:
+                        logger.error(f"Failed to issue material {mat['material_name']}: {e}")
+                        raise
             
             # Update order status to IN_PROGRESS
             status_query = text("""
@@ -83,11 +92,14 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
             conn.execute(status_query, {'order_id': order_id})
             
             logger.info(f"Issued materials for order {order_id}, issue no: {issue_no}")
+            if substitutions:
+                logger.info(f"Material substitutions made: {substitutions}")
             
             return {
                 'issue_no': issue_no,
                 'issue_id': issue_id,
-                'details': issue_details
+                'details': issue_details,
+                'substitutions': substitutions
             }
             
         except Exception as e:
@@ -214,8 +226,7 @@ def return_materials(order_id: int, returns: List[Dict],
                 return_details.append({
                     'material_id': ret['material_id'],
                     'batch_no': ret['batch_no'],
-                    'quantity': ret['quantity'],
-                    'condition': ret.get('condition', 'GOOD')
+                    'quantity': ret['quantity']
                 })
             
             logger.info(f"Returned materials for order {order_id}, return no: {return_no}")
@@ -236,16 +247,16 @@ def complete_production(order_id: int, produced_qty: float,
                        notes: str, user_id: int,
                        expired_date: Optional[date] = None) -> Dict[str, Any]:
     """
-    Complete production order and create finished goods receipt
+    Complete production and create receipt
     
     Args:
         order_id: Production order ID
-        produced_qty: Actual quantity produced
-        batch_no: Batch number for finished goods
-        quality_status: Quality check result (PASSED/FAILED/PENDING)
+        produced_qty: Actual produced quantity
+        batch_no: Batch number for produced goods
+        quality_status: Quality check status (PASSED/FAILED/PENDING)
         notes: Production notes
-        user_id: User completing the order
-        expired_date: Optional expiry date for finished goods
+        user_id: User completing the production
+        expired_date: Optional expiry date for produced goods
         
     Returns:
         Dictionary with receipt details
@@ -260,30 +271,21 @@ def complete_production(order_id: int, produced_qty: float,
                 raise ValueError(f"Order {order_id} not found")
             
             if order['status'] != 'IN_PROGRESS':
-                raise ValueError(f"Cannot complete {order['status']} order")
-            
-            if produced_qty <= 0:
-                raise ValueError("Produced quantity must be positive")
+                raise ValueError(f"Cannot complete order with status {order['status']}")
             
             # Generate receipt number
             receipt_no = _generate_receipt_number(conn)
-            
-            # Calculate expiry if not provided
-            if not expired_date and order.get('shelf_life'):
-                expired_date = date.today() + timedelta(days=order['shelf_life'])
             
             # Create production receipt
             receipt_query = text("""
                 INSERT INTO production_receipts (
                     receipt_no, manufacturing_order_id, receipt_date,
                     product_id, quantity, uom, batch_no, expired_date,
-                    warehouse_id, quality_status, notes,
-                    created_by, created_date
+                    warehouse_id, quality_status, notes, created_by, created_date
                 ) VALUES (
                     :receipt_no, :order_id, NOW(),
                     :product_id, :quantity, :uom, :batch_no, :expired_date,
-                    :warehouse_id, :quality_status, :notes,
-                    :created_by, NOW()
+                    :warehouse_id, :quality_status, :notes, :created_by, NOW()
                 )
             """)
             
@@ -303,16 +305,16 @@ def complete_production(order_id: int, produced_qty: float,
             
             receipt_id = receipt_result.lastrowid
             
-            # Create stock in record
+            # Create stock in record for produced goods
             stock_in_query = text("""
                 INSERT INTO inventory_histories (
                     type, product_id, warehouse_id, quantity, remain,
                     batch_no, expired_date, action_detail_id,
-                    created_by, created_date
+                    created_by, created_date, delete_flag
                 ) VALUES (
                     'stockInProduction', :product_id, :warehouse_id,
                     :quantity, :quantity, :batch_no, :expired_date,
-                    :receipt_id, :created_by, NOW()
+                    :receipt_id, :created_by, NOW(), 0
                 )
             """)
             
@@ -326,24 +328,30 @@ def complete_production(order_id: int, produced_qty: float,
                 'created_by': str(user_id)
             })
             
-            # Update order status
+            # Update order
             update_query = text("""
                 UPDATE manufacturing_orders
-                SET produced_qty = :produced_qty,
-                    status = 'COMPLETED',
-                    completion_date = NOW(),
+                SET produced_qty = produced_qty + :quantity,
+                    status = CASE 
+                        WHEN produced_qty + :quantity >= planned_qty THEN 'COMPLETED'
+                        ELSE 'IN_PROGRESS'
+                    END,
+                    completion_date = CASE 
+                        WHEN produced_qty + :quantity >= planned_qty THEN CURDATE()
+                        ELSE completion_date
+                    END,
                     updated_by = :user_id,
                     updated_date = NOW()
                 WHERE id = :order_id
             """)
             
             conn.execute(update_query, {
-                'produced_qty': produced_qty,
+                'quantity': produced_qty,
                 'user_id': user_id,
                 'order_id': order_id
             })
             
-            logger.info(f"Completed production order {order_id}, receipt no: {receipt_no}")
+            logger.info(f"Completed production for order {order_id}, receipt no: {receipt_no}")
             
             return {
                 'receipt_no': receipt_no,
@@ -359,7 +367,15 @@ def complete_production(order_id: int, produced_qty: float,
 
 
 def get_returnable_materials(order_id: int) -> pd.DataFrame:
-    """Get materials that can be returned for an order"""
+    """
+    Get materials that can be returned for an order
+    
+    Args:
+        order_id: Production order ID
+        
+    Returns:
+        DataFrame with returnable materials and quantities
+    """
     engine = get_db_engine()
     
     query = """
@@ -369,25 +385,21 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
             p.name as material_name,
             mid.batch_no,
             mid.quantity as issued_qty,
-            COALESCE(returned.qty, 0) as returned_qty,
-            (mid.quantity - COALESCE(returned.qty, 0)) as returnable_qty,
             mid.uom,
-            ih.expired_date
+            mid.expired_date,
+            COALESCE(SUM(mrd.quantity), 0) as returned_qty,
+            (mid.quantity - COALESCE(SUM(mrd.quantity), 0)) as returnable_qty
         FROM material_issue_details mid
         JOIN material_issues mi ON mid.material_issue_id = mi.id
         JOIN products p ON mid.material_id = p.id
-        LEFT JOIN inventory_histories ih ON mid.inventory_history_id = ih.id
-        LEFT JOIN (
-            SELECT 
-                mrd.original_issue_detail_id,
-                SUM(mrd.quantity) as qty
-            FROM material_return_details mrd
-            JOIN material_returns mr ON mrd.material_return_id = mr.id
-            WHERE mr.status = 'CONFIRMED'
-            GROUP BY mrd.original_issue_detail_id
-        ) returned ON returned.original_issue_detail_id = mid.id
+        LEFT JOIN material_return_details mrd 
+            ON mrd.original_issue_detail_id = mid.id
+        LEFT JOIN material_returns mr 
+            ON mr.id = mrd.material_return_id AND mr.status = 'CONFIRMED'
         WHERE mi.manufacturing_order_id = %s
             AND mi.status = 'CONFIRMED'
+        GROUP BY mid.id, mid.material_id, p.name, mid.batch_no, 
+                 mid.quantity, mid.uom, mid.expired_date
         HAVING returnable_qty > 0
         ORDER BY p.name, mid.batch_no
     """
@@ -399,28 +411,30 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# ==================== Helper Functions ====================
+# ==================== Internal Helper Functions ====================
 
 def _get_order_info(conn, order_id: int) -> Optional[Dict]:
     """Get order information with lock"""
     query = text("""
-        SELECT o.*, b.bom_type, p.shelf_life
-        FROM manufacturing_orders o
-        JOIN bom_headers b ON o.bom_header_id = b.id
-        JOIN products p ON o.product_id = p.id
-        WHERE o.id = :order_id AND o.delete_flag = 0
+        SELECT 
+            id, order_no, status, warehouse_id, target_warehouse_id,
+            product_id, planned_qty, uom, bom_header_id
+        FROM manufacturing_orders
+        WHERE id = :order_id AND delete_flag = 0
         FOR UPDATE
     """)
     
     result = conn.execute(query, {'order_id': order_id})
     row = result.fetchone()
+    
     return dict(row._mapping) if row else None
 
 
 def _get_pending_materials(conn, order_id: int) -> pd.DataFrame:
-    """Get pending materials for order"""
-    query = """
+    """Get materials that still need to be issued"""
+    query = text("""
         SELECT 
+            m.id as order_material_id,
             m.material_id,
             p.name as material_name,
             m.required_qty,
@@ -428,26 +442,158 @@ def _get_pending_materials(conn, order_id: int) -> pd.DataFrame:
             m.uom
         FROM manufacturing_order_materials m
         JOIN products p ON m.material_id = p.id
-        WHERE m.manufacturing_order_id = %s
+        WHERE m.manufacturing_order_id = :order_id
+            AND m.required_qty > COALESCE(m.issued_qty, 0)
         ORDER BY p.name
-    """
+    """)
     
-    return pd.read_sql(query, conn, params=(order_id,))
+    result = conn.execute(query, {'order_id': order_id})
+    rows = result.fetchall()
+    
+    return pd.DataFrame([dict(row._mapping) for row in rows])
 
 
-def _issue_material_fefo(conn, issue_id: int, order_id: int,
-                         material: pd.Series, required_qty: float,
-                         warehouse_id: int, group_id: str, user_id: int) -> List[Dict]:
+def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
+                                     material: pd.Series, required_qty: float,
+                                     warehouse_id: int, group_id: str,
+                                     user_id: int) -> Dict[str, Any]:
     """
-    Issue single material using FEFO (First Expiry, First Out)
+    Issue material using FEFO, automatically substituting alternatives if needed
     
-    Raises:
-        ValueError: If insufficient stock available
+    Returns:
+        Dictionary with issued details and substitution info
     """
-    # Get available batches
+    issued_details = []
+    substitutions = []
+    remaining = required_qty
+    
+    # Try primary material first
+    try:
+        primary_issued = _issue_single_material_fefo(
+            conn, issue_id, order_id, material, remaining,
+            warehouse_id, group_id, user_id
+        )
+        issued_details.extend(primary_issued)
+        remaining = 0
+        
+    except ValueError as e:
+        # Insufficient stock for primary - try alternatives
+        logger.warning(f"Insufficient stock for primary material {material['material_name']}: {e}")
+        
+        # Get BOM detail ID for this material
+        bom_detail_query = text("""
+            SELECT bd.id as bom_detail_id
+            FROM manufacturing_order_materials mom
+            JOIN manufacturing_orders mo ON mom.manufacturing_order_id = mo.id
+            JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
+                AND bd.material_id = mom.material_id
+            WHERE mom.id = :order_material_id
+                AND bd.is_primary = 1
+        """)
+        
+        result = conn.execute(bom_detail_query, {
+            'order_material_id': material['order_material_id']
+        })
+        bom_detail = result.fetchone()
+        
+        if not bom_detail:
+            raise ValueError(f"No BOM detail found for material {material['material_name']}")
+        
+        # Get alternatives ordered by priority
+        alternatives_query = text("""
+            SELECT 
+                alt.id as alternative_id,
+                alt.alternative_material_id,
+                p.name as alternative_material_name,
+                alt.quantity,
+                alt.uom,
+                alt.scrap_rate,
+                alt.priority
+            FROM bom_material_alternatives alt
+            JOIN products p ON alt.alternative_material_id = p.id
+            WHERE alt.bom_detail_id = :bom_detail_id
+                AND alt.is_active = 1
+            ORDER BY alt.priority ASC
+        """)
+        
+        alternatives = conn.execute(alternatives_query, {
+            'bom_detail_id': bom_detail['bom_detail_id']
+        })
+        
+        alternatives_tried = []
+        for alt in alternatives:
+            try:
+                # Create temporary material data for alternative
+                alt_material = pd.Series({
+                    'order_material_id': material['order_material_id'],
+                    'material_id': alt['alternative_material_id'],
+                    'material_name': alt['alternative_material_name'],
+                    'uom': alt['uom']
+                })
+                
+                # Try issuing alternative
+                alt_issued = _issue_single_material_fefo(
+                    conn, issue_id, order_id, alt_material, remaining,
+                    warehouse_id, group_id, user_id
+                )
+                
+                issued_details.extend(alt_issued)
+                
+                # Record substitution
+                substitutions.append({
+                    'original_material': material['material_name'],
+                    'substitute_material': alt['alternative_material_name'],
+                    'quantity': remaining,
+                    'priority': alt['priority']
+                })
+                
+                logger.info(
+                    f"Substituted {material['material_name']} with "
+                    f"{alt['alternative_material_name']} (priority {alt['priority']})"
+                )
+                
+                remaining = 0
+                break
+                
+            except ValueError as alt_error:
+                alternatives_tried.append({
+                    'material': alt['alternative_material_name'],
+                    'error': str(alt_error)
+                })
+                logger.warning(
+                    f"Alternative {alt['alternative_material_name']} also insufficient: {alt_error}"
+                )
+                continue
+        
+        # If still not fulfilled after trying all alternatives
+        if remaining > 0:
+            error_msg = (
+                f"Insufficient stock for material '{material['material_name']}' "
+                f"and all alternatives. Required: {required_qty} {material['uom']}, "
+                f"Short by: {remaining} {material['uom']}."
+            )
+            if alternatives_tried:
+                error_msg += f" Alternatives tried: {alternatives_tried}"
+            raise ValueError(error_msg)
+    
+    return {
+        'details': issued_details,
+        'substitutions': substitutions
+    }
+
+
+def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
+                                material: pd.Series, required_qty: float,
+                                warehouse_id: int, group_id: str,
+                                user_id: int) -> List[Dict]:
+    """
+    Issue a single material using FEFO logic
+    Raises ValueError if insufficient stock
+    """
+    # Get available batches using FEFO
     batch_query = text("""
         SELECT 
-            id, batch_no, remain, expired_date
+            id, batch_no, remain, expired_date, created_date
         FROM inventory_histories
         WHERE product_id = :material_id
             AND warehouse_id = :warehouse_id
@@ -482,23 +628,25 @@ def _issue_material_fefo(conn, issue_id: int, order_id: int,
         # Create issue detail
         detail_query = text("""
             INSERT INTO material_issue_details (
-                material_issue_id, material_id, quantity, uom,
-                batch_no, inventory_history_id, manufacturing_order_id,
-                created_date
+                material_issue_id, manufacturing_order_material_id,
+                material_id, quantity, uom, batch_no, 
+                inventory_history_id, expired_date, created_date
             ) VALUES (
-                :issue_id, :material_id, :quantity, :uom,
-                :batch_no, :inventory_id, :order_id, NOW()
+                :issue_id, :order_material_id,
+                :material_id, :quantity, :uom, :batch_no,
+                :inventory_id, :expired_date, NOW()
             )
         """)
         
         detail_result = conn.execute(detail_query, {
             'issue_id': issue_id,
+            'order_material_id': material['order_material_id'],
             'material_id': material['material_id'],
             'quantity': take_qty,
             'uom': material['uom'],
             'batch_no': batch['batch_no'],
             'inventory_id': batch['id'],
-            'order_id': order_id
+            'expired_date': batch['expired_date']
         })
         
         detail_id = detail_result.lastrowid
@@ -546,16 +694,13 @@ def _issue_material_fefo(conn, issue_id: int, order_id: int,
                 status = CASE 
                     WHEN COALESCE(issued_qty, 0) + :quantity >= required_qty 
                     THEN 'ISSUED' ELSE 'PARTIAL' 
-                END,
-                updated_date = NOW()
-            WHERE manufacturing_order_id = :order_id
-                AND material_id = :material_id
+                END
+            WHERE id = :order_material_id
         """)
         
         conn.execute(update_material_query, {
             'quantity': take_qty,
-            'order_id': order_id,
-            'material_id': material['material_id']
+            'order_material_id': material['order_material_id']
         })
         
         issued_details.append({
@@ -569,7 +714,7 @@ def _issue_material_fefo(conn, issue_id: int, order_id: int,
         
         remaining -= take_qty
     
-    # ⭐ CRITICAL FIX: Raise error if insufficient stock
+    # Raise error if insufficient stock
     if remaining > 0:
         raise ValueError(
             f"Insufficient stock for material '{material['material_name']}': "

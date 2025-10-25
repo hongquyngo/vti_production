@@ -114,7 +114,7 @@ def show_status_dialog(bom_id: int):
 
 
 def _render_status_requirements(status: str, bom_info: dict, manager: BOMManager):
-    """Render requirements for selected status with alternatives awareness"""
+    """Render requirements for selected status """
     st.markdown("#### Requirements:")
     
     if status == 'ACTIVE':
@@ -136,23 +136,9 @@ def _render_status_requirements(status: str, bom_info: dict, manager: BOMManager
         has_output = bom_info.get('output_qty', 0) > 0
         output_icon = "✅" if has_output else "❌"
         st.write(f"{output_icon} Output quantity > 0")
+
+        st.caption("ℹ️ Stock availability will be validated at Manufacturing Order level")
         
-        # ✅ NEW: Check stock availability with alternatives awareness
-        if has_materials:
-            stock_status = _check_stock_with_alternatives(bom_details, manager)
-            
-            if stock_status['has_critical_issues']:
-                st.warning("⚠️ **Stock Issues:**")
-                for issue in stock_status['critical_issues']:
-                    st.write(f"  - {issue}")
-            
-            if stock_status['has_warnings']:
-                with st.expander("ℹ️ Stock Warnings (non-blocking)", expanded=False):
-                    for warning in stock_status['warnings']:
-                        st.write(f"  - {warning}")
-            
-            if stock_status['has_alternatives_available']:
-                st.success(f"✅ {stock_status['alternatives_available_count']} material(s) have alternatives with stock")
     
     elif status == 'INACTIVE':
         st.info("**To deactivate BOM:**")
@@ -173,65 +159,6 @@ def _render_status_requirements(status: str, bom_info: dict, manager: BOMManager
         st.write("✅ Can edit BOM information")
         st.write("✅ Can modify materials and alternatives")
         st.write("⚠️ Cannot be used in manufacturing orders")
-
-
-def _check_stock_with_alternatives(bom_details, manager: BOMManager) -> dict:
-    """
-    Check stock availability considering alternatives
-    
-    Returns:
-        {
-            'has_critical_issues': bool,  # Materials with no stock AND no alternatives
-            'critical_issues': list,
-            'has_warnings': bool,         # Materials with no stock but have alternatives
-            'warnings': list,
-            'has_alternatives_available': bool,
-            'alternatives_available_count': int
-        }
-    """
-    critical_issues = []
-    warnings = []
-    alternatives_available_count = 0
-    
-    for _, material in bom_details.iterrows():
-        mat_name = material['material_name']
-        mat_stock = float(material['current_stock'])
-        alt_count = int(material.get('alternatives_count', 0))
-        
-        if mat_stock <= 0:
-            # Primary material has no stock
-            if alt_count > 0:
-                # Check if alternatives have stock
-                alternatives = manager.get_material_alternatives(material['id'])
-                alts_with_stock = alternatives[alternatives['current_stock'] > 0]
-                
-                if not alts_with_stock.empty:
-                    # Has alternatives with stock - just a warning
-                    warnings.append(
-                        f"**{mat_name}**: No stock, but has {len(alts_with_stock)} "
-                        f"alternative(s) with stock available"
-                    )
-                    alternatives_available_count += 1
-                else:
-                    # No alternatives with stock - critical
-                    critical_issues.append(
-                        f"**{mat_name}**: No stock and {alt_count} alternative(s) also have no stock"
-                    )
-            else:
-                # No stock and no alternatives - critical
-                critical_issues.append(
-                    f"**{mat_name}**: No stock and no alternatives defined"
-                )
-    
-    return {
-        'has_critical_issues': len(critical_issues) > 0,
-        'critical_issues': critical_issues,
-        'has_warnings': len(warnings) > 0,
-        'warnings': warnings,
-        'has_alternatives_available': alternatives_available_count > 0,
-        'alternatives_available_count': alternatives_available_count
-    }
-
 
 def _validate_status_transition(current: str, new: str, 
                                 bom_info: dict, manager: BOMManager) -> tuple[bool, str]:
@@ -256,15 +183,6 @@ def _validate_status_transition(current: str, new: str,
         if bom_info.get('output_qty', 0) <= 0:
             return False, "Output quantity must be greater than 0"
         
-        # ✅ NEW: Check critical stock issues (no stock AND no alternatives)
-        stock_status = _check_stock_with_alternatives(bom_details, manager)
-        if stock_status['has_critical_issues']:
-            return False, (
-                f"Cannot activate BOM: {len(stock_status['critical_issues'])} "
-                f"material(s) have no stock and no alternatives available. "
-                f"Please add stock or define alternatives."
-            )
-    
     # Validate INACTIVE requirements
     if new == 'INACTIVE':
         # Check no active orders
