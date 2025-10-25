@@ -159,7 +159,6 @@ class BOMManager:
                 d.quantity,
                 d.uom,
                 d.scrap_rate,
-                d.is_primary,
                 d.notes,
                 p.name as material_name,
                 p.pt_code as material_code,
@@ -866,10 +865,10 @@ class BOMManager:
         query = text("""
             INSERT INTO bom_details (
                 bom_header_id, material_id, material_type,
-                quantity, uom, scrap_rate, is_primary, notes
+                quantity, uom, scrap_rate, notes
             ) VALUES (
                 :bom_id, :material_id, :material_type,
-                :quantity, :uom, :scrap_rate, 1, :notes
+                :quantity, :uom, :scrap_rate, :notes
             )
         """)
         

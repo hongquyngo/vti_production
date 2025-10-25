@@ -131,6 +131,23 @@ def _render_materials_section(materials: pd.DataFrame, manager: BOMManager):
     
     st.markdown("---")
     
+    # Column headers for materials
+    col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
+    with col1:
+        st.markdown("**Material (Code)**")
+    with col2:
+        st.markdown("**Type**")
+    with col3:
+        st.markdown("**Quantity**")
+    with col4:
+        st.markdown("**UOM**")
+    with col5:
+        st.markdown("**Scrap %**")
+    with col6:
+        st.markdown("**Stock**")
+    
+    st.markdown("---")
+    
     # Display materials with alternatives
     for idx, material in materials.iterrows():
         _render_material_with_alternatives(material, manager)
@@ -185,6 +202,23 @@ def _render_alternatives_list(detail_id: int, manager: BOMManager):
             return
         
         st.markdown("**Alternatives (by priority):**")
+        
+        # Column headers for alternatives
+        col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
+        with col1:
+            st.markdown("_Status: Material (Code)_")
+        with col2:
+            st.markdown("_Type_")
+        with col3:
+            st.markdown("_Quantity_")
+        with col4:
+            st.markdown("_UOM_")
+        with col5:
+            st.markdown("_Scrap %_")
+        with col6:
+            st.markdown("_Priority | Stock_")
+        
+        st.markdown("")
         
         for idx, alt in alternatives.iterrows():
             col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
