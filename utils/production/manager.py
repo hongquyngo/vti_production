@@ -491,12 +491,17 @@ class ProductionManager:
             WHERE h.id = :bom_id
         """)
         
-        materials = conn.execute(bom_query, {
+        materials_result = conn.execute(bom_query, {
             'bom_id': order_data['bom_header_id'],
             'planned_qty': float(order_data['planned_qty'])
         })
         
-        for mat in materials:
+        # Convert rows to list of dicts for easier access
+        materials_list = []
+        for row in materials_result:
+            materials_list.append(dict(zip(materials_result.keys(), row)))
+        
+        for mat in materials_list:
             # Calculate required quantity with scrap
             production_cycles = float(mat['planned_qty']) / float(mat['output_qty'])
             base_material = production_cycles * float(mat['quantity'])

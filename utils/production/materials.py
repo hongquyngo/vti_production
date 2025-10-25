@@ -519,12 +519,17 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
             ORDER BY alt.priority ASC
         """)
         
-        alternatives = conn.execute(alternatives_query, {
+        alternatives_result = conn.execute(alternatives_query, {
             'bom_detail_id': bom_detail['bom_detail_id']
         })
         
+        # Convert alternatives to list of dicts
+        alternatives_list = []
+        for row in alternatives_result:
+            alternatives_list.append(dict(zip(alternatives_result.keys(), row)))
+        
         alternatives_tried = []
-        for alt in alternatives:
+        for alt in alternatives_list:
             try:
                 # Create temporary material data for alternative
                 alt_material = pd.Series({
@@ -609,15 +614,20 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
         FOR UPDATE
     """)
     
-    batches = conn.execute(batch_query, {
+    batches_result = conn.execute(batch_query, {
         'material_id': material['material_id'],
         'warehouse_id': warehouse_id
     })
     
+    # Convert batches to list of dicts
+    batches_list = []
+    for row in batches_result:
+        batches_list.append(dict(zip(batches_result.keys(), row)))
+    
     issued_details = []
     remaining = required_qty
     
-    for batch in batches:
+    for batch in batches_list:
         if remaining <= 0:
             break
         
