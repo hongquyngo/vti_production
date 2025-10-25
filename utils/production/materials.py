@@ -140,9 +140,11 @@ def return_materials(order_id: int, returns: List[Dict],
             """)
             
             issue_result = conn.execute(issue_query, {'order_id': order_id})
-            issue = issue_result.fetchone()
-            if not issue:
+            issue_row = issue_result.fetchone()
+            if not issue_row:
                 raise ValueError("No material issue found for this order")
+            
+            issue = dict(zip(issue_result.keys(), issue_row))  # Convert to dict
             
             # Validate all returns
             for ret in returns:
@@ -427,7 +429,7 @@ def _get_order_info(conn, order_id: int) -> Optional[Dict]:
     result = conn.execute(query, {'order_id': order_id})
     row = result.fetchone()
     
-    return dict(row._mapping) if row else None
+    return dict(zip(result.keys(), row)) if row else None
 
 
 def _get_pending_materials(conn, order_id: int) -> pd.DataFrame:
@@ -488,16 +490,17 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
             JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
                 AND bd.material_id = mom.material_id
             WHERE mom.id = :order_material_id
-                AND bd.is_primary = 1
         """)
         
         result = conn.execute(bom_detail_query, {
             'order_material_id': material['order_material_id']
         })
-        bom_detail = result.fetchone()
+        bom_detail_row = result.fetchone()
         
-        if not bom_detail:
+        if not bom_detail_row:
             raise ValueError(f"No BOM detail found for material {material['material_name']}")
+        
+        bom_detail = dict(zip(result.keys(), bom_detail_row))  # Convert to dict
         
         # Get alternatives ordered by priority
         alternatives_query = text("""
@@ -742,10 +745,12 @@ def _validate_return_quantity(conn, issue_detail_id: int, return_qty: float):
     """)
     
     result = conn.execute(query, {'issue_detail_id': issue_detail_id})
-    row = result.fetchone()
+    row_data = result.fetchone()
     
-    if not row:
+    if not row_data:
         raise ValueError(f"Issue detail {issue_detail_id} not found")
+    
+    row = dict(zip(result.keys(), row_data))  # Convert to dict
     
     total_returns = float(row['previously_returned']) + return_qty
     
@@ -771,7 +776,8 @@ def _generate_issue_number(conn) -> str:
     """)
     
     result = conn.execute(query, {'pattern': f'MI-{timestamp}-%'})
-    next_num = result.fetchone()['next_num']
+    row = result.fetchone()
+    next_num = row[0] if row else 1  # Use index instead of key
     next_num = int(next_num) if next_num is not None else 1
     
     return f"MI-{timestamp}-{next_num:04d}"
@@ -791,7 +797,8 @@ def _generate_return_number(conn) -> str:
     """)
     
     result = conn.execute(query, {'pattern': f'MR-{timestamp}-%'})
-    next_num = result.fetchone()['next_num']
+    row = result.fetchone()
+    next_num = row[0] if row else 1  # Use index instead of key
     next_num = int(next_num) if next_num is not None else 1
     
     return f"MR-{timestamp}-{next_num:04d}"
@@ -811,7 +818,8 @@ def _generate_receipt_number(conn) -> str:
     """)
     
     result = conn.execute(query, {'pattern': f'PR-{timestamp}-%'})
-    next_num = result.fetchone()['next_num']
+    row = result.fetchone()
+    next_num = row[0] if row else 1  # Use index instead of key
     next_num = int(next_num) if next_num is not None else 1
     
     return f"PR-{timestamp}-{next_num:04d}"

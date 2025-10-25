@@ -121,7 +121,7 @@ class ProductionManager:
                     'warehouse_id': order_data['warehouse_id']
                 })
                 entity_row = entity_result.fetchone()
-                entity_id = entity_row['company_id'] if entity_row else None
+                entity_id = entity_row[0] if entity_row else None
                 
                 # Create order
                 order_query = text("""
@@ -466,7 +466,8 @@ class ProductionManager:
         """)
         
         result = conn.execute(query, {'pattern': f'MO-{timestamp}-%'})
-        next_num = result.fetchone()['next_num']
+        row = result.fetchone()
+        next_num = row[0] if row else 1  # Use index instead of key
         next_num = int(next_num) if next_num is not None else 1
         
         return f"MO-{timestamp}-{next_num:04d}"
