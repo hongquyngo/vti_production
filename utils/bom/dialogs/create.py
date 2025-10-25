@@ -1,7 +1,7 @@
 # utils/bom/dialogs/create.py
 """
-Create BOM Dialog - FIXED BUTTON KEYS
-2-step wizard: Header information → Materials
+Create BOM Dialog with Alternatives Support
+2-step wizard: Header information → Materials (with alternatives)
 """
 
 import logging
@@ -24,22 +24,15 @@ logger = logging.getLogger(__name__)
 
 @st.dialog("➕ Create New BOM", width="large")
 def show_create_dialog():
-    """
-    Create BOM wizard dialog (2 steps)
-    Step 1: BOM header information
-    Step 2: Materials
-    """
+    """Create BOM wizard dialog (2 steps)"""
     state = StateManager()
     manager = BOMManager()
     
-    # Get current step
     current_step = state.get_create_step()
     
-    # Render step indicator
     render_step_indicator(current_step, 2)
     st.markdown("---")
     
-    # Render appropriate step
     if current_step == 1:
         _render_step1_header(state)
     elif current_step == 2:
@@ -47,15 +40,9 @@ def show_create_dialog():
 
 
 def _render_step1_header(state: StateManager):
-    """
-    Render Step 1: BOM Header Information
-    
-    Args:
-        state: State manager
-    """
+    """Render Step 1: BOM Header Information"""
     st.markdown("### Step 1: BOM Information")
     
-    # Get saved data if any
     saved_data = state.get_create_header_data()
     
     col1, col2 = st.columns(2)
@@ -84,7 +71,6 @@ def _render_step1_header(state: StateManager):
         )
     
     with col2:
-        # Product selection
         products = get_products()
         
         if products.empty:
@@ -97,7 +83,6 @@ def _render_step1_header(state: StateManager):
                 for _, row in products.iterrows()
             }
             
-            # Find default index
             default_idx = 0
             saved_product_id = saved_data.get('product_id')
             if saved_product_id:
@@ -115,7 +100,6 @@ def _render_step1_header(state: StateManager):
             
             product_id = product_options.get(selected_product)
             
-            # Get product UOM
             if product_id:
                 product_info = products[products['id'] == product_id].iloc[0]
                 uom = product_info.get('uom', 'PCS')
@@ -133,7 +117,6 @@ def _render_step1_header(state: StateManager):
         
         st.text_input("UOM", value=uom, disabled=True, key="create_uom")
     
-    # Notes
     notes = st.text_area(
         "Notes",
         value=saved_data.get('notes', ''),
@@ -144,19 +127,16 @@ def _render_step1_header(state: StateManager):
     
     st.markdown("---")
     
-    # Navigation buttons
     col1, col2 = st.columns([3, 1])
     
     with col2:
         if st.button("Next: Add Materials →", type="primary", use_container_width=True, key="create_step1_next"):
-            # Validate step 1
             errors = _validate_step1(bom_name, product_id, output_qty)
             
             if errors:
                 for error in errors:
                     st.error(f"❌ {error}")
             else:
-                # Save header data
                 header_data = {
                     'bom_name': bom_name,
                     'bom_type': bom_type,
@@ -178,16 +158,9 @@ def _render_step1_header(state: StateManager):
 
 
 def _render_step2_materials(state: StateManager, manager: BOMManager):
-    """
-    Render Step 2: Materials
+    """Render Step 2: Materials with Alternatives"""
+    st.markdown("### Step 2: Add Materials & Alternatives")
     
-    Args:
-        state: State manager
-        manager: BOM manager
-    """
-    st.markdown("### Step 2: Add Materials")
-    
-    # Show header summary
     header_data = state.get_create_header_data()
     
     with st.expander("📋 BOM Information Summary", expanded=False):
@@ -201,23 +174,20 @@ def _render_step2_materials(state: StateManager, manager: BOMManager):
     
     st.markdown("---")
     
-    # Current materials list
     materials = state.get_create_materials()
     
     if materials:
         st.markdown(f"**Materials Added ({len(materials)}):**")
-        _render_material_list(materials, state)
+        _render_material_list_with_alternatives(materials, state)
     else:
         st.info("ℹ️ No materials added yet. Add at least one material below.")
     
     st.markdown("---")
     
-    # Add material form
     _render_add_material_form(state)
     
     st.markdown("---")
     
-    # Navigation buttons
     col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
@@ -235,35 +205,25 @@ def _render_step2_materials(state: StateManager, manager: BOMManager):
             st.rerun()
 
 
-def _render_material_list(materials: list, state: StateManager):
-    """
-    Render current materials list
-    
-    Args:
-        materials: List of material dicts
-        state: State manager
-    """
-    # Convert to DataFrame for display
-    materials_df = pd.DataFrame(materials)
-    
-    # Get product info
+def _render_material_list_with_alternatives(materials: list, state: StateManager):
+    """Render materials list with alternatives"""
     products = get_products()
-    mat_ids = materials_df['material_id'].tolist()
-    mat_info = products[products['id'].isin(mat_ids)][['id', 'name', 'code']]
     
-    materials_df = materials_df.merge(
-        mat_info, 
-        left_on='material_id', 
-        right_on='id', 
-        how='left'
-    )
-    
-    # Display table
-    for idx, material in materials_df.iterrows():
+    for idx, material in enumerate(materials):
+        mat_product = products[products['id'] == material['material_id']]
+        
+        if mat_product.empty:
+            continue
+        
+        mat_info = mat_product.iloc[0]
+        alternatives = material.get('alternatives', [])
+        
+        # Material row
         col1, col2, col3, col4, col5, col6 = st.columns([3, 2, 1, 1, 1, 1])
         
         with col1:
-            st.text(f"{material['name']} ({material['code']})")
+            alt_badge = f" 🔀 **{len(alternatives)} alt(s)**" if alternatives else ""
+            st.markdown(f"**{mat_info['name']}** ({mat_info['code']}){alt_badge}")
         
         with col2:
             st.text(material['material_type'])
@@ -278,21 +238,167 @@ def _render_material_list(materials: list, state: StateManager):
             st.text(f"{material['scrap_rate']:.2f}%")
         
         with col6:
-            if st.button("🗑️", key=f"create_remove_mat_{idx}", help="Remove"):
+            if st.button("🗑️", key=f"create_remove_mat_{idx}", help="Remove material"):
                 state.remove_create_material(idx)
                 st.rerun()
+        
+        # Inline alternatives management
+        with st.expander(f"🔀 Manage Alternatives ({len(alternatives)})", expanded=False):
+            _render_alternatives_manager_inline(idx, material, alternatives, products, state)
+
+
+def _render_alternatives_manager_inline(material_idx: int, material: dict, 
+                                       alternatives: list, products: pd.DataFrame,
+                                       state: StateManager):
+    """Render inline alternatives manager"""
+    primary_mat_id = material['material_id']
+    
+    # Show current alternatives
+    if alternatives:
+        st.markdown("**Current Alternatives:**")
+        
+        for alt_idx, alt in enumerate(alternatives):
+            alt_product = products[products['id'] == alt['alternative_material_id']]
+            
+            if not alt_product.empty:
+                alt_info = alt_product.iloc[0]
+                
+                col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
+                
+                with col1:
+                    st.text(f"Priority {alt['priority']}: {alt_info['name']} ({alt_info['code']})")
+                
+                with col2:
+                    st.text(f"{alt['quantity']:.4f}")
+                
+                with col3:
+                    st.text(alt['uom'])
+                
+                with col4:
+                    st.text(f"{alt['scrap_rate']:.2f}%")
+                
+                with col5:
+                    if st.button("🗑️", key=f"create_del_alt_{material_idx}_{alt_idx}", help="Remove"):
+                        # Remove alternative from material
+                        materials = state.get_create_materials()
+                        materials[material_idx]['alternatives'].pop(alt_idx)
+                        state.set_dialog_state(state.DIALOG_CREATE, {
+                            'step': state.get_create_step(),
+                            'header_data': state.get_create_header_data(),
+                            'materials': materials
+                        })
+                        st.rerun()
+        
+        st.markdown("---")
+    
+    # Add alternative form
+    st.markdown("**Add Alternative:**")
+    
+    col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
+    
+    with col1:
+        # Exclude primary and existing alternatives
+        exclude_ids = [primary_mat_id]
+        exclude_ids.extend([alt['alternative_material_id'] for alt in alternatives])
+        
+        available = products[~products['id'].isin(exclude_ids)]
+        
+        if available.empty:
+            st.warning("⚠️ No materials available as alternatives")
+            return
+        
+        product_options = {
+            f"{row['name']} ({row['code']})": row['id']
+            for _, row in available.iterrows()
+        }
+        
+        selected = st.selectbox(
+            "Material",
+            options=list(product_options.keys()),
+            key=f"create_add_alt_mat_{material_idx}",
+            label_visibility="collapsed"
+        )
+        
+        alt_material_id = product_options.get(selected)
+    
+    with col2:
+        quantity = st.number_input(
+            "Quantity",
+            min_value=0.0001,
+            value=material['quantity'],  # Default to primary quantity
+            step=0.1,
+            format="%.4f",
+            key=f"create_add_alt_qty_{material_idx}",
+            label_visibility="collapsed"
+        )
+    
+    with col3:
+        if alt_material_id:
+            alt_product = products[products['id'] == alt_material_id].iloc[0]
+            alt_uom = alt_product.get('uom', 'PCS')
+        else:
+            alt_uom = 'PCS'
+        st.text_input("UOM", value=alt_uom, disabled=True, 
+                     key=f"create_add_alt_uom_{material_idx}", label_visibility="collapsed")
+    
+    with col4:
+        scrap = st.number_input(
+            "Scrap %",
+            min_value=0.0,
+            max_value=100.0,
+            value=material['scrap_rate'],  # Default to primary scrap rate
+            step=0.5,
+            key=f"create_add_alt_scrap_{material_idx}",
+            label_visibility="collapsed"
+        )
+    
+    with col5:
+        # Auto-calculate next priority
+        next_priority = len(alternatives) + 1
+        priority = st.number_input(
+            "Priority",
+            min_value=1,
+            max_value=99,
+            value=next_priority,
+            key=f"create_add_alt_priority_{material_idx}",
+            label_visibility="collapsed"
+        )
+    
+    if st.button("➕ Add Alternative", key=f"create_add_alt_btn_{material_idx}", use_container_width=True):
+        if not validate_quantity(quantity):
+            st.error("❌ Invalid quantity")
+            return
+        
+        if not validate_percentage(scrap):
+            st.error("❌ Invalid scrap rate")
+            return
+        
+        # Add alternative to material
+        alternative_data = {
+            'alternative_material_id': alt_material_id,
+            'quantity': quantity,
+            'uom': alt_uom,
+            'scrap_rate': scrap,
+            'priority': priority
+        }
+        
+        materials = state.get_create_materials()
+        materials[material_idx]['alternatives'].append(alternative_data)
+        
+        state.set_dialog_state(state.DIALOG_CREATE, {
+            'step': state.get_create_step(),
+            'header_data': state.get_create_header_data(),
+            'materials': materials
+        })
+        
+        st.success("✅ Alternative added!")
+        st.rerun()
 
 
 def _render_add_material_form(state: StateManager):
-    """
-    Render add material form with clear labels
-    
-    Args:
-        state: State manager
-    """
+    """Render add material form"""
     st.markdown("**Add Material:**")
     
-    # ✅ ADD HEADER ROW FOR CLARITY
     col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
     
     with col1:
@@ -306,7 +412,6 @@ def _render_add_material_form(state: StateManager):
     with col5:
         st.markdown("**Scrap %**")
     
-    # Input row
     col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
     
     with col1:
@@ -325,8 +430,7 @@ def _render_add_material_form(state: StateManager):
             "Material",
             options=list(product_options.keys()),
             key="create_add_material_select",
-            label_visibility="collapsed",  # Hide redundant label since we have header
-            help="Select the material/component to add"
+            label_visibility="collapsed"
         )
         
         material_id = product_options.get(selected_material)
@@ -336,8 +440,7 @@ def _render_add_material_form(state: StateManager):
             "Type",
             options=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"],
             key="create_add_material_type",
-            label_visibility="collapsed",
-            help="Material classification type"
+            label_visibility="collapsed"
         )
     
     with col3:
@@ -348,8 +451,7 @@ def _render_add_material_form(state: StateManager):
             step=0.1,
             format="%.4f",
             key="create_add_material_qty",
-            label_visibility="collapsed",
-            help="Required quantity per output unit"
+            label_visibility="collapsed"
         )
     
     with col4:
@@ -374,23 +476,19 @@ def _render_add_material_form(state: StateManager):
             value=0.0,
             step=0.5,
             key="create_add_material_scrap",
-            label_visibility="collapsed",
-            help="Expected waste/scrap percentage (0-100%)"  # ✅ Clear explanation
+            label_visibility="collapsed"
         )
     
-    # Add button
     if st.button("➕ Add Material", key="create_add_material_btn", use_container_width=True):
         if not material_id:
             st.error("❌ Please select a material")
             return
         
-        # Check duplicate
         current_materials = state.get_create_materials()
         if any(m['material_id'] == material_id for m in current_materials):
             st.error("❌ Material already added")
             return
         
-        # Validate
         if not validate_quantity(quantity):
             st.error("❌ Invalid quantity")
             return
@@ -399,31 +497,22 @@ def _render_add_material_form(state: StateManager):
             st.error("❌ Invalid scrap rate (must be 0-100%)")
             return
         
-        # Add material
         material_data = {
             'material_id': material_id,
             'material_type': material_type,
             'quantity': quantity,
             'uom': mat_uom,
-            'scrap_rate': scrap_rate
+            'scrap_rate': scrap_rate,
+            'alternatives': []
         }
         
         state.add_create_material(material_data)
-        st.success("✅ Material added!")
+        st.success("✅ Material added! You can add alternatives using 🔀 button.")
         st.rerun()
 
+
 def _validate_step1(bom_name: str, product_id: int, output_qty: float) -> list:
-    """
-    Validate step 1 data
-    
-    Args:
-        bom_name: BOM name
-        product_id: Product ID
-        output_qty: Output quantity
-    
-    Returns:
-        List of error messages
-    """
+    """Validate step 1 data"""
     errors = []
     
     if not bom_name or len(bom_name.strip()) == 0:
@@ -439,24 +528,15 @@ def _validate_step1(bom_name: str, product_id: int, output_qty: float) -> list:
 
 
 def _handle_create_bom(state: StateManager, manager: BOMManager):
-    """
-    Handle BOM creation
-    
-    Args:
-        state: State manager
-        manager: BOM manager
-    """
+    """Handle BOM creation with alternatives"""
     try:
-        # Get data
         header_data = state.get_create_header_data()
         materials = state.get_create_materials()
         
-        # Validate materials
         if not materials:
             st.error("❌ At least one material is required")
             return
         
-        # Prepare BOM data
         user_id = st.session_state.get('user_id', 1)
         
         bom_data = {
@@ -471,18 +551,14 @@ def _handle_create_bom(state: StateManager, manager: BOMManager):
             'created_by': user_id
         }
         
-        # Create BOM
         state.set_loading(True)
         bom_code = manager.create_bom(bom_data)
         state.set_loading(False)
         
-        # Record action
         state.record_action('create', bom_code=bom_code)
         
-        # Show success
         state.show_success(f"✅ BOM {bom_code} created successfully!")
         
-        # Close dialog
         state.close_dialog()
         
         st.rerun()

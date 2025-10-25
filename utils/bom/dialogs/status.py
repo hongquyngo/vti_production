@@ -1,7 +1,7 @@
 # utils/bom/dialogs/status.py
 """
-Change BOM Status Dialog - FIXED BUTTON KEYS
-Status transition with validation
+Change BOM Status Dialog with Alternatives Awareness
+Status transition with validation considering alternatives
 """
 
 import logging
@@ -16,17 +16,11 @@ logger = logging.getLogger(__name__)
 
 @st.dialog("🔄 Change BOM Status", width="large")
 def show_status_dialog(bom_id: int):
-    """
-    Change BOM status dialog
-    
-    Args:
-        bom_id: BOM ID to change status
-    """
+    """Change BOM status dialog"""
     state = StateManager()
     manager = BOMManager()
     
     try:
-        # Load BOM info
         bom_info = manager.get_bom_info(bom_id)
         
         if not bom_info:
@@ -60,7 +54,6 @@ def show_status_dialog(bom_id: int):
         # New status selection
         st.markdown("### Select New Status")
         
-        # Get allowed transitions
         allowed_statuses = STATUS_WORKFLOW.get(current_status, [])
         
         if not allowed_statuses:
@@ -71,7 +64,6 @@ def show_status_dialog(bom_id: int):
                 st.rerun()
             return
         
-        # Radio buttons for status selection
         new_status = st.radio(
             "New Status",
             options=allowed_statuses,
@@ -122,14 +114,7 @@ def show_status_dialog(bom_id: int):
 
 
 def _render_status_requirements(status: str, bom_info: dict, manager: BOMManager):
-    """
-    Render requirements for selected status
-    
-    Args:
-        status: Target status
-        bom_info: BOM information
-        manager: BOM manager
-    """
+    """Render requirements for selected status with alternatives awareness"""
     st.markdown("#### Requirements:")
     
     if status == 'ACTIVE':
@@ -151,11 +136,27 @@ def _render_status_requirements(status: str, bom_info: dict, manager: BOMManager
         has_output = bom_info.get('output_qty', 0) > 0
         output_icon = "✅" if has_output else "❌"
         st.write(f"{output_icon} Output quantity > 0")
+        
+        # ✅ NEW: Check stock availability with alternatives awareness
+        if has_materials:
+            stock_status = _check_stock_with_alternatives(bom_details, manager)
+            
+            if stock_status['has_critical_issues']:
+                st.warning("⚠️ **Stock Issues:**")
+                for issue in stock_status['critical_issues']:
+                    st.write(f"  - {issue}")
+            
+            if stock_status['has_warnings']:
+                with st.expander("ℹ️ Stock Warnings (non-blocking)", expanded=False):
+                    for warning in stock_status['warnings']:
+                        st.write(f"  - {warning}")
+            
+            if stock_status['has_alternatives_available']:
+                st.success(f"✅ {stock_status['alternatives_available_count']} material(s) have alternatives with stock")
     
     elif status == 'INACTIVE':
         st.info("**To deactivate BOM:**")
         
-        # Check active orders
         active_orders = bom_info.get('active_orders', 0)
         no_active_orders = active_orders == 0
         
@@ -170,24 +171,71 @@ def _render_status_requirements(status: str, bom_info: dict, manager: BOMManager
     elif status == 'DRAFT':
         st.info("**Reverting to DRAFT:**")
         st.write("✅ Can edit BOM information")
-        st.write("✅ Can modify materials")
+        st.write("✅ Can modify materials and alternatives")
         st.write("⚠️ Cannot be used in manufacturing orders")
+
+
+def _check_stock_with_alternatives(bom_details, manager: BOMManager) -> dict:
+    """
+    Check stock availability considering alternatives
+    
+    Returns:
+        {
+            'has_critical_issues': bool,  # Materials with no stock AND no alternatives
+            'critical_issues': list,
+            'has_warnings': bool,         # Materials with no stock but have alternatives
+            'warnings': list,
+            'has_alternatives_available': bool,
+            'alternatives_available_count': int
+        }
+    """
+    critical_issues = []
+    warnings = []
+    alternatives_available_count = 0
+    
+    for _, material in bom_details.iterrows():
+        mat_name = material['material_name']
+        mat_stock = float(material['current_stock'])
+        alt_count = int(material.get('alternatives_count', 0))
+        
+        if mat_stock <= 0:
+            # Primary material has no stock
+            if alt_count > 0:
+                # Check if alternatives have stock
+                alternatives = manager.get_material_alternatives(material['id'])
+                alts_with_stock = alternatives[alternatives['current_stock'] > 0]
+                
+                if not alts_with_stock.empty:
+                    # Has alternatives with stock - just a warning
+                    warnings.append(
+                        f"**{mat_name}**: No stock, but has {len(alts_with_stock)} "
+                        f"alternative(s) with stock available"
+                    )
+                    alternatives_available_count += 1
+                else:
+                    # No alternatives with stock - critical
+                    critical_issues.append(
+                        f"**{mat_name}**: No stock and {alt_count} alternative(s) also have no stock"
+                    )
+            else:
+                # No stock and no alternatives - critical
+                critical_issues.append(
+                    f"**{mat_name}**: No stock and no alternatives defined"
+                )
+    
+    return {
+        'has_critical_issues': len(critical_issues) > 0,
+        'critical_issues': critical_issues,
+        'has_warnings': len(warnings) > 0,
+        'warnings': warnings,
+        'has_alternatives_available': alternatives_available_count > 0,
+        'alternatives_available_count': alternatives_available_count
+    }
 
 
 def _validate_status_transition(current: str, new: str, 
                                 bom_info: dict, manager: BOMManager) -> tuple[bool, str]:
-    """
-    Validate if status transition is allowed
-    
-    Args:
-        current: Current status
-        new: New status
-        bom_info: BOM information
-        manager: BOM manager
-    
-    Returns:
-        Tuple of (can_transition, error_message)
-    """
+    """Validate if status transition is allowed"""
     # Check if same status
     if current == new:
         return False, "New status must be different from current status"
@@ -207,6 +255,15 @@ def _validate_status_transition(current: str, new: str,
         # Check output quantity
         if bom_info.get('output_qty', 0) <= 0:
             return False, "Output quantity must be greater than 0"
+        
+        # ✅ NEW: Check critical stock issues (no stock AND no alternatives)
+        stock_status = _check_stock_with_alternatives(bom_details, manager)
+        if stock_status['has_critical_issues']:
+            return False, (
+                f"Cannot activate BOM: {len(stock_status['critical_issues'])} "
+                f"material(s) have no stock and no alternatives available. "
+                f"Please add stock or define alternatives."
+            )
     
     # Validate INACTIVE requirements
     if new == 'INACTIVE':
@@ -220,36 +277,22 @@ def _validate_status_transition(current: str, new: str,
 
 def _handle_status_update(bom_id: int, new_status: str, bom_info: dict,
                          state: StateManager, manager: BOMManager):
-    """
-    Handle status update
-    
-    Args:
-        bom_id: BOM ID
-        new_status: New status
-        bom_info: BOM information
-        state: State manager
-        manager: BOM manager
-    """
+    """Handle status update"""
     try:
-        # Get user ID
         user_id = st.session_state.get('user_id', 1)
         
-        # Update status
         manager.update_bom_status(bom_id, new_status, user_id)
         
-        # Record action
         state.record_action(
             'status_change',
             bom_id=bom_id,
             bom_code=bom_info['bom_code']
         )
         
-        # Show success
         state.show_success(
             f"✅ BOM {bom_info['bom_code']} status updated to {new_status}"
         )
         
-        # Close dialog
         state.close_dialog()
         
         st.rerun()

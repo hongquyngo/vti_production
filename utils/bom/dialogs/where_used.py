@@ -1,7 +1,7 @@
 # utils/bom/dialogs/where_used.py
 """
-Where Used Analysis Dialog - FIXED BUTTON KEYS
-Find which BOMs use a specific product/material
+Where Used Analysis Dialog with Alternatives Support
+Find which BOMs use a specific product/material (primary or alternative)
 """
 
 import logging
@@ -23,22 +23,15 @@ logger = logging.getLogger(__name__)
 
 @st.dialog("🔍 Where Used Analysis", width="large")
 def show_where_used_dialog():
-    """
-    Where used analysis dialog
-    Find which BOMs use a specific product/material
-    """
+    """Where used analysis dialog"""
     state = StateManager()
     manager = BOMManager()
     
-    st.info("ℹ️ Find which BOMs use a specific product or material")
+    st.info("ℹ️ Find which BOMs use a specific product or material (including alternatives)")
     
-    # Product selection
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        # Check if pre-filled from view dialog
-        default_product_id = state.get_where_used_product()
-        
         product_id = render_material_selector(
             key="where_used_product",
             label="Select Product/Material to Search"
@@ -55,11 +48,9 @@ def show_where_used_dialog():
     
     st.markdown("---")
     
-    # Perform search
     if search_clicked and product_id:
         _perform_search(product_id, state, manager)
     
-    # Display cached results if available
     results = state.get_where_used_results()
     
     if results is not None:
@@ -67,28 +58,18 @@ def show_where_used_dialog():
     
     st.markdown("---")
     
-    # Close button
     if st.button("✔ Close", use_container_width=True, key="where_used_close_btn"):
         state.close_dialog()
         st.rerun()
 
 
 def _perform_search(product_id: int, state: StateManager, manager: BOMManager):
-    """
-    Perform where used search
-    
-    Args:
-        product_id: Product ID to search
-        state: State manager
-        manager: BOM manager
-    """
+    """Perform where used search"""
     try:
         state.set_loading(True)
         
-        # Search
         results = manager.get_where_used(product_id)
         
-        # Cache results
         state.set_where_used_product(product_id)
         state.set_where_used_results(results)
         
@@ -101,38 +82,33 @@ def _perform_search(product_id: int, state: StateManager, manager: BOMManager):
 
 
 def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMManager):
-    """
-    Render search results
-    
-    Args:
-        results: Search results DataFrame
-        state: State manager
-        manager: BOM manager
-    """
+    """Render search results with primary and alternative usage"""
     if results.empty:
         st.info("ℹ️ This product is not used in any BOM")
         return
     
-    # Summary
-    st.success(f"✅ Found in **{len(results)}** BOM(s)")
+    # Separate primary and alternative usage
+    primary_results = results[results['usage_type'] == 'PRIMARY']
+    alt_results = results[results['usage_type'] != 'PRIMARY']
     
-    # Statistics
+    # Summary
+    total_boms = results['bom_id'].nunique()
+    st.success(f"✅ Found in **{total_boms}** BOM(s)")
+    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Total BOMs", len(results))
+        st.metric("Total BOMs", total_boms)
     
     with col2:
-        active_count = len(results[results['bom_status'] == 'ACTIVE'])
-        st.metric("Active BOMs", active_count)
+        st.metric("As Primary", len(primary_results))
     
     with col3:
-        draft_count = len(results[results['bom_status'] == 'DRAFT'])
-        st.metric("Draft BOMs", draft_count)
+        st.metric("As Alternative", len(alt_results))
     
     with col4:
-        total_qty = results['quantity'].sum()
-        st.metric("Total Usage", format_number(total_qty, 2))
+        active_count = results[results['bom_status'] == 'ACTIVE']['bom_id'].nunique()
+        st.metric("Active BOMs", active_count)
     
     st.markdown("---")
     
@@ -145,22 +121,30 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
     display_df['quantity'] = display_df['quantity'].apply(lambda x: format_number(x, 4))
     display_df['scrap_rate'] = display_df['scrap_rate'].apply(lambda x: f"{format_number(x, 2)}%")
     
-    # Column config
+    # Add usage type badge
+    def format_usage_type(row):
+        if row['usage_type'] == 'PRIMARY':
+            return "🟢 PRIMARY"
+        else:
+            return f"🔀 {row['usage_type']}"
+    
+    display_df['usage_badge'] = display_df.apply(format_usage_type, axis=1)
+    
     column_config = {
-        "bom_code": st.column_config.TextColumn("BOM Code", width="medium"),
-        "bom_name": st.column_config.TextColumn("BOM Name", width="large"),
+        "bom_code": st.column_config.TextColumn("BOM Code", width="small"),
+        "bom_name": st.column_config.TextColumn("BOM Name", width="medium"),
         "bom_type": st.column_config.TextColumn("Type", width="small"),
         "bom_status": st.column_config.TextColumn("Status", width="small"),
-        "output_product_name": st.column_config.TextColumn("Output Product", width="large"),
-        "quantity": st.column_config.TextColumn("Quantity", width="small"),
+        "usage_badge": st.column_config.TextColumn("Usage", width="small"),
+        "output_product_name": st.column_config.TextColumn("Output Product", width="medium"),
+        "quantity": st.column_config.TextColumn("Qty", width="small"),
         "uom": st.column_config.TextColumn("UOM", width="small"),
         "scrap_rate": st.column_config.TextColumn("Scrap %", width="small"),
     }
     
-    # Display table with selection
     event = st.dataframe(
         display_df[[
-            'bom_code', 'bom_name', 'bom_type', 'bom_status',
+            'bom_code', 'bom_name', 'bom_type', 'bom_status', 'usage_badge',
             'output_product_name', 'quantity', 'uom', 'scrap_rate'
         ]],
         use_container_width=True,
@@ -170,7 +154,6 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
         selection_mode="single-row"
     )
     
-    # Handle row click - open view dialog
     if event.selection.rows:
         selected_idx = event.selection.rows[0]
         selected_bom_id = results.iloc[selected_idx]['bom_id']
@@ -181,10 +164,24 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
         
         with col1:
             if st.button("👁️ View BOM", use_container_width=True, key=f"where_used_view_{selected_bom_id}"):
-                # Close where used dialog and open view dialog
                 state.close_dialog()
                 state.open_dialog(state.DIALOG_VIEW, selected_bom_id)
                 st.rerun()
+    
+    st.markdown("---")
+    
+    # Usage breakdown
+    if not alt_results.empty:
+        st.markdown("### Alternative Usage Breakdown")
+        
+        with st.expander("🔀 View Alternative Usage Details", expanded=False):
+            for _, row in alt_results.iterrows():
+                st.markdown(
+                    f"- **{row['bom_code']}** - {row['bom_name']}: "
+                    f"Used as {row['usage_type']} | "
+                    f"Qty: {row['quantity']} {row['uom']} | "
+                    f"Scrap: {row['scrap_rate']}%"
+                )
     
     st.markdown("---")
     
@@ -196,35 +193,25 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
 
 
 def _export_results(results: pd.DataFrame, state: StateManager):
-    """
-    Export results to Excel
-    
-    Args:
-        results: Results DataFrame
-        state: State manager
-    """
+    """Export results to Excel"""
     try:
-        # Prepare export data
         export_df = results[[
             'bom_code', 'bom_name', 'bom_type', 'bom_status',
-            'output_product_name', 'material_type',
+            'usage_type', 'output_product_name', 'material_type',
             'quantity', 'uom', 'scrap_rate'
         ]].copy()
         
-        # Clean column names
         export_df.columns = [
             'BOM Code', 'BOM Name', 'BOM Type', 'Status',
-            'Output Product', 'Material Type',
+            'Usage Type', 'Output Product', 'Material Type',
             'Quantity', 'UOM', 'Scrap Rate (%)'
         ]
         
-        # Export to Excel
         excel_data = export_to_excel(
             export_df,
             sheet_name="Where Used"
         )
         
-        # Download button
         create_download_button(
             excel_data,
             filename="where_used_analysis.xlsx",

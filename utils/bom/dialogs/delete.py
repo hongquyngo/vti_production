@@ -1,7 +1,7 @@
 # utils/bom/dialogs/delete.py
 """
-Delete BOM Confirmation Dialog - FIXED IMPORT
-Simple confirmation dialog with safety checks
+Delete BOM Confirmation Dialog with Alternatives Info
+Shows complete deletion impact including alternatives
 """
 
 import logging
@@ -16,17 +16,11 @@ logger = logging.getLogger(__name__)
 
 @st.dialog("🗑️ Delete BOM", width="large")
 def show_delete_dialog(bom_id: int):
-    """
-    Delete BOM confirmation dialog
-    
-    Args:
-        bom_id: BOM ID to delete
-    """
+    """Delete BOM confirmation dialog"""
     state = StateManager()
     manager = BOMManager()
     
     try:
-        # Load BOM info
         bom_info = manager.get_bom_info(bom_id)
         
         if not bom_info:
@@ -34,6 +28,9 @@ def show_delete_dialog(bom_id: int):
             if st.button("Close", key=f"delete_notfound_close_{bom_id}"):
                 st.rerun()
             return
+        
+        # Get deletion impact details
+        deletion_impact = _get_deletion_impact(bom_id, bom_info, manager)
         
         # Check if deletable
         can_delete, error_msg = _check_deletable(bom_info)
@@ -54,7 +51,12 @@ def show_delete_dialog(bom_id: int):
         with col2:
             st.write(f"**Product:** {bom_info['product_name']}")
             st.write(f"**Status:** {bom_info['status']}")
-            st.write(f"**Materials:** {bom_info.get('material_count', 0)}")
+            st.write(f"**Materials:** {deletion_impact['material_count']}")
+        
+        st.markdown("---")
+        
+        # Show deletion impact
+        _render_deletion_impact(deletion_impact)
         
         st.markdown("---")
         
@@ -70,7 +72,7 @@ def show_delete_dialog(bom_id: int):
         # Confirmation checkbox
         confirmed = render_confirmation_checkbox(
             f"delete_confirm_{bom_id}",
-            "✓ I understand this will permanently delete the BOM"
+            "✓ I understand this will permanently delete the BOM and all its materials/alternatives"
         )
         
         st.markdown("---")
@@ -102,12 +104,110 @@ def show_delete_dialog(bom_id: int):
             st.rerun()
 
 
+def _get_deletion_impact(bom_id: int, bom_info: dict, manager: BOMManager) -> dict:
+    """
+    Get complete deletion impact including alternatives
+    
+    Returns:
+        {
+            'material_count': int,
+            'total_alternatives_count': int,
+            'materials_with_alternatives': int,
+            'materials': [
+                {
+                    'name': str,
+                    'alternatives_count': int
+                }
+            ]
+        }
+    """
+    try:
+        bom_details = manager.get_bom_details(bom_id)
+        
+        material_count = len(bom_details)
+        total_alternatives = int(bom_details['alternatives_count'].sum()) if not bom_details.empty else 0
+        materials_with_alts = int((bom_details['alternatives_count'] > 0).sum()) if not bom_details.empty else 0
+        
+        # Get material details
+        materials_info = []
+        if not bom_details.empty:
+            for _, mat in bom_details.iterrows():
+                alt_count = int(mat.get('alternatives_count', 0))
+                materials_info.append({
+                    'name': mat['material_name'],
+                    'code': mat['material_code'],
+                    'alternatives_count': alt_count
+                })
+        
+        return {
+            'material_count': material_count,
+            'total_alternatives_count': total_alternatives,
+            'materials_with_alternatives': materials_with_alts,
+            'materials': materials_info
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting deletion impact: {e}")
+        return {
+            'material_count': 0,
+            'total_alternatives_count': 0,
+            'materials_with_alternatives': 0,
+            'materials': []
+        }
+
+
+def _render_deletion_impact(impact: dict):
+    """Render deletion impact summary"""
+    st.markdown("### 📊 Deletion Impact")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            "Materials",
+            impact['material_count'],
+            help="Number of materials that will be deleted"
+        )
+    
+    with col2:
+        st.metric(
+            "Materials with Alternatives",
+            impact['materials_with_alternatives'],
+            help="Materials that have alternative materials defined"
+        )
+    
+    with col3:
+        st.metric(
+            "Total Alternatives",
+            impact['total_alternatives_count'],
+            help="Total number of alternative materials that will be deleted"
+        )
+    
+    # Show details if there are alternatives
+    if impact['total_alternatives_count'] > 0:
+        st.markdown("---")
+        
+        st.warning(
+            f"⚠️ **This BOM has {impact['total_alternatives_count']} alternative material(s) "
+            f"defined across {impact['materials_with_alternatives']} material(s). "
+            f"All alternatives will be permanently deleted.**"
+        )
+        
+        # Show expandable list of materials with alternatives
+        with st.expander("📋 View materials with alternatives", expanded=False):
+            for mat in impact['materials']:
+                if mat['alternatives_count'] > 0:
+                    st.markdown(
+                        f"- **{mat['name']}** ({mat['code']}) "
+                        f"→ 🔀 **{mat['alternatives_count']} alternative(s)**"
+                    )
+    else:
+        st.info("ℹ️ This BOM has no alternative materials defined.")
+
+
 def _check_deletable(bom_info: dict) -> tuple[bool, str]:
     """
     Check if BOM can be deleted
-    
-    Args:
-        bom_info: BOM information dictionary
     
     Returns:
         Tuple of (can_delete, error_message)
@@ -126,20 +226,11 @@ def _check_deletable(bom_info: dict) -> tuple[bool, str]:
 
 
 def _handle_delete(bom_id: int, bom_info: dict, state: StateManager, manager: BOMManager):
-    """
-    Handle BOM deletion
-    
-    Args:
-        bom_id: BOM ID
-        bom_info: BOM information
-        state: State manager
-        manager: BOM manager
-    """
+    """Handle BOM deletion"""
     try:
-        # Get user ID from session
         user_id = st.session_state.get('user_id', 1)
         
-        # Delete BOM
+        # Delete BOM (soft delete on header, materials and alternatives remain but inaccessible)
         manager.delete_bom(bom_id, user_id)
         
         # Record action
