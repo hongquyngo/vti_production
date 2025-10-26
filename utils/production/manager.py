@@ -105,8 +105,6 @@ class ProductionManager:
         if order_data['planned_qty'] <= 0:
             raise ValueError("Planned quantity must be positive")
         
-        if order_data['warehouse_id'] == order_data['target_warehouse_id']:
-            raise ValueError("Source and target warehouse must be different")
         
         with self.engine.begin() as conn:
             try:

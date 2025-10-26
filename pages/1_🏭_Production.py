@@ -1,17 +1,16 @@
 # pages/1_🏭_Production.py
 """
-Production Management User Interface - REFACTORED
+Production Management User Interface - REFACTORED v2.2
 Complete production cycle: Order → Issue → Return → Complete
 
 IMPROVEMENTS:
-- Fixed warehouse validation (moved before form)
-- Allow same warehouse option (no distinction between material/finished goods warehouse)
+- Removed warehouse validation - source and target can be the same
+- Simplified warehouse selection UI
 - Fixed missing submit button issue
 - Removed blocking time.sleep() calls
 - Fixed DataFrame concatenation bug
 - Better error messages and user guidance
 """
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
@@ -74,7 +73,6 @@ def initialize_session_state():
         'current_view': 'list',
         'selected_order': None,
         'page_number': 1,
-        'allow_same_warehouse': True  # Default: allow same warehouse
     }
     
     for key, value in defaults.items():
@@ -312,35 +310,6 @@ def render_create_order():
     warehouse_count = len(warehouses)
     st.info(f"📦 Available warehouses: **{warehouse_count}**")
     
-    # Same warehouse option (always visible)
-    with st.expander("⚙️ Warehouse Settings", expanded=False):
-        st.session_state.allow_same_warehouse = st.checkbox(
-            "Allow same warehouse for materials and finished goods",
-            value=st.session_state.get('allow_same_warehouse', True),
-            help="Enable if your company allows using the same warehouse for both material issuing and finished goods receiving"
-        )
-        
-        if not st.session_state.allow_same_warehouse and warehouse_count < 2:
-            st.warning("""
-            ⚠️ **Need at least 2 warehouses when using separate warehouses**
-            
-            Current warehouses: **{warehouse_count}**
-            
-            **Options:**
-            1. Enable "Allow same warehouse" option above
-            2. Create another warehouse in Warehouse Management
-            """.format(warehouse_count=warehouse_count))
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🏭 Go to Warehouse Setup", type="primary", use_container_width=True):
-                    st.info("Please navigate to Warehouse Management")
-            with col2:
-                if st.button("← Back", use_container_width=True):
-                    set_view('list')
-                    st.rerun()
-            return
-    
     st.markdown("---")
     
     # ===== STEP 2: BOM Type Selection =====
@@ -425,28 +394,13 @@ def render_create_order():
                 help="Warehouse to issue materials from"
             )
             
-            # Target warehouse
-            if st.session_state.allow_same_warehouse:
-                # Allow selecting same warehouse
-                target_warehouse = st.selectbox(
-                    "Target Warehouse",
-                    warehouse_names,
-                    index=warehouse_names.index(source_warehouse) if source_warehouse in warehouse_names else 0,
-                    help="Warehouse to receive finished goods (can be same as source)"
-                )
-            else:
-                # Require different warehouse
-                target_options = [w for w in warehouse_names if w != source_warehouse]
-                
-                if not target_options:
-                    st.error("❌ No different warehouse available. Enable 'Allow same warehouse' option.")
-                    target_warehouse = source_warehouse  # Fallback
-                else:
-                    target_warehouse = st.selectbox(
-                        "Target Warehouse",
-                        target_options,
-                        help="Warehouse to receive finished goods (must be different from source)"
-                    )
+            # Target warehouse (can be same as source)
+            target_warehouse = st.selectbox(
+                "Target Warehouse",
+                warehouse_names,
+                index=warehouse_names.index(source_warehouse) if source_warehouse in warehouse_names else 0,
+                help="Warehouse to receive finished goods (can be same as source)"
+            )
             
             # Show warehouse info
             if source_warehouse == target_warehouse:
@@ -532,8 +486,6 @@ def render_create_order():
                     raise ValueError("Invalid target warehouse selection")
                 
                 # Check if same warehouse is allowed
-                if source_warehouse == target_warehouse and not st.session_state.allow_same_warehouse:
-                    raise ValueError("Source and target warehouse must be different. Enable 'Allow same warehouse' option to use the same warehouse.")
                 
                 # Validate BOM info exists
                 if not bom_info:
@@ -1140,8 +1092,8 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Manufacturing Module v2.1 - Production Management (Refactored)")
+    st.caption("Manufacturing Module v2.2 - Production Management (Refactored)")
 
 
 if __name__ == "__main__":
-    main()  
+    main()
