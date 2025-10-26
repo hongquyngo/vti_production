@@ -632,9 +632,14 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
             break
         
         # Skip expired batches
-        if batch['expired_date'] and batch['expired_date'] < date.today():
-            logger.warning(f"Skipping expired batch {batch['batch_no']}")
-            continue
+        expired_date = batch['expired_date']
+        if expired_date:
+            # Convert datetime to date if necessary
+            if isinstance(expired_date, datetime):
+                expired_date = expired_date.date()
+            if expired_date < date.today():
+                logger.warning(f"Skipping expired batch {batch['batch_no']}")
+                continue
         
         take_qty = min(remaining, float(batch['remain']))
         
