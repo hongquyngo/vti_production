@@ -185,7 +185,7 @@ def return_materials(order_id: int, returns: List[Dict],
                     INSERT INTO material_return_details (
                         material_return_id, material_id,
                         original_issue_detail_id, batch_no,
-                        quantity, uom, condition, expired_date
+                        quantity, uom, `condition`, expired_date
                     ) VALUES (
                         :return_id, :material_id,
                         :issue_detail_id, :batch_no,
