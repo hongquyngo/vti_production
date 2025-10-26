@@ -648,11 +648,11 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
             INSERT INTO material_issue_details (
                 material_issue_id, manufacturing_order_material_id,
                 material_id, quantity, uom, batch_no, 
-                inventory_history_id, expired_date, created_date
+                inventory_history_id, expired_date
             ) VALUES (
                 :issue_id, :order_material_id,
                 :material_id, :quantity, :uom, :batch_no,
-                :inventory_id, :expired_date, NOW()
+                :inventory_id, :expired_date
             )
         """)
         
