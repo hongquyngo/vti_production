@@ -1,7 +1,7 @@
 # utils/bom/common.py
 """
-Common utilities for BOM module - CLEANED VERSION
-Formatting, UI helpers, and product queries
+Common utilities for BOM module - ENHANCED VERSION
+Formatting, UI helpers, and product queries with full product info
 """
 
 import logging
@@ -83,19 +83,72 @@ def create_status_indicator(status: str) -> str:
     return f"{icon} {status}"
 
 
+# ==================== Product Display Formatting ====================
+
+def format_product_display(code: str, name: str, 
+                          package_size: Optional[str] = None,
+                          brand: Optional[str] = None,
+                          max_name_length: int = 40) -> str:
+    """
+    Format product display string: code | name | package_size (brand)
+    
+    Args:
+        code: Product code
+        name: Product name
+        package_size: Package size (optional)
+        brand: Brand name (optional)
+        max_name_length: Maximum length for product name before truncation
+    
+    Returns:
+        Formatted string
+    
+    Examples:
+        "PT-001 | Product ABC | 100g (Brand A)"
+        "PT-002 | Product XYZ | 500ml"
+        "PT-003 | Service Item (Brand C)"
+        "PT-004 | Product Name"
+    """
+    # Truncate name if too long
+    if len(name) > max_name_length:
+        name = name[:max_name_length - 3] + "..."
+    
+    # Build format: code | name | package (brand)
+    result = f"{code} | {name}"
+    
+    # Add package size and/or brand
+    extra_parts = []
+    
+    if package_size and str(package_size).strip() and str(package_size).strip() != '-':
+        extra_parts.append(str(package_size).strip())
+    
+    if brand and str(brand).strip() and str(brand).strip() != '-':
+        if extra_parts:
+            # Have package size, add brand in parentheses
+            extra_parts[0] = f"{extra_parts[0]} ({str(brand).strip()})"
+        else:
+            # No package size, just brand in parentheses
+            extra_parts.append(f"({str(brand).strip()})")
+    
+    if extra_parts:
+        result += " | " + " ".join(extra_parts)
+    
+    return result
+
+
 # ==================== Product Queries ====================
 
 def get_products(active_only: bool = True, 
                 exclude_services: bool = True) -> pd.DataFrame:
     """
-    Get products for BOM material selection
+    Get products for BOM material selection with full info
     
     Args:
         active_only: Only return approved/active products
         exclude_services: Exclude service items
     
     Returns:
-        DataFrame of products
+        DataFrame of products with columns: id, name, code, uom, package_size, 
+        brand, shelf_life, approval_status, is_service
     """
     engine = get_db_engine()
     
@@ -105,10 +158,13 @@ def get_products(active_only: bool = True,
             p.name,
             p.pt_code as code,
             p.uom,
+            p.package_size,
+            b.brand_name as brand,
             p.shelf_life,
             p.approval_status,
             p.is_service
         FROM products p
+        LEFT JOIN brands b ON p.brand_id = b.id
         WHERE p.delete_flag = 0
     """
     
@@ -118,7 +174,7 @@ def get_products(active_only: bool = True,
     if exclude_services:
         query += " AND p.is_service = 0"
     
-    query += " ORDER BY p.name"
+    query += " ORDER BY p.pt_code, p.name"
     
     try:
         return pd.read_sql(query, engine)
@@ -129,7 +185,7 @@ def get_products(active_only: bool = True,
 
 def get_product_by_id(product_id: int) -> Optional[dict]:
     """
-    Get single product by ID
+    Get single product by ID with full info
     
     Args:
         product_id: Product ID
@@ -145,9 +201,12 @@ def get_product_by_id(product_id: int) -> Optional[dict]:
             p.name,
             p.pt_code as code,
             p.uom,
+            p.package_size,
+            b.brand_name as brand,
             p.shelf_life,
             p.approval_status
         FROM products p
+        LEFT JOIN brands b ON p.brand_id = b.id
         WHERE p.id = %s AND p.delete_flag = 0
     """
     
@@ -259,7 +318,8 @@ def render_material_selector(key: str,
                              label: str = "Material",
                              default_index: int = 0) -> Optional[int]:
     """
-    Render product/material selector dropdown
+    Render product/material selector dropdown with enhanced format
+    Format: code | name | package_size (brand)
     
     Args:
         key: Unique key for widget
@@ -275,15 +335,21 @@ def render_material_selector(key: str,
         st.error("❌ No products found")
         return None
     
-    product_options = {
-        f"{row['name']} ({row['code']})": row['id']
-        for _, row in products.iterrows()
-    }
+    # Build options with new format
+    product_options = {}
+    for _, row in products.iterrows():
+        display_text = format_product_display(
+            code=row['code'],
+            name=row['name'],
+            package_size=row.get('package_size'),
+            brand=row.get('brand')
+        )
+        product_options[display_text] = row['id']
     
     selected = st.selectbox(
         label,
         options=list(product_options.keys()),
-        index=default_index,
+        index=default_index if default_index < len(product_options) else 0,
         key=key
     )
     
@@ -354,9 +420,85 @@ def render_bom_summary(bom_info: Dict[str, Any]):
         st.write(f"Materials: {bom_info.get('material_count', 0)}")
 
 
+# ==================== Material Type Counter ====================
+
+def count_materials_by_type(materials: list) -> Dict[str, int]:
+    """
+    Count materials by type
+    
+    Args:
+        materials: List of material dictionaries with 'material_type' key
+    
+    Returns:
+        Dictionary with counts: {'RAW_MATERIAL': n, 'PACKAGING': n, 'CONSUMABLE': n}
+    """
+    counts = {
+        'RAW_MATERIAL': 0,
+        'PACKAGING': 0,
+        'CONSUMABLE': 0
+    }
+    
+    for material in materials:
+        mat_type = material.get('material_type', 'RAW_MATERIAL')
+        if mat_type in counts:
+            counts[mat_type] += 1
+    
+    return counts
+
+
+def render_material_type_counter(materials: list, show_warning: bool = True):
+    """
+    Render material type counter with validation
+    
+    Args:
+        materials: List of materials
+        show_warning: Show warning if no RAW_MATERIAL
+    """
+    counts = count_materials_by_type(materials)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        raw_count = counts['RAW_MATERIAL']
+        if raw_count > 0:
+            st.success(f"🟢 RAW: {raw_count}")
+        else:
+            st.warning(f"⚠️ RAW: {raw_count}")
+    
+    with col2:
+        st.info(f"📦 PKG: {counts['PACKAGING']}")
+    
+    with col3:
+        st.info(f"🔧 CONS: {counts['CONSUMABLE']}")
+    
+    # Show validation warning
+    if show_warning and counts['RAW_MATERIAL'] == 0:
+        st.warning("⚠️ **At least 1 RAW_MATERIAL is required to create BOM**")
+
+
+def validate_materials_for_bom(materials: list) -> tuple[bool, str]:
+    """
+    Validate materials list for BOM creation
+    
+    Args:
+        materials: List of materials
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if not materials:
+        return False, "At least one material is required"
+    
+    counts = count_materials_by_type(materials)
+    
+    if counts['RAW_MATERIAL'] == 0:
+        return False, "At least one RAW_MATERIAL is required"
+    
+    return True, ""
+
+
 # ==================== Constants ====================
 
-# Only used constant - keep it
 STATUS_WORKFLOW = {
     'DRAFT': ['ACTIVE', 'INACTIVE'],
     'ACTIVE': ['INACTIVE'],

@@ -1,7 +1,8 @@
 # utils/bom/dialogs/create.py
 """
-Create BOM Dialog with Alternatives Support
+Create BOM Dialog with Alternatives Support - ENHANCED VERSION
 2-step wizard: Header information → Materials (with alternatives)
+Validation: At least 1 RAW_MATERIAL required
 """
 
 import logging
@@ -14,9 +15,12 @@ from utils.bom.state import StateManager
 from utils.bom.common import (
     get_products,
     get_product_by_id,
+    format_product_display,
     render_step_indicator,
     validate_quantity,
-    validate_percentage
+    validate_percentage,
+    render_material_type_counter,
+    validate_materials_for_bom
 )
 
 logger = logging.getLogger(__name__)
@@ -78,10 +82,16 @@ def _render_step1_header(state: StateManager):
             product_id = None
             uom = 'PCS'
         else:
-            product_options = {
-                f"{row['name']} ({row['code']})": row['id']
-                for _, row in products.iterrows()
-            }
+            # Build product options with new format
+            product_options = {}
+            for _, row in products.iterrows():
+                display_text = format_product_display(
+                    code=row['code'],
+                    name=row['name'],
+                    package_size=row.get('package_size'),
+                    brand=row.get('brand')
+                )
+                product_options[display_text] = row['id']
             
             default_idx = 0
             saved_product_id = saved_data.get('product_id')
@@ -176,17 +186,26 @@ def _render_step2_materials(state: StateManager, manager: BOMManager):
     
     materials = state.get_create_materials()
     
+    # Material type counter with validation
+    st.markdown("### 📊 Material Summary")
+    render_material_type_counter(materials, show_warning=True)
+    
+    st.markdown("---")
+    
     if materials:
         st.markdown(f"**Materials Added ({len(materials)}):**")
         _render_material_list_with_alternatives(materials, state)
     else:
-        st.info("ℹ️ No materials added yet. Add at least one material below.")
+        st.info("ℹ️ No materials added yet. Add at least one RAW_MATERIAL below.")
     
     st.markdown("---")
     
     _render_add_material_form(state)
     
     st.markdown("---")
+    
+    # Validate before showing Create button
+    can_create, validation_error = validate_materials_for_bom(materials)
     
     col1, col2, col3 = st.columns([2, 1, 1])
     
@@ -196,13 +215,26 @@ def _render_step2_materials(state: StateManager, manager: BOMManager):
             st.rerun()
     
     with col2:
-        if st.button("✅ Create BOM", type="primary", use_container_width=True, key="create_step2_create"):
-            _handle_create_bom(state, manager)
+        if st.button(
+            "✅ Create BOM",
+            type="primary",
+            use_container_width=True,
+            disabled=not can_create,
+            key="create_step2_create"
+        ):
+            if can_create:
+                _handle_create_bom(state, manager)
+            else:
+                st.error(f"❌ {validation_error}")
     
     with col3:
         if st.button("❌ Cancel", use_container_width=True, key="create_step2_cancel"):
             state.close_dialog()
             st.rerun()
+    
+    # Show validation message below buttons if not valid
+    if not can_create:
+        st.error(f"❌ {validation_error}")
 
 
 def _render_material_list_with_alternatives(materials: list, state: StateManager):
@@ -223,7 +255,14 @@ def _render_material_list_with_alternatives(materials: list, state: StateManager
         
         with col1:
             alt_badge = f" 🔀 **{len(alternatives)} alt(s)**" if alternatives else ""
-            st.markdown(f"**{mat_info['name']}** ({mat_info['code']}){alt_badge}")
+            display_text = format_product_display(
+                code=mat_info['code'],
+                name=mat_info['name'],
+                package_size=mat_info.get('package_size'),
+                brand=mat_info.get('brand'),
+                max_name_length=30
+            )
+            st.markdown(f"**{display_text}**{alt_badge}")
         
         with col2:
             st.text(material['material_type'])
@@ -244,88 +283,118 @@ def _render_material_list_with_alternatives(materials: list, state: StateManager
         
         # Inline alternatives management
         with st.expander(f"🔀 Manage Alternatives ({len(alternatives)})", expanded=False):
-            _render_alternatives_manager_inline(idx, material, alternatives, products, state)
-
-
-def _render_alternatives_manager_inline(material_idx: int, material: dict, 
-                                       alternatives: list, products: pd.DataFrame,
-                                       state: StateManager):
-    """Render inline alternatives manager"""
-    primary_mat_id = material['material_id']
-    
-    # Show current alternatives
-    if alternatives:
-        st.markdown("**Current Alternatives:**")
-        
-        for alt_idx, alt in enumerate(alternatives):
-            alt_product = products[products['id'] == alt['alternative_material_id']]
+            if alternatives:
+                st.markdown("**Current Alternatives:**")
+                _render_alternatives_list(idx, alternatives, material, state)
+                st.markdown("---")
             
-            if not alt_product.empty:
-                alt_info = alt_product.iloc[0]
-                
-                col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
-                
-                with col1:
-                    st.text(f"Priority {alt['priority']}: {alt_info['name']} ({alt_info['code']})")
-                
-                with col2:
-                    st.text(f"{alt['quantity']:.4f}")
-                
-                with col3:
-                    st.text(alt['uom'])
-                
-                with col4:
-                    st.text(f"{alt['scrap_rate']:.2f}%")
-                
-                with col5:
-                    if st.button("🗑️", key=f"create_del_alt_{material_idx}_{alt_idx}", help="Remove"):
-                        # Remove alternative from material
-                        materials = state.get_create_materials()
-                        materials[material_idx]['alternatives'].pop(alt_idx)
-                        state.set_dialog_state(state.DIALOG_CREATE, {
-                            'step': state.get_create_step(),
-                            'header_data': state.get_create_header_data(),
-                            'materials': materials
-                        })
-                        st.rerun()
+            st.markdown("**Add Alternative:**")
+            _render_add_alternative_form(idx, material, alternatives, state)
         
-        st.markdown("---")
+        st.markdown("")
+
+
+def _render_alternatives_list(material_idx: int, alternatives: list, 
+                               material: dict, state: StateManager):
+    """Render alternatives list for a material in create mode"""
+    products = get_products()
     
-    # Add alternative form
-    st.markdown("**Add Alternative:**")
+    for alt_idx, alt in enumerate(alternatives):
+        alt_product = products[products['id'] == alt['alternative_material_id']]
+        
+        if alt_product.empty:
+            continue
+        
+        alt_info = alt_product.iloc[0]
+        
+        col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
+        
+        with col1:
+            display_text = format_product_display(
+                code=alt_info['code'],
+                name=alt_info['name'],
+                package_size=alt_info.get('package_size'),
+                brand=alt_info.get('brand'),
+                max_name_length=25
+            )
+            st.text(f"  {display_text}")
+        
+        with col2:
+            st.text(f"{alt['quantity']:.4f}")
+        
+        with col3:
+            st.text(alt['uom'])
+        
+        with col4:
+            st.text(f"{alt['scrap_rate']:.2f}%")
+        
+        with col5:
+            priority_color = "🟢" if alt['priority'] == 1 else "🟡" if alt['priority'] == 2 else "⚪"
+            st.text(f"{priority_color} P{alt['priority']}")
+        
+        with col6:
+            if st.button("🗑️", key=f"create_remove_alt_{material_idx}_{alt_idx}", help="Remove alternative"):
+                materials = state.get_create_materials()
+                materials[material_idx]['alternatives'].pop(alt_idx)
+                
+                state.set_dialog_state(state.DIALOG_CREATE, {
+                    'step': state.get_create_step(),
+                    'header_data': state.get_create_header_data(),
+                    'materials': materials
+                })
+                
+                st.success("✅ Alternative removed!")
+                st.rerun()
+
+
+def _render_add_alternative_form(material_idx: int, material: dict, 
+                                  alternatives: list, state: StateManager):
+    """Render add alternative form"""
+    products = get_products()
     
-    col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
+    if products.empty:
+        st.warning("⚠️ No products available to add as alternatives")
+        return
+    
+    # Build product options with new format
+    product_options = {}
+    for _, row in products.iterrows():
+        # Exclude primary material
+        if row['id'] == material['material_id']:
+            continue
+        
+        # Exclude already added alternatives
+        if any(alt['alternative_material_id'] == row['id'] for alt in alternatives):
+            continue
+        
+        display_text = format_product_display(
+            code=row['code'],
+            name=row['name'],
+            package_size=row.get('package_size'),
+            brand=row.get('brand')
+        )
+        product_options[display_text] = row['id']
+    
+    if not product_options:
+        st.info("ℹ️ No more products available as alternatives")
+        return
+    
+    col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
     
     with col1:
-        # Exclude primary and existing alternatives
-        exclude_ids = [primary_mat_id]
-        exclude_ids.extend([alt['alternative_material_id'] for alt in alternatives])
-        
-        available = products[~products['id'].isin(exclude_ids)]
-        
-        if available.empty:
-            st.warning("⚠️ No materials available as alternatives")
-            return
-        
-        product_options = {
-            f"{row['name']} ({row['code']})": row['id']
-            for _, row in available.iterrows()
-        }
-        
-        selected = st.selectbox(
-            "Material",
+        selected_alt = st.selectbox(
+            "Alternative Material",
             options=list(product_options.keys()),
-            key=f"create_add_alt_mat_{material_idx}",
+            key=f"create_add_alt_select_{material_idx}",
             label_visibility="collapsed"
         )
-        
-        alt_material_id = product_options.get(selected)
+        alt_material_id = product_options.get(selected_alt)
     
     with col2:
         quantity = st.number_input(
             "Quantity",
             min_value=0.0001,
-            value=material['quantity'],  # Default to primary quantity
+            value=material['quantity'],
             step=0.1,
             format="%.4f",
             key=f"create_add_alt_qty_{material_idx}",
@@ -346,7 +415,7 @@ def _render_alternatives_manager_inline(material_idx: int, material: dict,
             "Scrap %",
             min_value=0.0,
             max_value=100.0,
-            value=material['scrap_rate'],  # Default to primary scrap rate
+            value=material['scrap_rate'],
             step=0.5,
             key=f"create_add_alt_scrap_{material_idx}",
             label_visibility="collapsed"
@@ -421,10 +490,16 @@ def _render_add_material_form(state: StateManager):
             st.error("❌ No products available")
             return
         
-        product_options = {
-            f"{row['name']} ({row['code']})": row['id']
-            for _, row in products.iterrows()
-        }
+        # Build product options with new format
+        product_options = {}
+        for _, row in products.iterrows():
+            display_text = format_product_display(
+                code=row['code'],
+                name=row['name'],
+                package_size=row.get('package_size'),
+                brand=row.get('brand')
+            )
+            product_options[display_text] = row['id']
         
         selected_material = st.selectbox(
             "Material",
@@ -528,13 +603,16 @@ def _validate_step1(bom_name: str, product_id: int, output_qty: float) -> list:
 
 
 def _handle_create_bom(state: StateManager, manager: BOMManager):
-    """Handle BOM creation with alternatives"""
+    """Handle BOM creation with alternatives and validation"""
     try:
         header_data = state.get_create_header_data()
         materials = state.get_create_materials()
         
-        if not materials:
-            st.error("❌ At least one material is required")
+        # Final validation
+        can_create, validation_error = validate_materials_for_bom(materials)
+        
+        if not can_create:
+            st.error(f"❌ {validation_error}")
             return
         
         user_id = st.session_state.get('user_id', 1)

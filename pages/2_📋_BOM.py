@@ -1,12 +1,15 @@
-# pages/2_📋_BOM.py - Complete BOM Management (Refactored)
+# pages/2_📋_BOM.py - Complete BOM Management (Enhanced)
 """
 Bill of Materials (BOM) Management
 Clean single-page UI with dialog-driven workflows
+Enhanced with full product information display
 """
 
 import streamlit as st
 import pandas as pd
 import logging
+from datetime import datetime
+from io import BytesIO
 
 from utils.auth import AuthManager
 from utils.bom.manager import BOMManager
@@ -178,7 +181,7 @@ def render_filters_and_metrics():
 
 
 def render_bom_table():
-    """Render BOM table with action buttons"""
+    """Render BOM table with action buttons and enhanced product info"""
     boms = st.session_state.get('filtered_boms', pd.DataFrame())
     
     if boms.empty:
@@ -194,22 +197,31 @@ def render_bom_table():
         lambda x: format_number(x, 2)
     )
     
-    # Column config
+    # Format product info columns
+    display_df['product_code'] = display_df['product_code'].fillna('-')
+    display_df['package_size'] = display_df['package_size'].fillna('-')
+    display_df['brand'] = display_df['brand'].fillna('-')
+    
+    # Column config with new columns
     column_config = {
-        "bom_code": st.column_config.TextColumn("BOM Code", width="medium"),
-        "bom_name": st.column_config.TextColumn("BOM Name", width="large"),
+        "bom_code": st.column_config.TextColumn("BOM Code", width="small"),
+        "bom_name": st.column_config.TextColumn("BOM Name", width="medium"),
         "bom_type": st.column_config.TextColumn("Type", width="small"),
-        "product_name": st.column_config.TextColumn("Product", width="large"),
+        "product_code": st.column_config.TextColumn("Product Code", width="small"),
+        "product_name": st.column_config.TextColumn("Product Name", width="medium"),
+        "package_size": st.column_config.TextColumn("Package", width="small"),
+        "brand": st.column_config.TextColumn("Brand", width="small"),
         "output_qty": st.column_config.TextColumn("Output Qty", width="small"),
         "uom": st.column_config.TextColumn("UOM", width="small"),
         "status": st.column_config.TextColumn("Status", width="small"),
         "material_count": st.column_config.NumberColumn("Materials", width="small"),
     }
     
-    # Selectable dataframe
+    # Selectable dataframe with new columns
     event = st.dataframe(
         display_df[[
-            'bom_code', 'bom_name', 'bom_type', 'product_name',
+            'bom_code', 'bom_name', 'bom_type',
+            'product_code', 'product_name', 'package_size', 'brand',
             'output_qty', 'uom', 'status', 'material_count'
         ]],
         use_container_width=True,
@@ -230,155 +242,78 @@ def render_bom_table():
         render_action_buttons(selected_bom_id, boms.iloc[selected_idx])
 
 
-def render_action_buttons(bom_id: int, bom_data: pd.Series):
-    """
-    Render action buttons for selected BOM
-    
-    Args:
-        bom_id: Selected BOM ID
-        bom_data: Selected BOM data
-    """
+def render_action_buttons(bom_id: int, bom_row: pd.Series):
+    """Render action buttons for selected BOM"""
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     with col1:
-        if st.button("👁️ View", use_container_width=True):
+        if st.button("👁️ View", use_container_width=True, key=f"action_view_{bom_id}"):
             state.open_dialog(state.DIALOG_VIEW, bom_id)
             st.rerun()
     
     with col2:
-        # Edit only for DRAFT
-        disabled = bom_data['status'] != 'DRAFT'
-        if st.button(
-            "✏️ Edit",
-            disabled=disabled,
-            use_container_width=True,
-            help="Only DRAFT BOMs can be edited" if disabled else None
-        ):
+        if st.button("✏️ Edit", use_container_width=True, key=f"action_edit_{bom_id}"):
             state.open_dialog(state.DIALOG_EDIT, bom_id)
             st.rerun()
     
     with col3:
-        if st.button("🔄 Status", use_container_width=True):
+        if st.button("🔄 Status", use_container_width=True, key=f"action_status_{bom_id}"):
             state.open_dialog(state.DIALOG_STATUS, bom_id)
             st.rerun()
     
     with col4:
-        if st.button("🔍 Where Used", use_container_width=True):
-            # Pre-fill product for where used
-            state.set_where_used_product(bom_data['product_id'])
+        if st.button("🔍 Where Used", use_container_width=True, key=f"action_where_{bom_id}"):
+            state.set_where_used_product(bom_row['product_id'])
             state.open_dialog(state.DIALOG_WHERE_USED)
             st.rerun()
     
     with col5:
-        # Delete only non-ACTIVE with no usage
-        can_delete = (
-            bom_data['status'] != 'ACTIVE' and 
-            bom_data.get('usage_count', 0) == 0
-        )
-        
-        if st.button(
-            "🗑️ Delete",
-            type="secondary",
-            disabled=not can_delete,
-            use_container_width=True,
-            help="Cannot delete ACTIVE BOMs or BOMs in use" if not can_delete else None
-        ):
-            state.open_dialog(state.DIALOG_DELETE, bom_id)
-            st.rerun()
+        if st.button("📥 Export", use_container_width=True, key=f"action_export_{bom_id}"):
+            export_bom_to_excel(bom_id)
     
     with col6:
-        if st.button("📥 Export", use_container_width=True):
-            export_bom(bom_id, bom_data)
+        if st.button("🗑️ Delete", use_container_width=True, type="secondary", key=f"action_delete_{bom_id}"):
+            state.open_dialog(state.DIALOG_DELETE, bom_id)
+            st.rerun()
 
 
-def export_bom(bom_id: int, bom_data: pd.Series):
-    """
-    Export BOM to Excel with complete information (MINIMAL template)
-    
-    Includes:
-    - BOM header information (code, name, type, status, version)
-    - Output product details
-    - Materials table with formatting
-    - Summary statistics
-    - Notes section
-    - Creator information
-    - Generation timestamp
-    
-    Args:
-        bom_id: BOM ID to export
-        bom_data: BOM data series from main table
-    """
+def export_bom_to_excel(bom_id: int):
+    """Export BOM to formatted Excel file"""
     try:
-        import pandas as pd
-        from io import BytesIO
-        from datetime import datetime
-        from utils.db import get_db_engine
-        
-        # ==================== DATA COLLECTION ====================
-        
-        # Get full BOM data
         bom_info = bom_manager.get_bom_info(bom_id)
         bom_details = bom_manager.get_bom_details(bom_id)
         
-        # Validation
         if not bom_info:
             st.error("❌ BOM not found")
             return
         
         if bom_details.empty:
-            st.warning("⚠️ No materials to export")
+            st.warning("⚠️ BOM has no materials to export")
             return
         
-        # ==================== CREATOR INFORMATION ====================
-        
-        # Get creator name with proper fallbacks
-        created_info = "N/A"
-        created_date = str(bom_info.get('created_date', ''))[:10] if bom_info.get('created_date') else 'Unknown'
-        
-        if bom_info.get('created_by'):
-            try:
-                creator_query = f"""
-                    SELECT 
-                        COALESCE(
-                            CONCAT(e.first_name, ' ', e.last_name),
-                            u.username,
-                            'Unknown User'
-                        ) as full_name
-                    FROM users u
-                    LEFT JOIN employees e ON u.employee_id = e.id
-                    WHERE u.id = {bom_info['created_by']}
-                """
-                engine = get_db_engine()
-                creator_result = pd.read_sql(creator_query, engine)
-                
-                if not creator_result.empty:
-                    creator_name = creator_result.iloc[0]['full_name']
-                    if creator_name and creator_name not in ['Unknown User', 'None', '']:
-                        created_info = f"{creator_name} on {created_date}"
-                    else:
-                        created_info = f"User ID {bom_info['created_by']} on {created_date}"
-                else:
-                    created_info = f"User ID {bom_info['created_by']} on {created_date}"
-            except Exception as e:
-                logger.warning(f"Could not fetch creator info: {e}")
-                created_info = f"User ID {bom_info['created_by']} on {created_date}"
-        else:
-            created_info = f"System on {created_date}"
-        
-        # ==================== EXCEL GENERATION ====================
-        
+        # Create Excel file
         output = BytesIO()
         
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             workbook = writer.book
             worksheet = workbook.add_worksheet('BOM')
+            writer.sheets['BOM'] = worksheet
             
-            # ==================== FORMAT DEFINITIONS ====================
+            # ==================== FORMATS ====================
             
-            # Title format (large, bold, blue background)
-            header_format = workbook.add_format({
+            title_format = workbook.add_format({
                 'bold': True,
-                'font_size': 14,
+                'font_size': 16,
+                'align': 'left',
+                'valign': 'vcenter',
+                'font_color': '#1f4e78',
+                'bottom': 2,
+                'bottom_color': '#1f4e78'
+            })
+            
+            section_format = workbook.add_format({
+                'bold': True,
+                'font_size': 11,
                 'align': 'center',
                 'valign': 'vcenter',
                 'bg_color': '#4472C4',
@@ -386,107 +321,94 @@ def export_bom(bom_id: int, bom_data: pd.Series):
                 'border': 1
             })
             
-            # Section header format (bold, light blue)
-            section_format = workbook.add_format({
-                'bold': True,
-                'font_size': 11,
-                'align': 'left',
-                'valign': 'vcenter',
-                'bg_color': '#4472C4',
-                'font_color': 'white',
-                'border': 1
-            })
-            
-            # Label format (bold, gray background)
             label_format = workbook.add_format({
                 'bold': True,
                 'align': 'left',
                 'valign': 'vcenter',
+                'font_size': 10,
                 'bg_color': '#D9E1F2',
                 'border': 1
             })
             
-            # Value format (standard)
             value_format = workbook.add_format({
                 'align': 'left',
                 'valign': 'vcenter',
+                'font_size': 10,
                 'border': 1
             })
             
-            # Table header format (bold, centered, blue)
             table_header_format = workbook.add_format({
                 'bold': True,
                 'align': 'center',
                 'valign': 'vcenter',
                 'bg_color': '#4472C4',
                 'font_color': 'white',
-                'border': 1
+                'border': 1,
+                'font_size': 10
             })
             
-            # Table cell format (standard)
             table_cell_format = workbook.add_format({
                 'align': 'left',
                 'valign': 'vcenter',
-                'border': 1
+                'border': 1,
+                'font_size': 9
             })
             
-            # Number format (right-aligned, 4 decimals)
             number_format = workbook.add_format({
                 'align': 'right',
                 'valign': 'vcenter',
                 'border': 1,
+                'font_size': 9,
                 'num_format': '0.0000'
             })
             
-            # Percentage format (right-aligned, 2 decimals)
             percent_format = workbook.add_format({
                 'align': 'right',
                 'valign': 'vcenter',
                 'border': 1,
+                'font_size': 9,
                 'num_format': '0.00"%"'
             })
             
-            # Notes format (wrapped text)
             notes_format = workbook.add_format({
                 'align': 'left',
                 'valign': 'top',
                 'border': 1,
+                'font_size': 9,
                 'text_wrap': True
             })
             
-            # Footer format (small, italic)
             footer_format = workbook.add_format({
                 'italic': True,
-                'font_size': 9,
-                'align': 'left',
+                'font_size': 8,
+                'align': 'center',
                 'valign': 'vcenter',
                 'font_color': '#666666'
             })
             
-            # ==================== CONTENT GENERATION ====================
+            # ==================== CONTENT ====================
             
-            row = 0  # Current row tracker
+            row = 0
             
             # --- SECTION 1: TITLE ---
-            worksheet.merge_range(row, 0, row, 6, 'BILL OF MATERIALS', header_format)
-            worksheet.set_row(row, 25)
+            worksheet.merge_range(row, 0, row, 6, 
+                                f"BILL OF MATERIALS (BOM)", title_format)
             row += 2
             
             # --- SECTION 2: BOM INFORMATION ---
             worksheet.merge_range(row, 0, row, 6, 'BOM INFORMATION', section_format)
             row += 1
             
-            # Code & Status
-            worksheet.write(row, 0, 'Code:', label_format)
+            # BOM Code & Name
+            worksheet.write(row, 0, 'BOM Code:', label_format)
             worksheet.write(row, 1, bom_info['bom_code'], value_format)
-            worksheet.write(row, 3, 'Status:', label_format)
-            status_text = f"● {bom_info['status']}"
-            worksheet.write(row, 4, status_text, value_format)
+            worksheet.write(row, 3, 'BOM Name:', label_format)
+            worksheet.merge_range(row, 4, row, 6, bom_info['bom_name'], value_format)
             row += 1
             
-            # Name & Version
-            worksheet.write(row, 0, 'Name:', label_format)
-            worksheet.merge_range(row, 1, row, 2, bom_info['bom_name'], value_format)
+            # Status & Version
+            worksheet.write(row, 0, 'Status:', label_format)
+            worksheet.write(row, 1, bom_info['status'], value_format)
             worksheet.write(row, 3, 'Version:', label_format)
             worksheet.write(row, 4, bom_info.get('version', 1), value_format)
             row += 1
@@ -504,23 +426,44 @@ def export_bom(bom_id: int, bom_data: pd.Series):
             worksheet.write(row, 4, eff_date, value_format)
             row += 2
             
-            # --- SECTION 3: OUTPUT PRODUCT ---
+            # --- SECTION 3: OUTPUT PRODUCT (ENHANCED) ---
             worksheet.merge_range(row, 0, row, 6, 'OUTPUT PRODUCT', section_format)
             row += 1
             
-            # Product
-            worksheet.write(row, 0, 'Product:', label_format)
-            product_text = f"{bom_info['product_name']} ({bom_info['product_code']})"
-            worksheet.merge_range(row, 1, row, 4, product_text, value_format)
+            # Product Code
+            worksheet.write(row, 0, 'Product Code:', label_format)
+            worksheet.write(row, 1, bom_info.get('product_code', '-'), value_format)
             row += 1
             
-            # Quantity
-            worksheet.write(row, 0, 'Quantity:', label_format)
+            # Product Name
+            worksheet.write(row, 0, 'Product Name:', label_format)
+            worksheet.merge_range(row, 1, row, 4, bom_info['product_name'], value_format)
+            row += 1
+            
+            # Package Size
+            worksheet.write(row, 0, 'Package Size:', label_format)
+            worksheet.write(row, 1, bom_info.get('package_size', '-'), value_format)
+            
+            # Brand
+            worksheet.write(row, 3, 'Brand:', label_format)
+            worksheet.write(row, 4, bom_info.get('brand', '-'), value_format)
+            row += 1
+            
+            # Output Quantity
+            worksheet.write(row, 0, 'Output Quantity:', label_format)
             qty_text = f"{float(bom_info['output_qty']):.2f} {bom_info['uom']}"
             worksheet.write(row, 1, qty_text, value_format)
             row += 2
             
             # --- SECTION 4: CREATOR INFORMATION ---
+            created_by = bom_info.get('created_by_name', 'System')
+            created_date = bom_info.get('created_date', '')
+            if created_date and not pd.isna(created_date):
+                created_date = str(created_date)
+            else:
+                created_date = '-'
+            created_info = f"{created_by} on {created_date}"
+            
             worksheet.write(row, 0, 'Created:', label_format)
             worksheet.merge_range(row, 1, row, 4, created_info, value_format)
             row += 2
