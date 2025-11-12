@@ -296,14 +296,23 @@ def render_bom_table():
                 st.rerun()
         
         with col2:
-            # Edit only for DRAFT status
-            disabled = selected_bom['status'] != 'DRAFT'
+            # Edit enabled for DRAFT (full) and ACTIVE (alternatives only)
+            can_edit = selected_bom['status'] in ['DRAFT', 'ACTIVE']
+            disabled = not can_edit
+            
+            # Dynamic help text based on status
+            if selected_bom['status'] == 'DRAFT':
+                help_text = "Full edit mode - Modify all BOM information"
+            elif selected_bom['status'] == 'ACTIVE':
+                help_text = "Limited edit - Manage alternatives only"
+            else:
+                help_text = f"Cannot edit {selected_bom['status']} BOMs"
             if st.button(
                 "✏️ Edit",
                 use_container_width=True,
                 disabled=disabled,
                 key=f"edit_btn_{selected_bom_id}",
-                help="Only DRAFT BOMs can be edited"
+                help=help_text
             ):
                 state.open_dialog(state.DIALOG_EDIT, selected_bom_id)
                 st.rerun()
