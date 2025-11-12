@@ -1,8 +1,8 @@
-# pages/2_📋_BOM.py - Complete BOM Management (Enhanced)
+# pages/1___BOM.py
 """
-Bill of Materials (BOM) Management
+Bill of Materials (BOM) Management - ENHANCED VERSION
 Clean single-page UI with dialog-driven workflows
-Enhanced with full product information display
+Added Clone functionality and performance optimizations
 """
 
 import streamlit as st
@@ -16,7 +16,9 @@ from utils.bom.manager import BOMManager
 from utils.bom.state import StateManager
 from utils.bom.common import (
     create_status_indicator,
-    format_number
+    format_number,
+    format_product_display,
+    get_products
 )
 
 # Import dialogs
@@ -26,6 +28,7 @@ from utils.bom.dialogs.edit import show_edit_dialog
 from utils.bom.dialogs.delete import show_delete_dialog
 from utils.bom.dialogs.status import show_status_dialog
 from utils.bom.dialogs.where_used import show_where_used_dialog
+from utils.bom.dialogs.clone import show_clone_dialog  # New clone dialog
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +58,23 @@ bom_manager, state = get_managers()
 # Initialize state
 state.init_state()
 
+# ==================== Cache Management ====================
+
+def load_products_to_cache():
+    """Load products to cache if not already cached"""
+    cached = state.get_cached_products()
+    if cached is None:
+        products = get_products()
+        state.set_cached_products(products)
+        logger.info("Products loaded to cache")
+
 # ==================== Main Application ====================
 
 def main():
     """Main application entry point"""
+    
+    # Load products to cache on page load
+    load_products_to_cache()
     
     # Header with create button
     render_header()
@@ -76,18 +92,29 @@ def main():
     render_active_dialog()
     
     # Footer
-    st.markdown("---")
-    st.caption("Manufacturing Module v2.0 - BOM Management | Dialog-driven UI")
+    render_footer()
 
 
 def render_header():
-    """Render page header with create button"""
-    col1, col2 = st.columns([3, 1])
+    """Render page header with action buttons"""
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
     
     with col1:
         st.title("📋 BOM Management")
     
     with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔍 Where Used", use_container_width=True):
+            state.open_dialog(state.DIALOG_WHERE_USED)
+            st.rerun()
+    
+    with col3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄 Refresh", use_container_width=True):
+            state.clear_cache()
+            st.rerun()
+    
+    with col4:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("➕ Create BOM", type="primary", use_container_width=True):
             state.open_dialog(state.DIALOG_CREATE)
@@ -108,7 +135,37 @@ def render_messages():
 
 def render_filters_and_metrics():
     """Render filters and metrics"""
-    st.markdown("### 🔍 Filters")
+    st.markdown("### 🔍 Filters & Metrics")
+    
+    # Metrics row
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    # Get BOMs for metrics (use cached if available)
+    if 'all_boms' not in st.session_state:
+        st.session_state['all_boms'] = bom_manager.get_boms()
+    
+    all_boms = st.session_state['all_boms']
+    
+    with col1:
+        st.metric("Total BOMs", len(all_boms))
+    
+    with col2:
+        active_count = len(all_boms[all_boms['status'] == 'ACTIVE'])
+        st.metric("Active", active_count)
+    
+    with col3:
+        draft_count = len(all_boms[all_boms['status'] == 'DRAFT'])
+        st.metric("Draft", draft_count)
+    
+    with col4:
+        inactive_count = len(all_boms[all_boms['status'] == 'INACTIVE'])
+        st.metric("Inactive", inactive_count)
+    
+    with col5:
+        in_use_count = len(all_boms[all_boms['usage_count'] > 0])
+        st.metric("In Use", in_use_count)
+    
+    st.markdown("---")
     
     # Filters
     col1, col2, col3, col4 = st.columns(4)
@@ -130,7 +187,7 @@ def render_filters_and_metrics():
     with col3:
         filter_search = st.text_input(
             "Search",
-            placeholder="Code or name...",
+            placeholder="Code, name or product...",
             key="filter_search"
         )
     
@@ -138,522 +195,246 @@ def render_filters_and_metrics():
         st.markdown("<br>", unsafe_allow_html=True)
         search_clicked = st.button("🔍 Search", use_container_width=True)
     
-    # Get BOMs with filters
-    try:
-        boms = bom_manager.get_boms(
-            bom_type=filter_type if filter_type != "All" else None,
-            status=filter_status if filter_status != "All" else None,
-            search=filter_search if filter_search else None
-        )
-        
-        # Store in session for table rendering
-        st.session_state['filtered_boms'] = boms
-        
-        if boms.empty:
-            st.info("ℹ️ No BOMs found")
-            return
-        
-        # Metrics
-        st.markdown("---")
-        st.markdown("### 📊 Summary")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Total", len(boms))
-        
-        with col2:
-            active_count = len(boms[boms['status'] == 'ACTIVE'])
-            st.metric("Active", active_count)
-        
-        with col3:
-            draft_count = len(boms[boms['status'] == 'DRAFT'])
-            st.metric("Draft", draft_count)
-        
-        with col4:
-            inactive_count = len(boms[boms['status'] == 'INACTIVE'])
-            st.metric("Inactive", inactive_count)
-    
-    except Exception as e:
-        logger.error(f"Error loading BOMs: {e}")
-        st.error(f"❌ Error loading BOMs: {str(e)}")
-        st.session_state['filtered_boms'] = pd.DataFrame()
+    # Apply filters
+    if search_clicked or 'filtered_boms' not in st.session_state:
+        try:
+            filtered_boms = bom_manager.get_boms(
+                bom_type=filter_type if filter_type != "All" else None,
+                status=filter_status if filter_status != "All" else None,
+                search=filter_search if filter_search else None
+            )
+            st.session_state['filtered_boms'] = filtered_boms
+        except Exception as e:
+            logger.error(f"Error filtering BOMs: {e}")
+            st.error(f"❌ Error: {str(e)}")
+            st.session_state['filtered_boms'] = pd.DataFrame()
 
 
 def render_bom_table():
-    """Render BOM table with action buttons and enhanced product info"""
+    """Render BOM table with actions"""
+    st.markdown("### 📋 BOM List")
+    
+    # Get filtered BOMs
     boms = st.session_state.get('filtered_boms', pd.DataFrame())
     
     if boms.empty:
+        st.info("ℹ️ No BOMs found. Create your first BOM using the button above.")
         return
     
-    st.markdown("---")
-    st.markdown("### 📋 Bill of Materials List")
-    
-    # Format display
+    # Format display data
     display_df = boms.copy()
-    display_df['status'] = display_df['status'].apply(create_status_indicator)
-    display_df['output_qty'] = display_df['output_qty'].apply(
-        lambda x: format_number(x, 2)
+    
+    # Format columns for display
+    display_df['status_display'] = display_df['status'].apply(create_status_indicator)
+    display_df['output_display'] = display_df.apply(
+        lambda row: f"{format_number(row['output_qty'], 2)} {row['uom']}", 
+        axis=1
+    )
+    display_df['product_display'] = display_df.apply(
+        lambda row: format_product_display(
+            code=row['product_code'],
+            name=row['product_name'],
+            package_size=row.get('package_size'),
+            brand=row.get('brand')
+        ),
+        axis=1
+    )
+    display_df['materials_display'] = display_df['material_count'].apply(
+        lambda x: f"📦 {int(x)}" if pd.notna(x) else "📦 0"
+    )
+    display_df['usage_display'] = display_df['usage_count'].apply(
+        lambda x: f"🏭 {int(x)}" if x > 0 else "-"
     )
     
-    # Format product info columns
-    display_df['product_code'] = display_df['product_code'].fillna('-')
-    display_df['package_size'] = display_df['package_size'].fillna('-')
-    display_df['brand'] = display_df['brand'].fillna('-')
+    # Select columns to display
+    display_columns = [
+        'bom_code', 'bom_name', 'bom_type', 'product_display',
+        'output_display', 'status_display', 'materials_display', 
+        'usage_display', 'effective_date'
+    ]
     
-    # Column config with new columns
+    # Column configuration
     column_config = {
         "bom_code": st.column_config.TextColumn("BOM Code", width="small"),
         "bom_name": st.column_config.TextColumn("BOM Name", width="medium"),
         "bom_type": st.column_config.TextColumn("Type", width="small"),
-        "product_code": st.column_config.TextColumn("Product Code", width="small"),
-        "product_name": st.column_config.TextColumn("Product Name", width="medium"),
-        "package_size": st.column_config.TextColumn("Package", width="small"),
-        "brand": st.column_config.TextColumn("Brand", width="small"),
-        "output_qty": st.column_config.TextColumn("Output Qty", width="small"),
-        "uom": st.column_config.TextColumn("UOM", width="small"),
-        "status": st.column_config.TextColumn("Status", width="small"),
-        "material_count": st.column_config.NumberColumn("Materials", width="small"),
+        "product_display": st.column_config.TextColumn("Output Product", width="large"),
+        "output_display": st.column_config.TextColumn("Output", width="small"),
+        "status_display": st.column_config.TextColumn("Status", width="small"),
+        "materials_display": st.column_config.TextColumn("Materials", width="small"),
+        "usage_display": st.column_config.TextColumn("Usage", width="small"),
+        "effective_date": st.column_config.DateColumn("Effective", width="small"),
     }
     
-    # Selectable dataframe with new columns
+    # Display dataframe with selection
     event = st.dataframe(
-        display_df[[
-            'bom_code', 'bom_name', 'bom_type',
-            'product_code', 'product_name', 'package_size', 'brand',
-            'output_qty', 'uom', 'status', 'material_count'
-        ]],
+        display_df[display_columns],
         use_container_width=True,
         hide_index=True,
         column_config=column_config,
         on_select="rerun",
-        selection_mode="single-row"
+        selection_mode="single-row",
+        key="bom_table"
     )
     
     # Handle row selection
     if event.selection.rows:
         selected_idx = event.selection.rows[0]
-        selected_bom_id = boms.iloc[selected_idx]['id']
+        selected_bom = boms.iloc[selected_idx]
+        selected_bom_id = selected_bom['id']
         
         st.markdown("---")
-        st.markdown("### 🎯 Actions")
         
-        render_action_buttons(selected_bom_id, boms.iloc[selected_idx])
-
-
-def render_action_buttons(bom_id: int, bom_row: pd.Series):
-    """Render action buttons for selected BOM"""
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    
-    with col1:
-        if st.button("👁️ View", use_container_width=True, key=f"action_view_{bom_id}"):
-            state.open_dialog(state.DIALOG_VIEW, bom_id)
-            st.rerun()
-    
-    with col2:
-        if st.button("✏️ Edit", use_container_width=True, key=f"action_edit_{bom_id}"):
-            state.open_dialog(state.DIALOG_EDIT, bom_id)
-            st.rerun()
-    
-    with col3:
-        if st.button("🔄 Status", use_container_width=True, key=f"action_status_{bom_id}"):
-            state.open_dialog(state.DIALOG_STATUS, bom_id)
-            st.rerun()
-    
-    with col4:
-        if st.button("🔍 Where Used", use_container_width=True, key=f"action_where_{bom_id}"):
-            state.set_where_used_product(bom_row['product_id'])
-            state.open_dialog(state.DIALOG_WHERE_USED)
-            st.rerun()
-    
-    with col5:
-        if st.button("📥 Export", use_container_width=True, key=f"action_export_{bom_id}"):
-            export_bom_to_excel(bom_id)
-    
-    with col6:
-        if st.button("🗑️ Delete", use_container_width=True, type="secondary", key=f"action_delete_{bom_id}"):
-            state.open_dialog(state.DIALOG_DELETE, bom_id)
-            st.rerun()
-
-
-def export_bom_to_excel(bom_id: int):
-    """Export BOM to formatted Excel file"""
-    try:
-        bom_info = bom_manager.get_bom_info(bom_id)
-        bom_details = bom_manager.get_bom_details(bom_id)
+        # Action buttons for selected BOM
+        st.markdown(f"### Actions for: **{selected_bom['bom_code']}** - {selected_bom['bom_name']}")
         
-        if not bom_info:
-            st.error("❌ BOM not found")
-            return
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
         
-        if bom_details.empty:
-            st.warning("⚠️ BOM has no materials to export")
-            return
+        with col1:
+            if st.button("👁️ View", use_container_width=True, key=f"view_btn_{selected_bom_id}"):
+                state.open_dialog(state.DIALOG_VIEW, selected_bom_id)
+                st.rerun()
         
-        # Create Excel file
-        output = BytesIO()
+        with col2:
+            # Edit only for DRAFT status
+            disabled = selected_bom['status'] != 'DRAFT'
+            if st.button(
+                "✏️ Edit",
+                use_container_width=True,
+                disabled=disabled,
+                key=f"edit_btn_{selected_bom_id}",
+                help="Only DRAFT BOMs can be edited"
+            ):
+                state.open_dialog(state.DIALOG_EDIT, selected_bom_id)
+                st.rerun()
         
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            workbook = writer.book
-            worksheet = workbook.add_worksheet('BOM')
-            writer.sheets['BOM'] = worksheet
-            
-            # ==================== FORMATS ====================
-            
-            title_format = workbook.add_format({
-                'bold': True,
-                'font_size': 16,
-                'align': 'left',
-                'valign': 'vcenter',
-                'font_color': '#1f4e78',
-                'bottom': 2,
-                'bottom_color': '#1f4e78'
-            })
-            
-            section_format = workbook.add_format({
-                'bold': True,
-                'font_size': 11,
-                'align': 'center',
-                'valign': 'vcenter',
-                'bg_color': '#4472C4',
-                'font_color': 'white',
-                'border': 1
-            })
-            
-            label_format = workbook.add_format({
-                'bold': True,
-                'align': 'left',
-                'valign': 'vcenter',
-                'font_size': 10,
-                'bg_color': '#D9E1F2',
-                'border': 1
-            })
-            
-            value_format = workbook.add_format({
-                'align': 'left',
-                'valign': 'vcenter',
-                'font_size': 10,
-                'border': 1
-            })
-            
-            table_header_format = workbook.add_format({
-                'bold': True,
-                'align': 'center',
-                'valign': 'vcenter',
-                'bg_color': '#4472C4',
-                'font_color': 'white',
-                'border': 1,
-                'font_size': 10
-            })
-            
-            table_cell_format = workbook.add_format({
-                'align': 'left',
-                'valign': 'vcenter',
-                'border': 1,
-                'font_size': 9
-            })
-            
-            number_format = workbook.add_format({
-                'align': 'right',
-                'valign': 'vcenter',
-                'border': 1,
-                'font_size': 9,
-                'num_format': '0.0000'
-            })
-            
-            percent_format = workbook.add_format({
-                'align': 'right',
-                'valign': 'vcenter',
-                'border': 1,
-                'font_size': 9,
-                'num_format': '0.00"%"'
-            })
-            
-            notes_format = workbook.add_format({
-                'align': 'left',
-                'valign': 'top',
-                'border': 1,
-                'font_size': 9,
-                'text_wrap': True
-            })
-            
-            footer_format = workbook.add_format({
-                'italic': True,
-                'font_size': 8,
-                'align': 'center',
-                'valign': 'vcenter',
-                'font_color': '#666666'
-            })
-            
-            # ==================== CONTENT ====================
-            
-            row = 0
-            
-            # --- SECTION 1: TITLE ---
-            worksheet.merge_range(row, 0, row, 6, 
-                                f"BILL OF MATERIALS (BOM)", title_format)
-            row += 2
-            
-            # --- SECTION 2: BOM INFORMATION ---
-            worksheet.merge_range(row, 0, row, 6, 'BOM INFORMATION', section_format)
-            row += 1
-            
-            # BOM Code & Name
-            worksheet.write(row, 0, 'BOM Code:', label_format)
-            worksheet.write(row, 1, bom_info['bom_code'], value_format)
-            worksheet.write(row, 3, 'BOM Name:', label_format)
-            worksheet.merge_range(row, 4, row, 6, bom_info['bom_name'], value_format)
-            row += 1
-            
-            # Status & Version
-            worksheet.write(row, 0, 'Status:', label_format)
-            worksheet.write(row, 1, bom_info['status'], value_format)
-            worksheet.write(row, 3, 'Version:', label_format)
-            worksheet.write(row, 4, bom_info.get('version', 1), value_format)
-            row += 1
-            
-            # Type & Effective Date
-            worksheet.write(row, 0, 'Type:', label_format)
-            worksheet.write(row, 1, bom_info['bom_type'], value_format)
-            worksheet.write(row, 3, 'Effective Date:', label_format)
-            
-            eff_date = bom_info.get('effective_date', '')
-            if eff_date and not pd.isna(eff_date):
-                eff_date = str(eff_date)
-            else:
-                eff_date = '-'
-            worksheet.write(row, 4, eff_date, value_format)
-            row += 2
-            
-            # --- SECTION 3: OUTPUT PRODUCT (ENHANCED) ---
-            worksheet.merge_range(row, 0, row, 6, 'OUTPUT PRODUCT', section_format)
-            row += 1
-            
-            # Product Code
-            worksheet.write(row, 0, 'Product Code:', label_format)
-            worksheet.write(row, 1, bom_info.get('product_code', '-'), value_format)
-            row += 1
-            
-            # Product Name
-            worksheet.write(row, 0, 'Product Name:', label_format)
-            worksheet.merge_range(row, 1, row, 4, bom_info['product_name'], value_format)
-            row += 1
-            
-            # Package Size
-            worksheet.write(row, 0, 'Package Size:', label_format)
-            worksheet.write(row, 1, bom_info.get('package_size', '-'), value_format)
-            
-            # Brand
-            worksheet.write(row, 3, 'Brand:', label_format)
-            worksheet.write(row, 4, bom_info.get('brand', '-'), value_format)
-            row += 1
-            
-            # Output Quantity
-            worksheet.write(row, 0, 'Output Quantity:', label_format)
-            qty_text = f"{float(bom_info['output_qty']):.2f} {bom_info['uom']}"
-            worksheet.write(row, 1, qty_text, value_format)
-            row += 2
-            
-            # --- SECTION 4: CREATOR INFORMATION ---
-            created_by = bom_info.get('created_by_name', 'System')
-            created_date = bom_info.get('created_date', '')
-            if created_date and not pd.isna(created_date):
-                created_date = str(created_date)
-            else:
-                created_date = '-'
-            created_info = f"{created_by} on {created_date}"
-            
-            worksheet.write(row, 0, 'Created:', label_format)
-            worksheet.merge_range(row, 1, row, 4, created_info, value_format)
-            row += 2
-            
-            # --- SECTION 5: MATERIALS TABLE ---
-            worksheet.merge_range(row, 0, row, 6, 'MATERIALS REQUIRED', section_format)
-            row += 1
-            
-            # Table headers
-            headers = ['No', 'Code', 'Material Name', 'Type', 'Quantity', 'UOM', 'Scrap %']
-            for col, header in enumerate(headers):
-                worksheet.write(row, col, header, table_header_format)
-            row += 1
-            
-            # Material rows
-            material_counts = {
-                'RAW_MATERIAL': 0,
-                'PACKAGING': 0,
-                'CONSUMABLE': 0
-            }
-            
-            for idx, material in bom_details.iterrows():
-                # Row number
-                worksheet.write(row, 0, idx + 1, table_cell_format)
-                
-                # Material code
-                worksheet.write(row, 1, material['material_code'], table_cell_format)
-                
-                # Material name
-                worksheet.write(row, 2, material['material_name'], table_cell_format)
-                
-                # Material type (shortened)
-                type_map = {
-                    'RAW_MATERIAL': 'RAW',
-                    'PACKAGING': 'PKG',
-                    'CONSUMABLE': 'CONS'
-                }
-                type_short = type_map.get(material['material_type'], material['material_type'])
-                worksheet.write(row, 3, type_short, table_cell_format)
-                
-                # Quantity (4 decimals)
-                worksheet.write(row, 4, float(material['quantity']), number_format)
-                
-                # UOM
-                worksheet.write(row, 5, material['uom'], table_cell_format)
-                
-                # Scrap rate (percentage)
-                worksheet.write(row, 6, float(material['scrap_rate']), percent_format)
-                
-                # Count materials by type
-                mat_type = material['material_type']
-                material_counts[mat_type] = material_counts.get(mat_type, 0) + 1
-                
-                row += 1
-            
-            row += 1
-            
-            # --- SECTION 6: SUMMARY ---
-            worksheet.merge_range(row, 0, row, 6, 'SUMMARY', section_format)
-            row += 1
-            
-            # Total materials
-            total_materials = len(bom_details)
-            worksheet.write(row, 0, '• Total Materials:', label_format)
-            worksheet.write(row, 1, total_materials, value_format)
-            row += 1
-            
-            # Raw materials count
-            worksheet.write(row, 0, '  - Raw Materials:', value_format)
-            worksheet.write(row, 1, material_counts['RAW_MATERIAL'], value_format)
-            row += 1
-            
-            # Packaging count
-            worksheet.write(row, 0, '  - Packaging:', value_format)
-            worksheet.write(row, 1, material_counts['PACKAGING'], value_format)
-            row += 1
-            
-            # Consumables count
-            worksheet.write(row, 0, '  - Consumables:', value_format)
-            worksheet.write(row, 1, material_counts['CONSUMABLE'], value_format)
-            row += 2
-            
-            # --- SECTION 7: NOTES (if available) ---
-            if bom_info.get('notes') and str(bom_info['notes']).strip():
-                worksheet.merge_range(row, 0, row, 6, 'NOTES', section_format)
-                row += 1
-                
-                # Write notes with text wrapping
-                worksheet.merge_range(row, 0, row + 2, 6, 
-                                    str(bom_info['notes']), notes_format)
-                worksheet.set_row(row, 45)
-                row += 3
-            
-            row += 1
-            
-            # --- SECTION 8: FOOTER ---
-            generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            generated_by = st.session_state.get('username', 'System')
-            footer_text = (f"Generated: {generated_time} by {generated_by} | "
-                          f"Document: BOM-{bom_info['bom_code']}-v{bom_info.get('version', 1)}")
-            
-            worksheet.merge_range(row, 0, row, 6, footer_text, footer_format)
-            
-            # ==================== COLUMN WIDTHS ====================
-            
-            worksheet.set_column('A:A', 18)  # Labels / No
-            worksheet.set_column('B:B', 12)  # Code
-            worksheet.set_column('C:C', 35)  # Material Name
-            worksheet.set_column('D:D', 8)   # Type
-            worksheet.set_column('E:E', 10)  # Quantity
-            worksheet.set_column('F:F', 8)   # UOM
-            worksheet.set_column('G:G', 10)  # Scrap %
+        with col3:
+            if st.button("🔄 Clone", use_container_width=True, key=f"clone_btn_{selected_bom_id}"):
+                state.open_dialog(state.DIALOG_CLONE, selected_bom_id)
+                st.rerun()
         
-        # ==================== FILE DOWNLOAD ====================
+        with col4:
+            if st.button("📊 Status", use_container_width=True, key=f"status_btn_{selected_bom_id}"):
+                state.open_dialog(state.DIALOG_STATUS, selected_bom_id)
+                st.rerun()
         
-        # Get file bytes
-        excel_data = output.getvalue()
+        with col5:
+            if st.button("🔍 Where Used", use_container_width=True, key=f"where_btn_{selected_bom_id}"):
+                state.set_where_used_product(selected_bom['product_id'])
+                state.open_dialog(state.DIALOG_WHERE_USED)
+                st.rerun()
         
-        # Generate filename
-        version = bom_info.get('version', 1)
-        date_str = datetime.now().strftime('%Y%m%d')
-        filename = f"BOM_{bom_info['bom_code']}_v{version}_{date_str}.xlsx"
-        
-        # Create download button
-        from utils.bom.common import create_download_button
-        
-        create_download_button(
-            data=excel_data,
-            filename=filename,
-            label=f"📥 Download {bom_info['bom_code']}"
-        )
-        
-        st.success(f"✅ Excel file ready! ({len(bom_details)} materials)")
-    
-    except Exception as e:
-        logger.error(f"Error exporting BOM {bom_id}: {e}", exc_info=True)
-        st.error(f"❌ Export failed: {str(e)}")
-        st.info("💡 Please try again or contact support if the issue persists.")
+        with col6:
+            # Delete only for non-active BOMs with no usage
+            disabled = selected_bom['status'] == 'ACTIVE' or selected_bom['usage_count'] > 0
+            if st.button(
+                "🗑️ Delete",
+                use_container_width=True,
+                disabled=disabled,
+                type="secondary",
+                key=f"delete_btn_{selected_bom_id}",
+                help="Cannot delete ACTIVE BOMs or BOMs in use"
+            ):
+                state.open_dialog(state.DIALOG_DELETE, selected_bom_id)
+                st.rerun()
 
 
 def render_active_dialog():
-    """Mount and render active dialog"""
-    dialog_name = state.get_open_dialog()
+    """Render the currently active dialog"""
+    open_dialog = state.get_open_dialog()
     
-    if not dialog_name:
+    if not open_dialog:
         return
     
+    # Get current BOM ID if needed
+    bom_id = state.get_current_bom()
+    
     try:
-        if dialog_name == state.DIALOG_CREATE:
+        if open_dialog == state.DIALOG_CREATE:
             show_create_dialog()
         
-        elif dialog_name == state.DIALOG_VIEW:
-            bom_id = state.get_current_bom()
-            if bom_id:
-                show_view_dialog(bom_id)
-            else:
-                state.close_dialog()
-                st.rerun()
+        elif open_dialog == state.DIALOG_VIEW and bom_id:
+            show_view_dialog(bom_id)
         
-        elif dialog_name == state.DIALOG_EDIT:
-            bom_id = state.get_current_bom()
-            if bom_id:
-                show_edit_dialog(bom_id)
-            else:
-                state.close_dialog()
-                st.rerun()
+        elif open_dialog == state.DIALOG_EDIT and bom_id:
+            show_edit_dialog(bom_id)
         
-        elif dialog_name == state.DIALOG_DELETE:
-            bom_id = state.get_current_bom()
-            if bom_id:
-                show_delete_dialog(bom_id)
-            else:
-                state.close_dialog()
-                st.rerun()
+        elif open_dialog == state.DIALOG_DELETE and bom_id:
+            show_delete_dialog(bom_id)
         
-        elif dialog_name == state.DIALOG_STATUS:
-            bom_id = state.get_current_bom()
-            if bom_id:
-                show_status_dialog(bom_id)
-            else:
-                state.close_dialog()
-                st.rerun()
+        elif open_dialog == state.DIALOG_STATUS and bom_id:
+            show_status_dialog(bom_id)
         
-        elif dialog_name == state.DIALOG_WHERE_USED:
+        elif open_dialog == state.DIALOG_WHERE_USED:
             show_where_used_dialog()
+        
+        elif open_dialog == state.DIALOG_CLONE and bom_id:
+            show_clone_dialog(bom_id)
     
     except Exception as e:
-        logger.error(f"Error rendering dialog {dialog_name}: {e}")
-        st.error(f"❌ Dialog error: {str(e)}")
+        logger.error(f"Error rendering dialog {open_dialog}: {e}")
+        st.error(f"❌ Error opening dialog: {str(e)}")
         state.close_dialog()
+
+
+def render_footer():
+    """Render page footer"""
+    st.markdown("---")
+    
+    # Last action info
+    last_action = state.get_last_action()
+    if last_action.get('type'):
+        action_text = f"Last action: {last_action['type'].title()}"
+        if last_action.get('bom_code'):
+            action_text += f" - {last_action['bom_code']}"
+        if last_action.get('timestamp'):
+            action_text += f" at {last_action['timestamp'].strftime('%H:%M:%S')}"
+        st.caption(action_text)
+    
+    # Version info
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.caption("Manufacturing Module v2.1 - BOM Management | Enhanced with Clone & Performance Optimizations")
+    
+    with col2:
+        st.caption(f"Session: {st.session_state.get('user_name', 'Guest')}")
+
+
+# ==================== Export Functions ====================
+
+def export_boms_to_excel(boms: pd.DataFrame) -> bytes:
+    """Export BOMs to Excel file"""
+    output = BytesIO()
+    
+    # Prepare data for export
+    export_df = boms[[
+        'bom_code', 'bom_name', 'bom_type', 'product_name',
+        'output_qty', 'uom', 'status', 'material_count',
+        'usage_count', 'effective_date', 'created_date'
+    ]].copy()
+    
+    # Rename columns for export
+    export_df.columns = [
+        'BOM Code', 'BOM Name', 'Type', 'Product',
+        'Output Qty', 'UOM', 'Status', 'Materials',
+        'Usage Count', 'Effective Date', 'Created Date'
+    ]
+    
+    # Write to Excel
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        export_df.to_excel(writer, sheet_name='BOMs', index=False)
+        
+        # Auto-adjust column width
+        worksheet = writer.sheets['BOMs']
+        for idx, col in enumerate(export_df.columns):
+            max_len = max(
+                export_df[col].astype(str).str.len().max(),
+                len(str(col))
+            )
+            worksheet.set_column(idx, idx, min(max_len + 2, 50))
+    
+    return output.getvalue()
 
 
 # ==================== Run Application ====================

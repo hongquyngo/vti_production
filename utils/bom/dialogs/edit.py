@@ -1,7 +1,7 @@
 # utils/bom/dialogs/edit.py
 """
-Edit BOM Dialog with Material Alternatives Support
-Tabbed editor: BOM Info / Materials (with alternatives)
+Edit BOM Dialog with Material Alternatives Support - OPTIMIZED VERSION
+Tabbed editor with form containers to prevent unnecessary reruns
 Only DRAFT BOMs can be edited
 """
 
@@ -9,22 +9,34 @@ import logging
 import streamlit as st
 import pandas as pd
 from datetime import date
+from typing import Dict, List, Any, Optional
 
 from utils.bom.manager import BOMManager, BOMException, BOMValidationError, BOMNotFoundError
 from utils.bom.state import StateManager
 from utils.bom.common import (
     get_products,
     get_product_by_id,
+    format_product_display,
     validate_quantity,
-    validate_percentage
+    validate_percentage,
+    format_number,
+    create_status_indicator,
+    render_material_type_counter,
+    validate_materials_for_bom
 )
 
 logger = logging.getLogger(__name__)
 
+# Cache product list to avoid repeated queries
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_cached_products():
+    """Get cached product list"""
+    return get_products()
+
 
 @st.dialog("✏️ Edit BOM", width="large")
 def show_edit_dialog(bom_id: int):
-    """Edit BOM dialog (DRAFT only)"""
+    """Edit BOM dialog (DRAFT only) - Optimized version"""
     state = StateManager()
     manager = BOMManager()
     
@@ -39,6 +51,7 @@ def show_edit_dialog(bom_id: int):
                 st.rerun()
             return
         
+        # Check if editable
         if bom_info['status'] != 'DRAFT':
             st.error(f"❌ Only DRAFT BOMs can be edited. Current status: {bom_info['status']}")
             st.info("💡 Change status to DRAFT first if you need to edit.")
@@ -50,13 +63,14 @@ def show_edit_dialog(bom_id: int):
         
         st.markdown(f"### Editing: {bom_info['bom_code']} - {bom_info['bom_name']}")
         
+        # Tabs for different sections
         tab1, tab2 = st.tabs(["📄 BOM Information", "🧱 Materials"])
         
         with tab1:
-            _render_info_tab(bom_id, bom_info, state, manager)
+            _render_info_tab_optimized(bom_id, bom_info, state, manager)
         
         with tab2:
-            _render_materials_tab(bom_id, bom_details, state, manager)
+            _render_materials_tab_optimized(bom_id, bom_details, state, manager)
     
     except Exception as e:
         logger.error(f"Error in edit dialog: {e}")
@@ -67,121 +81,263 @@ def show_edit_dialog(bom_id: int):
             st.rerun()
 
 
-def _render_info_tab(bom_id: int, bom_info: dict, state: StateManager, manager: BOMManager):
-    """Render BOM information tab"""
+def _render_info_tab_optimized(bom_id: int, bom_info: dict, state: StateManager, manager: BOMManager):
+    """Render BOM information tab - Using Form Container"""
     st.markdown("### Edit BOM Information")
     
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        new_name = st.text_input(
-            "BOM Name *",
-            value=bom_info['bom_name'],
-            key=f"edit_name_{bom_id}"
-        )
+    with st.form("edit_bom_info_form", clear_on_submit=False):
+        col1, col2 = st.columns(2)
         
-        new_output_qty = st.number_input(
-            "Output Quantity *",
-            min_value=0.01,
-            value=float(bom_info['output_qty']),
-            step=1.0,
-            format="%.2f",
-            key=f"edit_qty_{bom_id}"
-        )
-    
-    with col2:
-        new_effective_date = st.date_input(
-            "Effective Date",
-            value=bom_info.get('effective_date', date.today()),
-            key=f"edit_date_{bom_id}"
-        )
-        
-        st.text_input(
-            "UOM",
-            value=bom_info['uom'],
-            disabled=True,
-            key=f"edit_uom_{bom_id}"
-        )
-    
-    new_notes = st.text_area(
-        "Notes",
-        value=bom_info.get('notes', ''),
-        height=100,
-        key=f"edit_notes_{bom_id}"
-    )
-    
-    st.markdown("---")
-    
-    col1, col2 = st.columns([3, 1])
-    
-    with col2:
-        if st.button("💾 Save Changes", type="primary", use_container_width=True, key=f"edit_info_save_{bom_id}"):
-            _handle_update_header(
-                bom_id, new_name, new_output_qty, 
-                new_effective_date, new_notes,
-                state, manager
+        with col1:
+            new_name = st.text_input(
+                "BOM Name *",
+                value=bom_info['bom_name']
             )
-    
-    with col1:
-        if st.button("✔ Close", use_container_width=True, key=f"edit_info_close_{bom_id}"):
-            state.close_dialog()
-            st.rerun()
-
-
-def _render_materials_tab(bom_id: int, materials: pd.DataFrame, 
-                         state: StateManager, manager: BOMManager):
-    """Render materials tab with alternatives management"""
-    st.markdown("### Edit Materials")
-    
-    if not materials.empty:
-        st.markdown(f"**Current Materials ({len(materials)}):**")
+            
+            new_output_qty = st.number_input(
+                "Output Quantity *",
+                min_value=0.01,
+                value=float(bom_info['output_qty']),
+                step=1.0,
+                format="%.2f"
+            )
         
-        for idx, material in materials.iterrows():
-            _render_material_section(bom_id, idx, material, state, manager)
+        with col2:
+            new_effective_date = st.date_input(
+                "Effective Date",
+                value=bom_info.get('effective_date', date.today())
+            )
+            
+            st.text_input(
+                "UOM",
+                value=bom_info.get('uom', 'PCS'),
+                disabled=True
+            )
+        
+        new_notes = st.text_area(
+            "Notes",
+            value=bom_info.get('notes', ''),
+            height=100
+        )
+        
+        # Read-only fields
+        st.markdown("---")
+        st.markdown("**Read-only Information:**")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.text_input("BOM Code", value=bom_info['bom_code'], disabled=True)
+        
+        with col2:
+            st.text_input("BOM Type", value=bom_info['bom_type'], disabled=True)
+        
+        with col3:
+            st.text_input("Status", value=bom_info['status'], disabled=True)
         
         st.markdown("---")
-    else:
-        st.info("ℹ️ No materials in this BOM")
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            cancel_button = st.form_submit_button("❌ Cancel", use_container_width=True)
+        
+        with col2:
+            save_button = st.form_submit_button(
+                "💾 Save Changes",
+                type="primary",
+                use_container_width=True
+            )
     
-    _render_add_material_section(bom_id, materials, state, manager)
+    # Handle form submission
+    if save_button:
+        # Validate
+        if not new_name or len(new_name.strip()) == 0:
+            st.error("❌ BOM name is required")
+        elif new_output_qty <= 0:
+            st.error("❌ Output quantity must be greater than 0")
+        else:
+            # Update BOM info
+            try:
+                user_id = st.session_state.get('user_id', 1)
+                
+                update_data = {
+                    'bom_name': new_name,
+                    'output_qty': new_output_qty,
+                    'effective_date': new_effective_date,
+                    'notes': new_notes,
+                    'updated_by': user_id
+                }
+                
+                manager.update_bom_header(bom_id, update_data)
+                
+                state.record_action('update', bom_id=bom_id, bom_code=bom_info['bom_code'])
+                
+                st.success("✅ BOM information updated successfully!")
+                st.rerun()
+            
+            except BOMValidationError as e:
+                st.error(f"❌ Validation Error: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error updating BOM info: {e}")
+                st.error(f"❌ Error: {str(e)}")
     
-    st.markdown("---")
-    
-    if st.button("✔ Close", use_container_width=True, key=f"edit_materials_close_{bom_id}"):
+    if cancel_button:
         state.close_dialog()
         st.rerun()
 
 
-def _render_material_section(bom_id: int, idx: int, material: pd.Series, 
-                             state: StateManager, manager: BOMManager):
-    """Render material with alternatives in expandable section"""
-    mat_id = material['material_id']
-    detail_id = material['id']
-    alt_count = int(material.get('alternatives_count', 0))
+def _render_materials_tab_optimized(bom_id: int, bom_details: pd.DataFrame, 
+                                    state: StateManager, manager: BOMManager):
+    """Render materials tab - Optimized version"""
+    st.markdown("### Materials Management")
     
-    # Material header
-    with st.container():
-        col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
+    # Convert DataFrame to list for easier manipulation
+    materials = []
+    if not bom_details.empty:
+        for _, row in bom_details.iterrows():
+            materials.append({
+                'detail_id': row['id'],
+                'material_id': row['material_id'],
+                'material_name': row['material_name'],
+                'material_code': row['material_code'],
+                'material_type': row['material_type'],
+                'quantity': row['quantity'],
+                'uom': row['uom'],
+                'scrap_rate': row['scrap_rate'],
+                'alternatives_count': row.get('alternatives_count', 0)
+            })
+    
+    # Material counter
+    st.markdown("### 📊 Material Summary")
+    render_material_type_counter(materials, show_warning=True)
+    
+    st.markdown("---")
+    
+    # Display existing materials
+    if materials:
+        st.markdown(f"**Current Materials ({len(materials)}):**")
+        _render_editable_material_list(bom_id, materials, state, manager)
+    else:
+        st.info("ℹ️ No materials in this BOM. Add at least one RAW_MATERIAL.")
+    
+    st.markdown("---")
+    
+    # Add new material form
+    _render_add_material_to_bom_form(bom_id, state, manager)
+    
+    st.markdown("---")
+    
+    # Action buttons
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        if st.button("🔄 Refresh", use_container_width=True, key=f"materials_refresh_{bom_id}"):
+            st.rerun()
+    
+    with col2:
+        if st.button("✅ Close", use_container_width=True, type="primary", key=f"materials_close_{bom_id}"):
+            state.close_dialog()
+            st.rerun()
+
+
+def _render_editable_material_list(bom_id: int, materials: list, 
+                                   state: StateManager, manager: BOMManager):
+    """Render editable material list with inline edit capabilities"""
+    
+    for idx, material in enumerate(materials):
+        detail_id = material['detail_id']
+        edit_key = f"edit_mat_{detail_id}"
+        alt_key = f"show_alt_{detail_id}"
+        
+        # Material card
+        with st.container():
+            # Check if in edit mode
+            if st.session_state.get(edit_key, False):
+                # Edit mode - using form
+                _render_material_edit_form(bom_id, detail_id, material, state, manager)
+            else:
+                # Display mode
+                col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([3, 1.5, 1, 0.8, 0.8, 0.7, 0.7, 0.7])
+                
+                with col1:
+                    alt_count = material.get('alternatives_count', 0)
+                    alt_badge = f" 🔀 **{alt_count} alt(s)**" if alt_count > 0 else ""
+                    st.markdown(f"**{material['material_name']}** ({material['material_code']}){alt_badge}")
+                
+                with col2:
+                    st.text(material['material_type'])
+                
+                with col3:
+                    st.text(f"{format_number(material['quantity'], 4)}")
+                
+                with col4:
+                    st.text(material['uom'])
+                
+                with col5:
+                    st.text(f"{material['scrap_rate']}%")
+                
+                with col6:
+                    if st.button("✏️", key=f"edit_btn_{detail_id}", help="Edit"):
+                        st.session_state[edit_key] = True
+                        st.rerun()
+                
+                with col7:
+                    show_alts = material.get('alternatives_count', 0) > 0
+                    if st.button("🔀", key=f"alt_btn_{detail_id}", help=f"Alternatives ({material.get('alternatives_count', 0)})", disabled=not show_alts and material.get('alternatives_count', 0) == 0):
+                        st.session_state[alt_key] = not st.session_state.get(alt_key, False)
+                        st.rerun()
+                
+                with col8:
+                    if st.button("🗑️", key=f"del_btn_{detail_id}", help="Remove"):
+                        try:
+                            user_id = st.session_state.get('user_id', 1)
+                            manager.delete_bom_material(detail_id, user_id)
+                            st.success(f"✅ Material removed")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+        
+        # Show alternatives section if toggled
+        if st.session_state.get(alt_key, False):
+            with st.expander(f"   ↳ Alternatives for {material['material_name']}", expanded=True):
+                _render_material_alternatives(bom_id, detail_id, manager)
+        
+        st.markdown("")
+
+
+def _render_material_edit_form(bom_id: int, detail_id: int, material: dict, 
+                               state: StateManager, manager: BOMManager):
+    """Render inline edit form for material"""
+    
+    with st.form(f"edit_material_form_{detail_id}", clear_on_submit=False):
+        col1, col2, col3, col4, col5, col6 = st.columns([3, 1.5, 1, 0.8, 0.8, 1.2])
         
         with col1:
-            st.markdown(f"**{material['material_name']}** ({material['material_code']})")
+            st.text_input(
+                "Material",
+                value=f"{material['material_name']} ({material['material_code']})",
+                disabled=True
+            )
         
         with col2:
-            st.text(material['material_type'])
+            new_type = st.selectbox(
+                "Type",
+                options=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"],
+                index=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"].index(material['material_type'])
+            )
         
         with col3:
             new_qty = st.number_input(
-                "Qty",
+                "Quantity",
                 min_value=0.0001,
                 value=float(material['quantity']),
                 step=0.1,
-                format="%.4f",
-                key=f"mat_qty_{bom_id}_{mat_id}_{idx}",
-                label_visibility="collapsed"
+                format="%.4f"
             )
         
         with col4:
-            st.text(material['uom'])
+            st.text_input("UOM", value=material['uom'], disabled=True)
         
         with col5:
             new_scrap = st.number_input(
@@ -189,447 +345,268 @@ def _render_material_section(bom_id: int, idx: int, material: pd.Series,
                 min_value=0.0,
                 max_value=100.0,
                 value=float(material['scrap_rate']),
-                step=0.5,
-                key=f"mat_scrap_{bom_id}_{mat_id}_{idx}",
-                label_visibility="collapsed"
+                step=0.5
             )
         
         with col6:
-            col_save, col_delete = st.columns(2)
-            
+            col_save, col_cancel = st.columns(2)
             with col_save:
-                qty_changed = abs(new_qty - float(material['quantity'])) > 0.0001
-                scrap_changed = abs(new_scrap - float(material['scrap_rate'])) > 0.01
+                save_button = st.form_submit_button("💾", help="Save", use_container_width=True)
+            with col_cancel:
+                cancel_button = st.form_submit_button("❌", help="Cancel", use_container_width=True)
+    
+    # Handle form submission
+    if save_button:
+        if validate_quantity(new_qty) and validate_percentage(new_scrap):
+            try:
+                user_id = st.session_state.get('user_id', 1)
                 
-                if qty_changed or scrap_changed:
-                    if st.button("💾", key=f"save_{bom_id}_{mat_id}_{idx}", help="Save changes"):
-                        _handle_update_material(bom_id, mat_id, new_qty, new_scrap, state, manager)
+                update_data = {
+                    'material_type': new_type,
+                    'quantity': new_qty,
+                    'scrap_rate': new_scrap,
+                    'updated_by': user_id
+                }
+                
+                manager.update_bom_material(detail_id, update_data)
+                
+                st.session_state[f"edit_mat_{detail_id}"] = False
+                st.success("✅ Material updated")
+                st.rerun()
             
-            with col_delete:
-                if st.button("🗑️", key=f"del_{bom_id}_{mat_id}_{idx}", help="Delete material"):
-                    _handle_delete_material(bom_id, mat_id, state, manager)
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+        else:
+            st.error("❌ Invalid quantity or scrap rate")
     
-    # Alternatives section
-    with st.expander(f"🔀 Alternatives ({alt_count})", expanded=False):
-        _render_alternatives_section(bom_id, detail_id, mat_id, manager)
-    
-    st.markdown("---")
+    if cancel_button:
+        st.session_state[f"edit_mat_{detail_id}"] = False
+        st.rerun()
 
 
-def _render_alternatives_section(bom_id: int, detail_id: int, primary_mat_id: int, manager: BOMManager):
-    """Render alternatives for a material"""
+def _render_material_alternatives(bom_id: int, detail_id: int, manager: BOMManager):
+    """Render and manage alternatives for a material"""
     try:
+        # Get existing alternatives
         alternatives = manager.get_material_alternatives(detail_id)
         
+        # Display existing alternatives
         if not alternatives.empty:
-            st.markdown("**Current Alternatives (by priority):**")
+            st.markdown("**Current Alternatives:**")
             
-            for idx, alt in alternatives.iterrows():
-                _render_alternative_row(bom_id, detail_id, idx, alt, manager)
-        else:
-            st.info("ℹ️ No alternatives defined")
+            for _, alt in alternatives.iterrows():
+                col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 1, 1])
+                
+                with col1:
+                    status_icon = "✅" if alt['is_active'] else "⭕"
+                    st.text(f"P{alt['priority']}: {status_icon} {alt['material_name']} ({alt['material_code']})")
+                
+                with col2:
+                    st.text(alt['material_type'])
+                
+                with col3:
+                    st.text(f"{format_number(alt['quantity'], 4)}")
+                
+                with col4:
+                    st.text(alt['uom'])
+                
+                with col5:
+                    st.text(f"{alt['scrap_rate']}%")
+                
+                with col6:
+                    if st.button("🗑️", key=f"del_alt_{alt['id']}", help="Remove alternative"):
+                        try:
+                            user_id = st.session_state.get('user_id', 1)
+                            manager.delete_material_alternative(alt['id'], user_id)
+                            st.success("✅ Alternative removed")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+            
+            st.markdown("---")
         
-        st.markdown("---")
-        _render_add_alternative_form(bom_id, detail_id, primary_mat_id, alternatives, manager)
+        # Add new alternative form
+        st.markdown("**Add Alternative:**")
+        
+        with st.form(f"add_alternative_to_material_{detail_id}", clear_on_submit=True):
+            products = get_cached_products()
+            
+            col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
+            
+            with col1:
+                product_options = {}
+                for _, row in products.iterrows():
+                    display_text = format_product_display(
+                        code=row['code'],
+                        name=row['name'],
+                        package_size=row.get('package_size'),
+                        brand=row.get('brand')
+                    )
+                    product_options[display_text] = {
+                        'id': row['id'],
+                        'uom': row['uom']
+                    }
+                
+                selected_alt = st.selectbox(
+                    "Alternative Material",
+                    options=list(product_options.keys())
+                )
+                
+                alt_info = product_options.get(selected_alt)
+                alt_material_id = alt_info['id'] if alt_info else None
+                alt_uom = alt_info['uom'] if alt_info else 'PCS'
+            
+            with col2:
+                quantity = st.number_input(
+                    "Qty",
+                    min_value=0.0001,
+                    value=1.0,
+                    step=0.1,
+                    format="%.4f"
+                )
+            
+            with col3:
+                st.text_input("UOM", value=alt_uom, disabled=True)
+            
+            with col4:
+                scrap = st.number_input(
+                    "Scrap %",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=0.0,
+                    step=0.5
+                )
+            
+            with col5:
+                priority = st.number_input(
+                    "Priority",
+                    min_value=1,
+                    max_value=99,
+                    value=len(alternatives) + 1 if not alternatives.empty else 1
+                )
+            
+            add_button = st.form_submit_button("➕ Add", use_container_width=True)
+        
+        # Handle form submission
+        if add_button and alt_material_id:
+            if validate_quantity(quantity) and validate_percentage(scrap):
+                try:
+                    user_id = st.session_state.get('user_id', 1)
+                    
+                    alternative_data = {
+                        'bom_detail_id': detail_id,
+                        'alternative_material_id': alt_material_id,
+                        'quantity': quantity,
+                        'scrap_rate': scrap,
+                        'priority': priority,
+                        'is_active': 1,
+                        'created_by': user_id
+                    }
+                    
+                    manager.add_material_alternative(alternative_data)
+                    
+                    st.success("✅ Alternative added!")
+                    st.rerun()
+                
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+            else:
+                st.error("❌ Invalid quantity or scrap rate")
     
     except Exception as e:
-        logger.error(f"Error rendering alternatives: {e}")
+        logger.error(f"Error managing alternatives: {e}")
         st.error(f"❌ Error loading alternatives: {str(e)}")
 
 
-def _render_alternative_row(bom_id: int, detail_id: int, idx: int, alt: pd.Series, manager: BOMManager):
-    """Render single alternative row"""
-    alt_id = alt['id']
-    
-    with st.container():
-        col1, col2, col3, col4, col5, col6, col7 = st.columns([2, 1, 1, 1, 1, 1, 1])
-        
-        with col1:
-            status_icon = "✅" if alt['is_active'] else "⭕"
-            st.text(f"{status_icon} {alt['material_name']} ({alt['material_code']})")
-        
-        with col2:
-            new_qty = st.number_input(
-                "Alt Qty",
-                min_value=0.0001,
-                value=float(alt['quantity']),
-                step=0.1,
-                format="%.4f",
-                key=f"alt_qty_{bom_id}_{alt_id}_{idx}",
-                label_visibility="collapsed"
-            )
-        
-        with col3:
-            st.text(alt['uom'])
-        
-        with col4:
-            new_scrap = st.number_input(
-                "Scrap",
-                min_value=0.0,
-                max_value=100.0,
-                value=float(alt['scrap_rate']),
-                step=0.5,
-                key=f"alt_scrap_{bom_id}_{alt_id}_{idx}",
-                label_visibility="collapsed"
-            )
-        
-        with col5:
-            new_priority = st.number_input(
-                "Priority",
-                min_value=1,
-                max_value=99,
-                value=int(alt['priority']),
-                key=f"alt_priority_{bom_id}_{alt_id}_{idx}",
-                label_visibility="collapsed"
-            )
-        
-        with col6:
-            new_active = st.checkbox(
-                "Active",
-                value=bool(alt['is_active']),
-                key=f"alt_active_{bom_id}_{alt_id}_{idx}",
-                label_visibility="collapsed"
-            )
-        
-        with col7:
-            col_save, col_del = st.columns(2)
-            
-            with col_save:
-                qty_changed = abs(new_qty - float(alt['quantity'])) > 0.0001
-                scrap_changed = abs(new_scrap - float(alt['scrap_rate'])) > 0.01
-                priority_changed = new_priority != int(alt['priority'])
-                active_changed = new_active != bool(alt['is_active'])
-                
-                if qty_changed or scrap_changed or priority_changed or active_changed:
-                    if st.button("💾", key=f"save_alt_{bom_id}_{alt_id}_{idx}", help="Save"):
-                        _handle_update_alternative(
-                            alt_id, new_qty, new_scrap, new_priority, new_active, manager
-                        )
-            
-            with col_del:
-                if st.button("🗑️", key=f"del_alt_{bom_id}_{alt_id}_{idx}", help="Delete"):
-                    _handle_delete_alternative(alt_id, manager)
-
-
-def _render_add_alternative_form(bom_id: int, detail_id: int, primary_mat_id: int, 
-                                 current_alts: pd.DataFrame, manager: BOMManager):
-    """Render add alternative form"""
-    st.markdown("**Add Alternative Material:**")
-    
-    col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
-    
-    with col1:
-        products = get_products()
-        
-        # Exclude primary material and existing alternatives
-        exclude_ids = [primary_mat_id]
-        if not current_alts.empty:
-            exclude_ids.extend(current_alts['alternative_material_id'].tolist())
-        
-        available = products[~products['id'].isin(exclude_ids)]
-        
-        if available.empty:
-            st.warning("⚠️ No materials available as alternatives")
-            return
-        
-        product_options = {
-            f"{row['name']} ({row['code']})": row['id']
-            for _, row in available.iterrows()
-        }
-        
-        selected = st.selectbox(
-            "Material",
-            options=list(product_options.keys()),
-            key=f"add_alt_mat_{bom_id}_{detail_id}",
-            label_visibility="collapsed"
-        )
-        
-        alt_material_id = product_options.get(selected)
-    
-    with col2:
-        quantity = st.number_input(
-            "Quantity",
-            min_value=0.0001,
-            value=1.0,
-            step=0.1,
-            format="%.4f",
-            key=f"add_alt_qty_{bom_id}_{detail_id}",
-            label_visibility="collapsed"
-        )
-    
-    with col3:
-        if alt_material_id:
-            product = get_product_by_id(alt_material_id)
-            alt_uom = product['uom'] if product else 'PCS'
-        else:
-            alt_uom = 'PCS'
-        st.text_input("UOM", value=alt_uom, disabled=True, 
-                     key=f"add_alt_uom_{bom_id}_{detail_id}", label_visibility="collapsed")
-    
-    with col4:
-        scrap = st.number_input(
-            "Scrap %",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.5,
-            key=f"add_alt_scrap_{bom_id}_{detail_id}",
-            label_visibility="collapsed"
-        )
-    
-    with col5:
-        # Auto-calculate next priority
-        next_priority = 1
-        if not current_alts.empty:
-            next_priority = int(current_alts['priority'].max()) + 1
-        
-        priority = st.number_input(
-            "Priority",
-            min_value=1,
-            max_value=99,
-            value=next_priority,
-            key=f"add_alt_priority_{bom_id}_{detail_id}",
-            label_visibility="collapsed"
-        )
-    
-    if st.button("➕ Add Alternative", key=f"add_alt_btn_{bom_id}_{detail_id}", use_container_width=True):
-        if not validate_quantity(quantity):
-            st.error("❌ Invalid quantity")
-            return
-        
-        if not validate_percentage(scrap):
-            st.error("❌ Invalid scrap rate (0-100%)")
-            return
-        
-        _handle_add_alternative(
-            detail_id, alt_material_id, quantity, alt_uom, scrap, priority, manager
-        )
-
-
-def _render_add_material_section(bom_id: int, current_materials: pd.DataFrame,
-                                 state: StateManager, manager: BOMManager):
-    """Render add material section"""
+def _render_add_material_to_bom_form(bom_id: int, state: StateManager, manager: BOMManager):
+    """Render form to add new material to BOM"""
     st.markdown("**Add New Material:**")
     
-    col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
-    
-    with col1:
-        st.markdown("**Material**")
-    with col2:
-        st.markdown("**Type**")
-    with col3:
-        st.markdown("**Quantity**")
-    with col4:
-        st.markdown("**UOM**")
-    with col5:
-        st.markdown("**Scrap %**")
-    
-    col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
-    
-    with col1:
-        products = get_products()
+    with st.form("add_material_to_bom_form", clear_on_submit=True):
+        products = get_cached_products()
         
         if products.empty:
             st.error("❌ No products available")
             return
         
-        product_options = {
-            f"{row['name']} ({row['code']})": row['id']
-            for _, row in products.iterrows()
-        }
+        col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
         
-        selected = st.selectbox(
-            "Material",
-            options=list(product_options.keys()),
-            key=f"edit_add_mat_{bom_id}",
-            label_visibility="collapsed"
-        )
+        with col1:
+            product_options = {}
+            for _, row in products.iterrows():
+                display_text = format_product_display(
+                    code=row['code'],
+                    name=row['name'],
+                    package_size=row.get('package_size'),
+                    brand=row.get('brand')
+                )
+                product_options[display_text] = {
+                    'id': row['id'],
+                    'uom': row['uom']
+                }
+            
+            selected_material = st.selectbox(
+                "Material",
+                options=list(product_options.keys())
+            )
+            
+            mat_info = product_options.get(selected_material)
+            material_id = mat_info['id'] if mat_info else None
+            mat_uom = mat_info['uom'] if mat_info else 'PCS'
         
-        material_id = product_options.get(selected)
+        with col2:
+            material_type = st.selectbox(
+                "Type",
+                options=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"]
+            )
+        
+        with col3:
+            quantity = st.number_input(
+                "Quantity",
+                min_value=0.0001,
+                value=1.0,
+                step=0.1,
+                format="%.4f"
+            )
+        
+        with col4:
+            st.text_input("UOM", value=mat_uom, disabled=True)
+        
+        with col5:
+            scrap_rate = st.number_input(
+                "Scrap %",
+                min_value=0.0,
+                max_value=100.0,
+                value=0.0,
+                step=0.5
+            )
+        
+        add_button = st.form_submit_button("➕ Add Material", use_container_width=True)
     
-    with col2:
-        material_type = st.selectbox(
-            "Type",
-            options=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"],
-            key=f"edit_add_type_{bom_id}",
-            label_visibility="collapsed"
-        )
-    
-    with col3:
-        quantity = st.number_input(
-            "Quantity",
-            min_value=0.0001,
-            value=1.0,
-            step=0.1,
-            format="%.4f",
-            key=f"edit_add_qty_{bom_id}",
-            label_visibility="collapsed"
-        )
-    
-    with col4:
-        if material_id:
-            product = get_product_by_id(material_id)
-            mat_uom = product['uom'] if product else 'PCS'
+    # Handle form submission
+    if add_button and material_id:
+        if validate_quantity(quantity) and validate_percentage(scrap_rate):
+            try:
+                user_id = st.session_state.get('user_id', 1)
+                
+                material_data = {
+                    'bom_header_id': bom_id,
+                    'material_id': material_id,
+                    'material_type': material_type,
+                    'quantity': quantity,
+                    'scrap_rate': scrap_rate,
+                    'created_by': user_id
+                }
+                
+                manager.add_bom_material(material_data)
+                
+                st.success("✅ Material added to BOM!")
+                st.rerun()
+            
+            except BOMValidationError as e:
+                st.error(f"❌ Validation Error: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error adding material: {e}")
+                st.error(f"❌ Error: {str(e)}")
         else:
-            mat_uom = 'PCS'
-        st.text_input("UOM", value=mat_uom, disabled=True, 
-                     key=f"edit_add_uom_{bom_id}", label_visibility="collapsed")
-    
-    with col5:
-        scrap = st.number_input(
-            "Scrap Rate (%)",
-            min_value=0.0,
-            max_value=100.0,
-            value=0.0,
-            step=0.5,
-            key=f"edit_add_scrap_{bom_id}",
-            label_visibility="collapsed"
-        )
-    
-    if st.button("➕ Add Material", key=f"edit_add_btn_{bom_id}", use_container_width=True):
-        if not current_materials.empty:
-            if material_id in current_materials['material_id'].values:
-                st.error("❌ Material already exists in BOM")
-                return
-        
-        if not validate_quantity(quantity):
-            st.error("❌ Invalid quantity (must be > 0)")
-            return
-        
-        if not validate_percentage(scrap):
-            st.error("❌ Invalid scrap rate (must be 0-100%)")
-            return
-        
-        _handle_add_material(bom_id, material_id, material_type, quantity, mat_uom, scrap, state, manager)
-
-
-# ==================== Event Handlers ====================
-
-def _handle_update_header(bom_id: int, name: str, qty: float, 
-                          eff_date: date, notes: str,
-                          state: StateManager, manager: BOMManager):
-    """Handle header update"""
-    try:
-        user_id = st.session_state.get('user_id', 1)
-        
-        updates = {
-            'bom_name': name,
-            'output_qty': qty,
-            'effective_date': eff_date,
-            'notes': notes,
-            'updated_by': user_id
-        }
-        
-        manager.update_bom_header(bom_id, updates)
-        
-        st.success("✅ BOM information updated!")
-        state.mark_unsaved_changes(False)
-        st.rerun()
-    
-    except BOMException as e:
-        st.error(f"❌ Error: {str(e)}")
-
-
-def _handle_update_material(bom_id: int, material_id: int, 
-                           qty: float, scrap: float,
-                           state: StateManager, manager: BOMManager):
-    """Handle material update"""
-    try:
-        updates = {'quantity': qty, 'scrap_rate': scrap}
-        manager.update_material(bom_id, material_id, updates)
-        
-        st.success("✅ Material updated!")
-        st.rerun()
-    
-    except BOMException as e:
-        st.error(f"❌ Error: {str(e)}")
-
-
-def _handle_delete_material(bom_id: int, material_id: int,
-                           state: StateManager, manager: BOMManager):
-    """Handle material deletion"""
-    try:
-        manager.remove_material(bom_id, material_id)
-        
-        st.success("✅ Material removed!")
-        st.rerun()
-    
-    except BOMException as e:
-        st.error(f"❌ Error: {str(e)}")
-
-
-def _handle_add_material(bom_id: int, material_id: int, material_type: str,
-                        qty: float, uom: str, scrap: float,
-                        state: StateManager, manager: BOMManager):
-    """Handle add material"""
-    try:
-        materials = [{
-            'material_id': material_id,
-            'material_type': material_type,
-            'quantity': qty,
-            'uom': uom,
-            'scrap_rate': scrap
-        }]
-        
-        manager.add_materials(bom_id, materials)
-        
-        st.success("✅ Material added!")
-        st.rerun()
-    
-    except BOMException as e:
-        st.error(f"❌ Error: {str(e)}")
-
-
-def _handle_add_alternative(detail_id: int, alt_material_id: int, 
-                           qty: float, uom: str, scrap: float, priority: int,
-                           manager: BOMManager):
-    """Handle add alternative"""
-    try:
-        alternative_data = {
-            'alternative_material_id': alt_material_id,
-            'quantity': qty,
-            'uom': uom,
-            'scrap_rate': scrap,
-            'priority': priority,
-            'is_active': 1
-        }
-        
-        manager.add_alternative(detail_id, alternative_data)
-        
-        st.success("✅ Alternative added!")
-        st.rerun()
-    
-    except BOMException as e:
-        st.error(f"❌ Error: {str(e)}")
-
-
-def _handle_update_alternative(alt_id: int, qty: float, scrap: float, 
-                               priority: int, is_active: bool, manager: BOMManager):
-    """Handle update alternative"""
-    try:
-        updates = {
-            'quantity': qty,
-            'scrap_rate': scrap,
-            'priority': priority,
-            'is_active': 1 if is_active else 0
-        }
-        
-        manager.update_alternative(alt_id, updates)
-        
-        st.success("✅ Alternative updated!")
-        st.rerun()
-    
-    except BOMException as e:
-        st.error(f"❌ Error: {str(e)}")
-
-
-def _handle_delete_alternative(alt_id: int, manager: BOMManager):
-    """Handle delete alternative"""
-    try:
-        manager.remove_alternative(alt_id)
-        
-        st.success("✅ Alternative removed!")
-        st.rerun()
-    
-    except BOMException as e:
-        st.error(f"❌ Error: {str(e)}")
+            st.error("❌ Invalid quantity or scrap rate")
