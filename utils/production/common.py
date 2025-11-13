@@ -5,9 +5,9 @@ Formatting, validation, UI helpers, and date utilities
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, Tuple, Union
+from typing import Dict, Tuple, Union, Optional
 from io import BytesIO
 
 import pandas as pd
@@ -222,3 +222,50 @@ def validate_required_fields(data: Dict, required_fields: list) -> None:
     
     if missing:
         raise ValueError(f"Missing required fields: {', '.join(missing)}")
+    
+
+    # Thêm vào cuối file common.py
+
+class FormValidator:
+    """Production form validation helpers"""
+    
+    @staticmethod
+    def validate_create_order(order_data: Dict) -> Tuple[bool, Optional[str]]:
+        """
+        Validate create order form data
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        # Check required fields
+        required_fields = [
+            'bom_header_id', 'product_id', 'planned_qty',
+            'warehouse_id', 'target_warehouse_id', 'scheduled_date'
+        ]
+        
+        for field in required_fields:
+            if field not in order_data or order_data[field] is None:
+                return False, f"Missing required field: {field}"
+        
+        # Validate quantities
+        if order_data['planned_qty'] <= 0:
+            return False, "Planned quantity must be positive"
+        
+        # Validate dates
+        if isinstance(order_data['scheduled_date'], str):
+            try:
+                scheduled = datetime.strptime(order_data['scheduled_date'], '%Y-%m-%d').date()
+            except:
+                return False, "Invalid scheduled date format"
+        else:
+            scheduled = order_data['scheduled_date']
+        
+        if scheduled < date.today():
+            return False, "Scheduled date cannot be in the past"
+        
+        # Validate warehouses
+        if order_data['warehouse_id'] == order_data['target_warehouse_id']:
+            logger.warning("Source and target warehouse are the same")
+            # This is a warning, not an error
+        
+        return True, None

@@ -20,6 +20,7 @@ v1.0: Basic production management
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
+import time 
 from typing import Dict, List, Optional
 import logging
 
@@ -499,114 +500,228 @@ def execute_action(action: str, order_id: int, status: str):
 # ==================== Create Order View ====================
 
 def render_create_order():
-    """Render create new order form"""
+    """
+    Render create production order form
+    REFACTORED v2: No st.form for dynamic BOM updates + Proper validation
+    """
     st.subheader("➕ Create Production Order")
     
-    with st.form("create_order_form"):
-        col1, col2 = st.columns(2)
+    # Initialize session state
+    if 'create_order_data' not in st.session_state:
+        st.session_state.create_order_data = {}
+    
+    # Create two columns
+    col1, col2 = st.columns(2)
+    
+    # ==================== LEFT COLUMN: Product & BOM ====================
+    with col1:
+        st.markdown("### Product & BOM")
         
-        with col1:
-            st.markdown("### Product & BOM")
-            
-            # Get active BOMs
-            bom_type = st.selectbox("BOM Type", ["KITTING", "CUTTING", "REPACKING"])
-            boms = prod_manager.get_active_boms(bom_type)
-            
-            if boms.empty:
-                st.warning(f"No active BOMs found for {bom_type}")
-                st.form_submit_button("Create Order", disabled=True)
-                return
-            
-            bom_options = {f"{row['bom_name']} ({row['product_name']})": row['id'] 
-                          for _, row in boms.iterrows()}
-            selected_bom_label = st.selectbox("Select BOM", list(bom_options.keys()))
-            bom_id = bom_options[selected_bom_label]
-            
-            # Get BOM info
-            bom_info = prod_manager.get_bom_info(bom_id)
-            if bom_info:
-                st.info(f"Output: {bom_info['output_qty']} {bom_info['uom']}")
-                product_id = bom_info['product_id']
-                uom = bom_info['uom']
-            
-            planned_qty = st.number_input(
-                "Planned Quantity",
-                min_value=1.0,
-                value=100.0,
-                step=1.0
-            )
+        # BOM Type Selection
+        bom_type = st.selectbox(
+            "BOM Type",
+            ["KITTING", "CUTTING", "REPACKING"],
+            key="create_order_bom_type",
+            help="Select the type of BOM for production"
+        )
         
-        with col2:
-            st.markdown("### Warehouse & Schedule")
-            
-            warehouses = inv_manager.get_warehouses()
-            if warehouses.empty:
-                st.error("No warehouses found")
-                st.form_submit_button("Create Order", disabled=True)
-                return
-            
-            warehouse_dict = {row['name']: row['id'] for _, row in warehouses.iterrows()}
-            
-            source_warehouse = st.selectbox(
-                "Source Warehouse (Materials)",
-                list(warehouse_dict.keys())
-            )
-            warehouse_id = warehouse_dict[source_warehouse]
-            
-            target_warehouse = st.selectbox(
-                "Target Warehouse (Finished Goods)",
-                list(warehouse_dict.keys())
-            )
-            target_warehouse_id = warehouse_dict[target_warehouse]
-            
-            scheduled_date = st.date_input(
-                "Scheduled Date",
-                value=date.today() + pd.Timedelta(days=1),
-                min_value=date.today()
-            )
-            
-            priority = st.selectbox(
-                "Priority",
-                ["LOW", "NORMAL", "HIGH", "URGENT"],
-                index=1
-            )
+        # Query BOMs - Force refresh when type changes
+        # Clear cache nếu BOM type thay đổi
+        if 'last_bom_type' not in st.session_state:
+            st.session_state.last_bom_type = bom_type
+        elif st.session_state.last_bom_type != bom_type:
+            prod_manager.clear_bom_cache()  # GỌI CLEAR CACHE Ở ĐÂY
+            st.session_state.last_bom_type = bom_type
         
-        notes = st.text_area("Notes", height=100)
+        with st.spinner(f"Loading {bom_type} BOMs..."):
+            available_boms = prod_manager.get_active_boms(bom_type)
         
+        # Handle empty BOM list
+        if available_boms.empty:
+            st.error(f"❌ No active BOMs found for type: {bom_type}")
+            st.info("💡 Please create a BOM first in the BOM Management module")
+            if st.button("🔄 Refresh BOMs"):
+                prod_manager.clear_bom_cache()  # Clear cache khi refresh
+                st.rerun()
+            return
+        
+        # Format BOM options
+        bom_display_map = {}
+        bom_details_map = {}
+        
+        for _, bom in available_boms.iterrows():
+            display_text = f"{bom['bom_code']} ({bom['bom_name']})"
+            bom_display_map[display_text] = bom['id']
+            bom_details_map[bom['id']] = {
+                'product_id': bom['product_id'],
+                'product_name': bom['product_name'],
+                'output_qty': bom['output_qty'],
+                'uom': bom['uom']
+            }
+        
+        # BOM Selection
+        selected_bom_display = st.selectbox(
+            "Select BOM",
+            options=list(bom_display_map.keys()),
+            key="create_order_bom_select",
+            help="Choose the BOM for this production order"
+        )
+        
+        selected_bom_id = bom_display_map.get(selected_bom_display)
+        selected_bom_details = bom_details_map.get(selected_bom_id, {})
+        
+        # Display BOM information
+        if selected_bom_details:
+            st.info(f"**Product:** {selected_bom_details['product_name']}")
+            
+            col1a, col1b = st.columns(2)
+            with col1a:
+                st.metric("BOM Output", 
+                         f"{selected_bom_details['output_qty']} {selected_bom_details['uom']}")
+            with col1b:
+                st.metric("Product ID", selected_bom_details['product_id'])
+        
+        # Quantity Input
         st.markdown("---")
-        col1, col2, col3 = st.columns([3, 1, 1])
+        planned_qty = st.number_input(
+            "Planned Quantity",
+            min_value=1.0,
+            value=float(selected_bom_details.get('output_qty', 1)),
+            step=1.0,
+            key="create_order_planned_qty",
+            help="Enter the quantity to produce"
+        )
         
-        with col2:
-            submitted = st.form_submit_button("✅ Create Order", type="primary", use_container_width=True)
+        # Calculate cycles
+        if selected_bom_details:
+            cycles = planned_qty / float(selected_bom_details['output_qty'])
+            st.info(f"📊 Production Cycles: {cycles:.2f}")
+    
+    # ==================== RIGHT COLUMN: Warehouse & Schedule ====================
+    with col2:
+        st.markdown("### Warehouse & Schedule")
         
-        with col3:
-            cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
+        warehouses = inv_manager.get_warehouses()
         
-        if submitted:
-            try:
-                order_data = {
-                    'bom_header_id': bom_id,
-                    'product_id': product_id,
-                    'planned_qty': planned_qty,
-                    'uom': uom,
-                    'warehouse_id': warehouse_id,
-                    'target_warehouse_id': target_warehouse_id,
-                    'scheduled_date': scheduled_date,
-                    'priority': priority,
-                    'notes': notes,
-                    'created_by': st.session_state.user_id
-                }
+        if warehouses.empty:
+            st.error("❌ No warehouses found")
+            return
+        
+        warehouse_options = {}
+        for _, wh in warehouses.iterrows():
+            warehouse_options[wh['name']] = wh['id']
+        
+        # Source Warehouse
+        source_warehouse_name = st.selectbox(
+            "Source Warehouse (Materials)",
+            options=list(warehouse_options.keys()),
+            key="create_order_source_warehouse"
+        )
+        source_warehouse_id = warehouse_options[source_warehouse_name]
+        
+        # Target Warehouse
+        target_warehouse_name = st.selectbox(
+            "Target Warehouse (Finished Goods)",
+            options=list(warehouse_options.keys()),
+            key="create_order_target_warehouse"
+        )
+        target_warehouse_id = warehouse_options[target_warehouse_name]
+        
+        # Scheduled Date
+        scheduled_date = st.date_input(
+            "Scheduled Date",
+            value=date.today(),
+            min_value=date.today(),
+            key="create_order_scheduled_date"
+        )
+        
+        # Priority
+        priority = st.selectbox(
+            "Priority",
+            ["LOW", "NORMAL", "HIGH", "URGENT"],
+            index=1,
+            key="create_order_priority"
+        )
+        
+        # Notes
+        notes = st.text_area(
+            "Notes (Optional)",
+            height=100,
+            key="create_order_notes"
+        )
+    
+    # ==================== MATERIAL CHECK ====================
+    st.markdown("---")
+    st.markdown("### 📦 Material Availability")
+    
+    if st.button("🔍 Check Materials", type="secondary", use_container_width=True):
+        if not selected_bom_id:
+            st.error("Please select a BOM first")
+        else:
+            with st.spinner("Checking..."):
+                availability = inv_manager.check_material_availability(
+                    selected_bom_id, planned_qty, source_warehouse_id
+                )
                 
-                order_no = prod_manager.create_order(order_data)
-                UIHelpers.show_message(f"✅ Order created: {order_no}", "success")
+                if not availability.empty:
+                    def color_status(status):
+                        return {'SUFFICIENT': '🟢', 'PARTIAL': '🟡', 
+                               'INSUFFICIENT': '🔴'}.get(status, '⚪') + f" {status}"
+                    
+                    display_df = availability[['material_name', 'required_qty', 
+                                             'available_qty', 'availability_status', 'uom']].copy()
+                    display_df['availability_status'] = display_df['availability_status'].apply(color_status)
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    # ==================== ACTIONS ====================
+    st.markdown("---")
+    
+    col_btn1, col_btn2 = st.columns(2)
+    
+    with col_btn1:
+        if st.button("✅ Create Order", type="primary", use_container_width=True):
+            # Prepare order data
+            order_data = {
+                'bom_header_id': selected_bom_id,
+                'product_id': selected_bom_details.get('product_id'),
+                'planned_qty': planned_qty,
+                'uom': selected_bom_details.get('uom'),
+                'warehouse_id': source_warehouse_id,
+                'target_warehouse_id': target_warehouse_id,
+                'scheduled_date': scheduled_date,
+                'priority': priority,
+                'notes': notes,
+                'created_by': st.session_state.get('user_id', 1)
+            }
+            
+            # VALIDATE USING FormValidator
+            from utils.production.common import FormValidator
+            is_valid, error_msg = FormValidator.validate_create_order(order_data)
+            
+            if not is_valid:
+                st.error(f"❌ Validation Error: {error_msg}")
+                return
+            
+            try:
+                with st.spinner("Creating order..."):
+                    order_no = prod_manager.create_order(order_data)
+                
+                st.success(f"✅ Order **{order_no}** created!")
+                st.balloons()
+                
+                # Clear cache after successful creation
+                prod_manager.clear_bom_cache()
+                
+                time.sleep(2)
                 set_view('list')
                 st.rerun()
                 
             except Exception as e:
-                UIHelpers.show_message(f"❌ Error: {str(e)}", "error")
+                st.error(f"❌ Error: {str(e)}")
                 logger.error(f"Order creation failed: {e}", exc_info=True)
-        
-        if cancel:
+    
+    with col_btn2:
+        if st.button("❌ Cancel", use_container_width=True):
             set_view('list')
             st.rerun()
 

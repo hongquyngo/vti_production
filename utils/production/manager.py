@@ -22,6 +22,7 @@ class ProductionManager:
     
     def __init__(self):
         self.engine = get_db_engine()
+        self._bom_cache = {}
     
     def get_orders(self, status: Optional[str] = None,
                   order_type: Optional[str] = None,
@@ -361,36 +362,49 @@ class ProductionManager:
             logger.error(f"Error getting BOM details with alternatives for BOM {bom_id}: {e}")
             return []
     
+
     def get_active_boms(self, bom_type: Optional[str] = None) -> pd.DataFrame:
-        """Get active BOMs for order creation"""
-        query = """
-            SELECT 
-                h.id,
-                h.bom_code,
-                h.bom_name,
-                h.bom_type,
-                h.product_id,
-                p.name as product_name,
-                h.output_qty,
-                h.uom
-            FROM bom_headers h
-            JOIN products p ON h.product_id = p.id
-            WHERE h.delete_flag = 0 AND h.status = 'ACTIVE'
-        """
+            """Get active BOMs for order creation"""
+            # Simple query without caching complexity
+            query = """
+                SELECT 
+                    h.id,
+                    h.bom_code,
+                    h.bom_name,
+                    h.bom_type,
+                    h.product_id,
+                    p.name as product_name,
+                    h.output_qty,
+                    h.uom
+                FROM bom_headers h
+                JOIN products p ON h.product_id = p.id
+                WHERE h.delete_flag = 0 
+                    AND h.status = 'ACTIVE'
+                    AND p.delete_flag = 0
+            """
+            
+            params = []
+            if bom_type:
+                query += " AND h.bom_type = %s"
+                params.append(bom_type)
+            
+            query += " ORDER BY h.bom_code, h.bom_name"
+            
+            try:
+                df = pd.read_sql(query, self.engine, 
+                            params=tuple(params) if params else None)
+                logger.info(f"Retrieved {len(df)} active BOMs for type: {bom_type}")
+                return df
+            except Exception as e:
+                logger.error(f"Error getting active BOMs: {e}")
+                return pd.DataFrame()
         
-        params = []
-        if bom_type:
-            query += " AND h.bom_type = %s"
-            params.append(bom_type)
-        
-        query += " ORDER BY h.bom_name"
-        
-        try:
-            return pd.read_sql(query, self.engine, params=tuple(params) if params else None)
-        except Exception as e:
-            logger.error(f"Error getting active BOMs: {e}")
-            return pd.DataFrame()
-    
+    def clear_bom_cache(self):
+        """Clear cached BOM data if exists"""
+        if hasattr(self, '_bom_cache'):
+            self._bom_cache.clear()
+            logger.debug("BOM cache cleared")
+
     def get_bom_info(self, bom_id: int) -> Optional[Dict]:
         """Get BOM info for order creation"""
         query = """
