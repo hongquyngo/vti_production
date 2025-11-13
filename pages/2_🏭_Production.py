@@ -728,120 +728,226 @@ def render_create_order():
 # ==================== Material Issue View ====================
 
 def render_material_issue():
-    """Render material issue interface"""
+    """Render material issue view with FIXED availability check logic"""
     st.subheader("📦 Issue Materials to Production")
     
     # Get orders ready for material issue
     orders = prod_manager.get_orders(status='DRAFT')
     confirmed_orders = prod_manager.get_orders(status='CONFIRMED')
     
-    if not confirmed_orders.empty:
-        orders = pd.concat([orders, confirmed_orders], ignore_index=True) if not orders.empty else confirmed_orders
-    
-    if orders.empty:
-        st.info("No orders available for material issue")
+    if not orders.empty:
+        available_orders = orders
+    elif not confirmed_orders.empty:
+        available_orders = confirmed_orders
+    else:
+        st.info("📭 No orders available for material issue")
+        st.info("Orders must be in DRAFT or CONFIRMED status")
+        if st.button("← Back to Order List"):
+            set_view('list')
+            st.rerun()
         return
     
     # Order selection
-    order_dict = {f"{row['order_no']} - {row['product_name']}": row['id'] 
-                  for _, row in orders.iterrows()}
+    order_options = {}
+    for _, order in available_orders.iterrows():
+        display = f"MO-{order['order_no']} - {order['product_name']} ({order['planned_qty']} {order['uom']})"
+        order_options[display] = order['id']
     
-    selected_order_label = st.selectbox("Select Production Order", list(order_dict.keys()))
-    order_id = order_dict[selected_order_label]
-    
-    # Get order details
-    order = prod_manager.get_order_details(order_id)
-    
-    if not order:
-        st.error("Order not found")
-        return
-    
-    # Display order info
-    with st.expander("📋 Order Information", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.write(f"**Order No:** {order['order_no']}")
-            st.write(f"**Product:** {order['product_name']}")
-        with col2:
-            st.write(f"**Quantity:** {order['planned_qty']} {order['uom']}")
-            st.write(f"**Status:** {order['status']}")
-        with col3:
-            st.write(f"**Source:** {order['warehouse_name']}")
-            st.write(f"**Target:** {order['target_warehouse_name']}")
-    
-    # Check material availability
-    st.markdown("### 📊 Material Availability Check")
-    
-    availability = inv_manager.check_material_availability(
-        order['bom_header_id'],
-        order['planned_qty'],
-        order['warehouse_id']
+    selected_order_display = st.selectbox(
+        "Select Production Order",
+        options=list(order_options.keys())
     )
     
-    if not availability.empty:
-        # Summary
-        total_materials = len(availability)
-        sufficient = len(availability[availability['availability_status'] == 'SUFFICIENT'])
-        
-        col1, col2, col3 = st.columns(3)
+    if not selected_order_display:
+        return
+    
+    selected_order_id = order_options[selected_order_display]
+    
+    # Get order details
+    order_details = prod_manager.get_order_details(selected_order_id)
+    
+    # Show order information
+    with st.expander("📋 Order Information", expanded=True):
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Total Materials", total_materials)
+            st.markdown(f"**Order No:** {order_details['order_no']}")
+            st.markdown(f"**Product:** {order_details['product_name']}")
         with col2:
-            st.metric("✅ Sufficient", sufficient)
+            st.markdown(f"**Quantity:** {order_details['planned_qty']} {order_details['uom']}")
+            st.markdown(f"**Status:** {order_details['status']}")
         with col3:
-            insufficient = total_materials - sufficient
-            st.metric("❌ Insufficient", insufficient)
+            st.markdown(f"**Source:** {order_details['warehouse_name']}")
+            st.markdown(f"**Target:** {order_details['target_warehouse_name']}")
+        with col4:
+            st.markdown(f"**BOM:** {order_details['bom_name']}")
+            st.markdown(f"**Priority:** {order_details['priority']}")
+    
+    # Material availability check
+    st.markdown("### 📊 Material Availability Check")
+    
+    # Check materials
+    availability = inv_manager.check_material_availability(
+        order_details['bom_header_id'],
+        order_details['planned_qty'],
+        order_details['warehouse_id']
+    )
+    
+    if availability.empty:
+        st.error("❌ Could not check material availability")
+        return
+    
+    # Calculate statistics
+    sufficient_count = len(availability[availability['availability_status'] == 'SUFFICIENT'])
+    partial_count = len(availability[availability['availability_status'] == 'PARTIAL'])
+    insufficient_count = len(availability[availability['availability_status'] == 'INSUFFICIENT'])
+    total_materials = len(availability)
+    
+    # Display metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Materials", total_materials)
+    with col2:
+        st.metric("✅ Sufficient", sufficient_count)
+    with col3:
+        st.metric("⚠️ Partial", partial_count)
+    with col4:
+        st.metric("❌ Insufficient", insufficient_count)
+    
+    # Display materials table
+    def format_status(status):
+        icons = {
+            'SUFFICIENT': '✅',
+            'PARTIAL': '⚠️',
+            'INSUFFICIENT': '❌'
+        }
+        return f"{icons.get(status, '⚪')} {status}"
+    
+    display_df = availability.copy()
+    display_df['status'] = display_df['availability_status'].apply(format_status)
+    display_df['required_qty'] = display_df['required_qty'].apply(lambda x: f"{x:.2f}")
+    display_df['available_qty'] = display_df['available_qty'].apply(lambda x: f"{x:.2f}")
+    
+    st.dataframe(
+        display_df[['material_name', 'required_qty', 'available_qty', 'status', 'uom']],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            'material_name': 'Material',
+            'required_qty': 'Required',
+            'available_qty': 'Available',
+            'status': 'Status',
+            'uom': 'UOM'
+        }
+    )
+    
+    # FIXED LOGIC: Correct availability message
+    st.markdown("---")
+    
+    # Determine overall status and show appropriate message
+    can_issue = False
+    
+    if insufficient_count > 0:
+        # Có vật liệu thiếu
+        st.error(f"❌ **Cannot issue materials:** {insufficient_count} material(s) have insufficient stock")
         
-        # Display materials
-        materials = availability.copy()
-        materials['required_qty'] = materials.apply(
-            lambda x: f"{format_number(x['required_qty'], 2)} {x['uom']}", axis=1
-        )
-        materials['available_qty'] = materials.apply(
-            lambda x: f"{format_number(x['available_qty'], 2)} {x['uom']}", axis=1
-        )
-        materials['status'] = materials['availability_status'].apply(create_status_indicator)
+        # Check for alternatives
+        materials_with_alt = availability[
+            (availability['availability_status'] != 'SUFFICIENT') & 
+            (availability.get('has_alternatives', False) == True)
+        ]
         
-        st.dataframe(
-            materials[['material_name', 'required_qty', 'available_qty', 'status']],
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        # Check if all materials available
-        all_available = not any('X' in str(s) for s in materials['status'])
-        
-        # Action section
-        st.markdown("---")
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            if all_available:
-                st.success("✅ All materials are available in stock")
-            else:
-                st.error("❌ Some materials have insufficient stock")
-                st.info("""
-                **Options:**
-                1. Wait for stock replenishment
-                2. Check if alternative materials are available
-                3. Adjust production quantity
-                """)
-        
-        with col2:
-            if all_available and st.button("📦 Issue Materials", type="primary", use_container_width=True):
+        if not materials_with_alt.empty:
+            st.warning(f"💡 {len(materials_with_alt)} material(s) have alternatives that may be used")
+            st.info("The system will automatically use alternatives if available during issue")
+            can_issue = True  # Có thể issue nếu có alternatives
+    
+    elif partial_count > 0:
+        # Có vật liệu đủ một phần
+        st.warning(f"⚠️ **Partial availability:** {partial_count} material(s) have partial stock")
+        st.info("You can proceed with partial issue if needed")
+        can_issue = True
+    
+    elif sufficient_count == total_materials:
+        # Tất cả vật liệu đều đủ
+        st.success("✅ **All materials are available in stock**")
+        can_issue = True
+    
+    else:
+        # Edge case - không có vật liệu nào
+        st.error("❌ No materials to issue")
+        can_issue = False
+    
+    # Action buttons
+    st.markdown("---")
+    col1, col2, col3 = st.columns([2, 2, 1])
+    
+    with col1:
+        # Issue button - CHỈ enable khi can_issue = True
+        if can_issue:
+            if st.button("🚀 Issue Materials", type="primary", use_container_width=True):
                 try:
-                    result = issue_materials(order_id, st.session_state.user_id)
+                    # Confirm before issuing
+                    confirm_key = f"confirm_issue_{selected_order_id}"
                     
-                    UIHelpers.show_message(
-                        f"✅ Materials issued! Issue No: **{result['issue_no']}**",
-                        "success"
-                    )
+                    if confirm_key not in st.session_state:
+                        st.session_state[confirm_key] = False
                     
+                    if not st.session_state[confirm_key]:
+                        st.warning("⚠️ Are you sure you want to issue materials? This will update inventory.")
+                        col_confirm1, col_confirm2 = st.columns(2)
+                        with col_confirm1:
+                            if st.button("✅ Yes, Issue", type="primary", use_container_width=True):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
+                        with col_confirm2:
+                            if st.button("❌ Cancel", use_container_width=True):
+                                del st.session_state[confirm_key]
+                        return
+                    
+                    # Proceed with issue
+                    with st.spinner("Issuing materials..."):
+                        result = issue_materials(
+                            selected_order_id,
+                            st.session_state.get('user_id', 1)
+                        )
+                    
+                    st.success(f"✅ Materials issued successfully! Issue No: **{result['issue_no']}**")
+                    
+                    # Show substitutions if any
+                    if result.get('substitutions'):
+                        st.info("📝 **Material Substitutions Made:**")
+                        for sub in result['substitutions']:
+                            st.write(f"- {sub}")
+                    
+                    # Clean up session state
+                    if confirm_key in st.session_state:
+                        del st.session_state[confirm_key]
+                    
+                    time.sleep(2)
+                    set_view('list')
                     st.rerun()
                     
                 except Exception as e:
-                    UIHelpers.show_message(f"❌ Error: {str(e)}", "error")
+                    st.error(f"❌ Error issuing materials: {str(e)}")
                     logger.error(f"Material issue failed: {e}", exc_info=True)
+        else:
+            # Disable button với explanation
+            st.button(
+                "🚫 Cannot Issue Materials", 
+                disabled=True,
+                use_container_width=True,
+                help="Materials are not available. Please check stock or use alternatives."
+            )
+    
+    with col2:
+        if st.button("🔄 Refresh Stock", use_container_width=True):
+            st.cache_resource.clear()
+            st.rerun()
+    
+    with col3:
+        if st.button("← Back", use_container_width=True):
+            set_view('list')
+            st.rerun()
 
 # ==================== Material Return View ====================
 
