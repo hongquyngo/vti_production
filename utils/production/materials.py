@@ -69,7 +69,7 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
             
             # Issue each material using FEFO with alternative substitution
             for _, mat in materials.iterrows():
-                remaining = mat['required_qty'] - mat['issued_qty']
+                remaining = float(mat['required_qty']) - float(mat['issued_qty'])
                 if remaining > 0:
                     try:
                         # Try issuing primary material first
@@ -407,10 +407,10 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
     """
     issued_details = []
     substitutions = []
-    remaining = required_qty
+    remaining = float(required_qty)  # Ensure float type
     
     # Try primary material first
-    primary_issued = 0
+    primary_issued = 0.0  # Ensure float type
     try:
         primary_details = _issue_single_material_fefo(
             conn, issue_id, order_id, material, remaining,
@@ -421,7 +421,7 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
         
         # Calculate how much was issued from primary
         for detail in primary_details:
-            primary_issued += detail['quantity']
+            primary_issued += float(detail['quantity'])  # Ensure float
         
         remaining -= primary_issued
         
@@ -505,7 +505,7 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
                 )
                 
                 # Calculate how much was issued from this alternative
-                alt_issued = sum(d['quantity'] for d in alt_details)
+                alt_issued = sum(float(d['quantity']) for d in alt_details)  # Ensure float
                 
                 if alt_issued > 0:
                     issued_details.extend(alt_details)
@@ -530,7 +530,7 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
         
         # Check if we fulfilled the requirement
         if remaining > 0:
-            total_issued = required_qty - remaining
+            total_issued = float(required_qty) - float(remaining)
             if total_issued == 0:
                 raise ValueError(f"No materials available (primary or alternatives) for {material['material_name']}")
             else:
@@ -568,7 +568,6 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
         FROM inventory_histories
         WHERE product_id = :material_id
             AND warehouse_id = :warehouse_id
-            AND type = 'IN'
             AND remain > 0
             AND delete_flag = 0
         ORDER BY 
@@ -591,14 +590,16 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
     
     # Issue from batches
     issued_details = []
-    total_issued = 0
+    total_issued = 0.0  # Ensure float type
     
     for batch in batches:
         if total_issued >= required_qty:
             break
         
-        # Calculate quantity to issue from this batch
-        issue_qty = min(batch['available_qty'], required_qty - total_issued)
+        # Calculate quantity to issue from this batch - ensure all are float
+        batch_available = float(batch['available_qty'])
+        required_remaining = float(required_qty) - float(total_issued)
+        issue_qty = min(batch_available, required_remaining)
         
         # Insert issue detail with alternative tracking
         detail_id = _insert_issue_detail(

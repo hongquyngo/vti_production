@@ -276,18 +276,21 @@ class UIHelpers:
                     alt_df = pd.DataFrame(alt_data)
                     st.dataframe(alt_df, use_container_width=True, hide_index=True)
                     
-                    # Summary
+                    # Summary - only show if there are actual alternatives
                     total_alt_available = mat.get('alternative_total_qty', 0)
-                    if mat.get('alternatives_sufficient', False):
-                        st.success(
-                            f"✅ Total from alternatives: {format_number(total_alt_available, 2)} {mat['uom']} "
-                            f"(Sufficient to cover shortage)"
-                        )
+                    if total_alt_available > 0:
+                        if mat.get('alternatives_sufficient', False):
+                            st.success(
+                                f"✅ Total from alternatives: {format_number(total_alt_available, 2)} {mat['uom']} "
+                                f"(Sufficient to cover shortage)"
+                            )
+                        else:
+                            st.warning(
+                                f"⚠️ Total from alternatives: {format_number(total_alt_available, 2)} {mat['uom']} "
+                                f"(Not sufficient - short by {format_number(shortage - total_alt_available, 2)} {mat['uom']})"
+                            )
                     else:
-                        st.warning(
-                            f"⚠️ Total from alternatives: {format_number(total_alt_available, 2)} {mat['uom']} "
-                            f"(Not sufficient - short by {format_number(shortage - total_alt_available, 2)} {mat['uom']})"
-                        )
+                        st.info("ℹ️ No alternative materials available in stock")
 
 
 def create_status_indicator(status: str) -> str:

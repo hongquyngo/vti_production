@@ -878,7 +878,8 @@ def render_material_issue():
             can_issue = False
             materials_with_alts = pd.DataFrame()
             
-            if insufficient > 0:
+            # Check if there are any materials with PARTIAL or INSUFFICIENT status
+            if partial > 0 or insufficient > 0:
                 # Get materials that need alternatives
                 if 'has_alternatives' in availability.columns:
                     materials_with_alts = availability[
@@ -886,35 +887,46 @@ def render_material_issue():
                         (availability.get('has_alternatives', False) == True)
                     ]
                     
-                    # Check if all insufficient materials can be fulfilled with alternatives
+                    # Check if all insufficient/partial materials can be fulfilled with alternatives
                     materials_needing_alts = availability[availability['availability_status'] != 'SUFFICIENT']
                     can_fulfill_with_alts = all(
                         row.get('alternatives_sufficient', False) 
                         for _, row in materials_needing_alts.iterrows()
                     )
                     
-                    if can_fulfill_with_alts and not materials_with_alts.empty:
+                    if can_fulfill_with_alts and not materials_needing_alts.empty:
                         can_issue = True
                         st.success(f"✅ All materials can be issued using {len(materials_with_alts)} alternative material(s)")
                     else:
-                        st.error(f"❌ Cannot issue materials: {insufficient} material(s) have insufficient stock even with alternatives")
+                        # Count actual problems (both PARTIAL and INSUFFICIENT)
+                        total_problems = partial + insufficient
+                        st.error(f"❌ Cannot issue materials: {total_problems} material(s) have insufficient stock even with alternatives")
                     
-                    # Show detailed alternatives information
+                    # Show detailed alternatives information only if there are real alternatives
                     if not materials_with_alts.empty:
-                        UIHelpers.show_alternative_materials(availability)
+                        # Check if any alternative actually has quantity > 0
+                        has_real_alternatives = False
+                        for _, mat in materials_with_alts.iterrows():
+                            if mat.get('alternative_total_qty', 0) > 0:
+                                has_real_alternatives = True
+                                break
+                        
+                        if has_real_alternatives:
+                            UIHelpers.show_alternative_materials(availability)
                 else:
-                    st.error(f"❌ Cannot issue materials: {insufficient} material(s) have insufficient stock")
+                    # No alternatives column, so cannot issue if any material is not sufficient
+                    total_problems = partial + insufficient
+                    st.error(f"❌ Cannot issue materials: {total_problems} material(s) have insufficient stock")
             else:
+                # All materials are SUFFICIENT
                 can_issue = True
                 st.success("✅ All materials are sufficient")
             
             # ==================== REFACTORED v4.0: Improved Issue Button with Confirmation ====================
             
-            # PDF Export Dialog State (keep existing logic)
-            if st.session_state.get('show_pdf_dialog', False):
-                issue_result = st.session_state.get('last_issue_result')
-                if issue_result:
-                    PDFExportDialog.show_pdf_export_dialog(issue_result)
+            # PDF Export Dialog State - removed, handled inline after issue
+            if False:  # Disabled - PDF dialog shown inline after successful issue
+                pass
             else:
                 # Issue button with improved confirmation flow
                 if can_issue:
@@ -976,9 +988,8 @@ def render_material_issue():
                                     st.session_state['last_issue_result'] = result
                                     st.session_state['show_pdf_dialog'] = True
                                     
-                                    # Add delay before refresh for user to see message
-                                    time.sleep(SystemConstants.SUCCESS_MESSAGE_DELAY)
-                                    st.rerun()
+                                    # Show PDF dialog immediately - don't rerun
+                                    PDFExportDialog.show_pdf_export_dialog(result)
                                     
                                 except ValueError as e:
                                     st.error(f"❌ Failed to issue materials: {str(e)}")
