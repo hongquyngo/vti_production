@@ -93,6 +93,8 @@ class InventoryManager:
                 d.id as bom_detail_id,
                 d.material_id,
                 p.name as material_name,
+                p.pt_code,
+                p.package_size,
                 d.quantity * %s / h.output_qty * (1 + d.scrap_rate/100) as required_qty,
                 d.uom,
                 COALESCE(SUM(ih.remain), 0) as available_qty,
@@ -113,8 +115,8 @@ class InventoryManager:
                 AND ih.remain > 0
                 AND ih.delete_flag = 0
             WHERE h.id = %s
-            GROUP BY d.id, d.material_id, p.name, d.quantity, d.uom, 
-                     d.scrap_rate, h.output_qty
+            GROUP BY d.id, d.material_id, p.name, p.pt_code, p.package_size, 
+                     d.quantity, d.uom, d.scrap_rate, h.output_qty
             ORDER BY p.name
         """
         
@@ -165,6 +167,8 @@ class InventoryManager:
                 alt.id as alternative_id,
                 alt.alternative_material_id,
                 p.name as alternative_material_name,
+                p.pt_code as alternative_pt_code,
+                p.package_size as alternative_package_size,
                 alt.quantity,
                 alt.uom,
                 alt.scrap_rate,
@@ -186,8 +190,8 @@ class InventoryManager:
                 AND ih.delete_flag = 0
             WHERE alt.bom_detail_id = %s
                 AND alt.is_active = 1
-            GROUP BY alt.id, alt.alternative_material_id, p.name, 
-                     alt.quantity, alt.uom, alt.scrap_rate, alt.priority
+            GROUP BY alt.id, alt.alternative_material_id, p.name, p.pt_code, 
+                     p.package_size, alt.quantity, alt.uom, alt.scrap_rate, alt.priority
             ORDER BY alt.priority ASC
         """
         

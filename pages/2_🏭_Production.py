@@ -1,18 +1,17 @@
-# pages/1_🏭_Production.py
+# pages/2___Production.py
 """
-Production Management User Interface - REFACTORED v3.0
+Production Management User Interface - REFACTORED v3.1
 Complete production cycle: Order → Issue → Return → Complete
-WITH PRODUCTION OUTPUT TRACKING
+WITH PRODUCTION OUTPUT TRACKING & ENHANCED MATERIAL DISPLAY
 
-IMPROVEMENTS v3.0 (Streamlined):
-- Removed redundant Progress column
-- Removed Dashboard view (metrics in Order List)
-- Added Production Receipts navigation button
-- Enhanced Output + Quality columns for complete tracking
-- Cleaner, more focused UI
-- Direct link to Production Receipts page
+IMPROVEMENTS v3.1 (Material Display Enhancement):
+- Added PT code and Package size display in all material tables
+- Enhanced material information visibility across all views
+- Maintained ALL v3.0 functionality without removing any code
+- Improved UI/UX with better material information presentation
 
 Previous versions:
+v3.0: Streamlined UI, removed redundant columns, added Production Receipts navigation
 v2.3: Added Production Output tab, output/quality columns
 v2.0: Enhanced Order Details view
 v1.0: Basic production management
@@ -201,6 +200,37 @@ def render_navigation():
             ):
                 set_view(view)
                 st.rerun()
+
+# ==================== Material Display Helper ====================
+
+def format_material_display_with_details(row: pd.Series) -> str:
+    """
+    Format material display with PT code and package size
+    
+    Args:
+        row: DataFrame row with material info
+        
+    Returns:
+        Formatted string with material details
+    """
+    material_name = row.get('material_name', '')
+    pt_code = row.get('pt_code', '')
+    package_size = row.get('package_size', '')
+    
+    # Build display with name on first line
+    display = material_name
+    
+    # Add PT code and package on second line if available
+    details = []
+    if pt_code and pd.notna(pt_code) and pt_code != 'N/A':
+        details.append(f"PT: {pt_code}")
+    if package_size and pd.notna(package_size) and package_size != 'N/A':
+        details.append(f"Pack: {package_size}")
+    
+    if details:
+        display += f"\n📦 {' | '.join(details)}"
+    
+    return display
 
 # ==================== Order List View ====================
 
@@ -671,10 +701,22 @@ def render_create_order():
                         return {'SUFFICIENT': '🟢', 'PARTIAL': '🟡', 
                                'INSUFFICIENT': '🔴'}.get(status, '⚪') + f" {status}"
                     
-                    display_df = availability[['material_name', 'required_qty', 
-                                             'available_qty', 'availability_status', 'uom']].copy()
+                    # Enhanced display with PT code and package size
+                    display_df = availability.copy()
+                    display_df['material_info'] = display_df.apply(format_material_display_with_details, axis=1)
                     display_df['availability_status'] = display_df['availability_status'].apply(color_status)
-                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    
+                    st.dataframe(
+                        display_df[['material_info', 'required_qty', 'available_qty', 'availability_status', 'uom']].rename(columns={
+                            'material_info': 'Material',
+                            'required_qty': 'Required',
+                            'available_qty': 'Available',
+                            'availability_status': 'Status',
+                            'uom': 'UOM'
+                        }),
+                        use_container_width=True,
+                        hide_index=True
+                    )
     
     # ==================== ACTIONS ====================
     st.markdown("---")
@@ -731,7 +773,7 @@ def render_create_order():
 # ==================== Material Issue View ====================
 
 def render_material_issue():
-    """Render material issue view with PDF export"""
+    """Render material issue view with PDF export and enhanced material display"""
     st.subheader("📦 Issue Materials to Production")
     
     # Get confirmed orders that need materials
@@ -808,17 +850,33 @@ def render_material_issue():
             with col4:
                 st.metric("❌ Insufficient", insufficient, delta_color="inverse")
             
-            # Show materials table
-            display_df = availability[['material_name', 'required_qty', 'available_qty', 
-                                      'availability_status', 'uom']].copy()
-            display_df['availability_status'] = display_df['availability_status'].apply(
+            # Show materials table with enhanced display (PT code & package size)
+            display_df = availability.copy()
+            
+            # Format material info with PT code and package size
+            display_df['material_info'] = display_df.apply(format_material_display_with_details, axis=1)
+            
+            # Format quantities
+            display_df['required_display'] = display_df['required_qty'].apply(lambda x: f"{x:.2f}")
+            display_df['available_display'] = display_df['available_qty'].apply(lambda x: f"{x:.2f}")
+            
+            # Format status
+            display_df['status_display'] = display_df['availability_status'].apply(
                 lambda x: '✅ SUFFICIENT' if x == 'SUFFICIENT' 
                         else '⚠️ PARTIAL' if x == 'PARTIAL' 
                         else '❌ INSUFFICIENT'
             )
             
+            # Display formatted table
             st.dataframe(
-                display_df,
+                display_df[['material_info', 'required_display', 'available_display', 
+                          'status_display', 'uom']].rename(columns={
+                    'material_info': 'Material Info',
+                    'required_display': 'Required',
+                    'available_display': 'Available',
+                    'status_display': 'Status',
+                    'uom': 'UOM'
+                }),
                 use_container_width=True,
                 hide_index=True
             )
@@ -1265,16 +1323,56 @@ def render_order_details():
             st.write(f"**Priority:** {order['priority']}")
             st.write(f"**Status:** {order['status']}")
     
-    # Tab 2: Materials
+    # Tab 2: Materials with enhanced display
     with tab2:
+        st.markdown("### Required Materials")
         materials = prod_manager.get_order_materials(order_id)
         
         if not materials.empty:
-            st.dataframe(
-                materials,
-                use_container_width=True,
-                hide_index=True
-            )
+            # Try to get enhanced material info with PT code and package
+            try:
+                availability = inv_manager.check_material_availability(
+                    order['bom_header_id'],
+                    order['planned_qty'],
+                    order['warehouse_id']
+                )
+                
+                if not availability.empty:
+                    # Format with PT code and package
+                    display_df = availability.copy()
+                    display_df['material_info'] = display_df.apply(format_material_display_with_details, axis=1)
+                    
+                    display_df['required_display'] = display_df['required_qty'].apply(lambda x: f"{x:.2f}")
+                    display_df['available_display'] = display_df['available_qty'].apply(lambda x: f"{x:.2f}")
+                    display_df['status_display'] = display_df['availability_status'].apply(create_status_indicator)
+                    
+                    st.dataframe(
+                        display_df[['material_info', 'required_display', 'available_display', 
+                                  'status_display', 'uom']].rename(columns={
+                            'material_info': 'Material Info',
+                            'required_display': 'Required',
+                            'available_display': 'Available',
+                            'status_display': 'Status',
+                            'uom': 'UOM'
+                        }),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    # Fallback to original display
+                    st.dataframe(
+                        materials,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+            except Exception as e:
+                logger.warning(f"Could not get enhanced material display: {e}")
+                # Fallback to original display
+                st.dataframe(
+                    materials,
+                    use_container_width=True,
+                    hide_index=True
+                )
         else:
             st.info("No materials found")
     
@@ -1524,7 +1622,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Manufacturing Module v3.1 - with PDF Export Support")
+    st.caption("Manufacturing Module v3.1 - with PT Code & Package Display Support")
 
 if __name__ == "__main__":
     main()
