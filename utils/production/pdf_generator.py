@@ -1,9 +1,11 @@
 # utils/production/pdf_generator.py
 """
-PDF Generator for Material Issues with Multi-language Support
+PDF Generator for Material Issues with Multi-language Support - REFACTORED
+Fixed: Schema issues, font handling, logo loading, error handling
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Dict, Optional, Any, List
 from io import BytesIO
@@ -30,25 +32,23 @@ from reportlab.lib.utils import ImageReader
 # Import database and S3 utilities with proper error handling
 try:
     from ..db import get_db_engine
-    from ..s3_utils import get_company_logo_from_s3
+    from ..s3_utils import get_company_logo_from_s3_enhanced
     S3_AVAILABLE = True
 except ImportError as e:
     # Alternative import for testing or when running as standalone
     import sys
-    import os
     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.append(parent_dir)
     
     try:
         from db import get_db_engine
-        from s3_utils import get_company_logo_from_s3
+        from s3_utils import get_company_logo_from_s3_enhanced
         S3_AVAILABLE = True
     except ImportError:
         logger = logging.getLogger(__name__)
         logger.warning("Could not import S3 utilities - logo functionality disabled")
         S3_AVAILABLE = False
-        # Create dummy function
-        def get_company_logo_from_s3(company_id, logo_path):
+        def get_company_logo_from_s3_enhanced(company_id, logo_path):
             return None
 
 logger = logging.getLogger(__name__)
@@ -62,19 +62,88 @@ class MaterialIssuePDFGenerator:
         self._setup_fonts()
     
     def _setup_fonts(self):
-        """Setup fonts for PDF with fallback"""
+        """Setup fonts for PDF with proper fallback"""
         try:
-            # Try to register Vietnamese fonts
-            font_path = "fonts/"
-            if not pdfmetrics.registered('DejaVuSans'):
-                pdfmetrics.registerFont(TTFont('DejaVuSans', font_path + 'DejaVuSans.ttf'))
-                pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', font_path + 'DejaVuSans-Bold.ttf'))
-            logger.info("Custom fonts registered successfully")
+            # Try multiple possible font locations
+            font_paths = [
+                "fonts/",
+                "/usr/share/fonts/truetype/dejavu/",
+                os.path.join(os.path.dirname(__file__), "fonts/"),
+                "/app/fonts/",  # For Docker
+                "/usr/share/fonts/",
+                os.path.expanduser("~/.fonts/")
+            ]
+            
+            font_registered = False
+            for path in font_paths:
+                if os.path.exists(path):
+                    try:
+                        # Look for DejaVu fonts
+                        dejavu_path = os.path.join(path, 'DejaVuSans.ttf')
+                        dejavu_bold_path = os.path.join(path, 'DejaVuSans-Bold.ttf')
+                        
+                        # Also check in subdirectories
+                        if not os.path.exists(dejavu_path):
+                            for subdir in ['truetype/dejavu', 'dejavu', 'truetype']:
+                                test_path = os.path.join(path, subdir, 'DejaVuSans.ttf')
+                                if os.path.exists(test_path):
+                                    dejavu_path = test_path
+                                    dejavu_bold_path = os.path.join(path, subdir, 'DejaVuSans-Bold.ttf')
+                                    break
+                        
+                        if os.path.exists(dejavu_path):
+                            if not pdfmetrics.registered('DejaVuSans'):
+                                pdfmetrics.registerFont(TTFont('DejaVuSans', dejavu_path))
+                                if os.path.exists(dejavu_bold_path):
+                                    pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', dejavu_bold_path))
+                                else:
+                                    # Use regular font as bold if bold not found
+                                    pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', dejavu_path))
+                                logger.info(f"Fonts registered from: {path}")
+                                font_registered = True
+                                break
+                    except Exception as e:
+                        logger.warning(f"Failed to register fonts from {path}: {e}")
+            
+            if not font_registered:
+                logger.warning("Using default PDF fonts - Vietnamese may not display correctly")
+                
         except Exception as e:
-            logger.warning(f"Could not register custom fonts, using defaults: {e}")
+            logger.error(f"Font setup error: {e}")
+    
+    def validate_issue_data(self, issue_id: int) -> bool:
+        """Validate that issue has all required data"""
+        try:
+            # Check if issue exists
+            check_query = """
+                SELECT COUNT(*) as count 
+                FROM material_issues 
+                WHERE id = %s
+            """
+            result = pd.read_sql(check_query, self.engine, params=(issue_id,))
+            if result.iloc[0]['count'] == 0:
+                logger.error(f"Issue {issue_id} not found")
+                return False
+            
+            # Check if has details
+            details_query = """
+                SELECT COUNT(*) as count 
+                FROM material_issue_details 
+                WHERE material_issue_id = %s
+            """
+            result = pd.read_sql(details_query, self.engine, params=(issue_id,))
+            if result.iloc[0]['count'] == 0:
+                logger.error(f"Issue {issue_id} has no details")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error validating issue data: {e}")
+            return False
     
     def get_issue_data(self, issue_id: int) -> Dict[str, Any]:
-        """Get material issue data from database"""
+        """Get material issue data from database - FIXED SCHEMA"""
         # Main issue info
         issue_query = """
             SELECT 
@@ -106,16 +175,19 @@ class MaterialIssuePDFGenerator:
         
         issue_info = issue_df.iloc[0].to_dict()
         
-        # Issue details
+        # Issue details - FIXED to work with current schema
         details_query = """
             SELECT 
                 mid.material_id,
                 p.name as material_name,
+                p.pt_code,
+                p.package_size,
                 mid.batch_no,
                 mid.quantity,
                 mid.uom,
                 mid.expired_date,
-                mid.is_alternative,
+                -- Check if columns exist, otherwise use defaults
+                COALESCE(mid.is_alternative, 0) as is_alternative,
                 mid.original_material_id,
                 op.name as original_material_name
             FROM material_issue_details mid
@@ -125,7 +197,31 @@ class MaterialIssuePDFGenerator:
             ORDER BY mid.id
         """
         
-        details_df = pd.read_sql(details_query, self.engine, params=(issue_id,))
+        # Try with new columns first, fallback to basic query if fail
+        try:
+            details_df = pd.read_sql(details_query, self.engine, params=(issue_id,))
+        except Exception as e:
+            logger.warning(f"New columns not found, using basic query: {e}")
+            # Fallback query without new columns
+            details_query_basic = """
+                SELECT 
+                    mid.material_id,
+                    p.name as material_name,
+                    p.pt_code,
+                    p.package_size,
+                    mid.batch_no,
+                    mid.quantity,
+                    mid.uom,
+                    mid.expired_date,
+                    0 as is_alternative,
+                    NULL as original_material_id,
+                    NULL as original_material_name
+                FROM material_issue_details mid
+                JOIN products p ON mid.material_id = p.id
+                WHERE mid.material_issue_id = %s
+                ORDER BY mid.id
+            """
+            details_df = pd.read_sql(details_query_basic, self.engine, params=(issue_id,))
         
         return {
             'issue': issue_info,
@@ -136,13 +232,25 @@ class MaterialIssuePDFGenerator:
         """Get custom paragraph styles"""
         styles = getSampleStyleSheet()
         
+        # Determine font to use
+        try:
+            if pdfmetrics.registered('DejaVuSans'):
+                base_font = 'DejaVuSans'
+                bold_font = 'DejaVuSans-Bold'
+            else:
+                base_font = 'Helvetica'
+                bold_font = 'Helvetica-Bold'
+        except:
+            base_font = 'Helvetica'
+            bold_font = 'Helvetica-Bold'
+        
         # Title style
         styles.add(ParagraphStyle(
             name='CustomTitle',
             parent=styles['Title'],
             fontSize=16,
             textColor=colors.HexColor('#1f4788'),
-            fontName='Helvetica-Bold'
+            fontName=bold_font
         ))
         
         # Company info style
@@ -151,7 +259,7 @@ class MaterialIssuePDFGenerator:
             parent=styles['Normal'],
             fontSize=10,
             alignment=TA_CENTER,
-            fontName='Helvetica'
+            fontName=base_font
         ))
         
         # Section header style
@@ -160,8 +268,16 @@ class MaterialIssuePDFGenerator:
             parent=styles['Heading2'],
             fontSize=12,
             textColor=colors.HexColor('#333333'),
-            fontName='Helvetica-Bold',
+            fontName=bold_font,
             spaceAfter=6
+        ))
+        
+        # Normal Vietnamese style
+        styles.add(ParagraphStyle(
+            name='NormalViet',
+            parent=styles['Normal'],
+            fontSize=10,
+            fontName=base_font
         ))
         
         # Footer style
@@ -170,7 +286,8 @@ class MaterialIssuePDFGenerator:
             parent=styles['Normal'],
             fontSize=8,
             textColor=colors.gray,
-            alignment=TA_CENTER
+            alignment=TA_CENTER,
+            fontName=base_font
         ))
         
         return styles
@@ -201,6 +318,7 @@ class MaterialIssuePDFGenerator:
             logger.error(f"Error getting company info: {e}")
         
         return {
+            'id': 0,
             'english_name': 'PROSTECH VIETNAM',
             'local_name': 'CÔNG TY TNHH PROSTECH VIỆT NAM',
             'address': 'Vietnam',
@@ -213,28 +331,22 @@ class MaterialIssuePDFGenerator:
         """Create PDF header with company info and logo"""
         company_info = self.get_company_info(data['issue']['warehouse_id'])
         
-        # Header table data
-        header_data = []
-        
-        # Try to get logo
+        # Try to get logo with enhanced function
         logo_img = None
-        if company_info.get('logo_path') and S3_AVAILABLE:
+        if S3_AVAILABLE:
             try:
-                # Logo path from DB like: company-logo/173613389453-logo.png
-                logger.info(f"Attempting to download logo: {company_info['logo_path']}")
-                logo_bytes = get_company_logo_from_s3(
+                logo_bytes = get_company_logo_from_s3_enhanced(
                     company_info['id'], 
-                    company_info['logo_path']
+                    company_info.get('logo_path')
                 )
                 if logo_bytes:
-                    # Create image from bytes
                     logo_buffer = BytesIO(logo_bytes)
                     try:
                         logo_img = Image(logo_buffer, width=50*mm, height=15*mm, kind='proportional')
                     except Exception as img_error:
                         logger.error(f"Error creating image from bytes: {img_error}")
             except Exception as e:
-                logger.error(f"Error loading logo: {e}")
+                logger.warning(f"Could not load logo: {e}")
         
         # Company name and info
         company_name = company_info.get('local_name', company_info.get('english_name', ''))
@@ -248,32 +360,37 @@ class MaterialIssuePDFGenerator:
                 Paragraph(f"""
                     <b>{company_name}</b><br/>
                     {company_address}<br/>
-                    {'MST: ' + tax_number if tax_number else ''}
+                    MST/Tax: {tax_number if tax_number else 'N/A'}
                 """, styles['CompanyInfo'])
             ]]
         else:
-            # Without logo - just company name
+            # Without logo - text only
             header_data = [[
                 Paragraph(f"""
                     <b>{company_name}</b><br/>
                     {company_address}<br/>
-                    {'MST: ' + tax_number if tax_number else ''}
+                    MST/Tax: {tax_number if tax_number else 'N/A'}
                 """, styles['CompanyInfo'])
             ]]
         
-        header_table = Table(header_data, colWidths=[80*mm, 110*mm] if logo_img else [190*mm])
+        header_table = Table(header_data, colWidths=[60*mm, 130*mm])
         header_table.setStyle(TableStyle([
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ALIGN', (0, 0), (0, 0), 'CENTER'),
+            ('ALIGN', (1, 0), (1, 0), 'LEFT'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         
         story.append(header_table)
         story.append(Spacer(1, 10*mm))
         
-        # Document title
-        title = "PHIẾU XUẤT VẬT TƯ" if language == 'vi' else "MATERIAL ISSUE SLIP"
+        # Title
+        if language == 'vi':
+            title = "PHIẾU XUẤT KHO VẬT TƯ SẢN XUẤT"
+        else:
+            title = "MATERIAL ISSUE SLIP FOR PRODUCTION"
+        
         story.append(Paragraph(title, styles['CustomTitle']))
-        story.append(Spacer(1, 5*mm))
+        story.append(Spacer(1, 8*mm))
     
     def create_issue_info(self, story: list, data: Dict[str, Any], 
                          styles: Any, language: str = 'vi'):
@@ -286,27 +403,36 @@ class MaterialIssuePDFGenerator:
             issue_date = datetime.strptime(issue_date, '%Y-%m-%d %H:%M:%S')
         formatted_date = issue_date.strftime('%d/%m/%Y %H:%M')
         
-        # Issue information
-        info_data = [
-            ["Số phiếu / Issue No:", issue['issue_no'], 
-             "Ngày / Date:", formatted_date],
-            ["Lệnh SX / Production Order:", issue['order_no'],
-             "Kho / Warehouse:", issue['warehouse_name']],
-            ["Sản phẩm / Product:", issue['product_name'],
-             "SL kế hoạch / Planned Qty:", f"{issue['planned_qty']} {issue['product_uom']}"],
-            ["Người xuất / Issued by:", issue['issued_by'],
-             "Trạng thái / Status:", issue['status']]
-        ]
+        # Issue info table
+        if language == 'vi':
+            info_data = [
+                ['Số phiếu / Issue No:', issue['issue_no']],
+                ['Ngày xuất / Issue Date:', formatted_date],
+                ['Lệnh SX / Production Order:', issue['order_no']],
+                ['Sản phẩm / Product:', issue['product_name']],
+                ['SL kế hoạch / Planned Qty:', f"{issue['planned_qty']} {issue['product_uom']}"],
+                ['Kho xuất / Warehouse:', issue['warehouse_name']],
+                ['Người xuất / Issued By:', issue.get('issued_by', 'N/A')],
+            ]
+        else:
+            info_data = [
+                ['Issue No:', issue['issue_no']],
+                ['Issue Date:', formatted_date],
+                ['Production Order:', issue['order_no']],
+                ['Product:', issue['product_name']],
+                ['Planned Qty:', f"{issue['planned_qty']} {issue['product_uom']}"],
+                ['Warehouse:', issue['warehouse_name']],
+                ['Issued By:', issue.get('issued_by', 'N/A')],
+            ]
         
-        info_table = Table(info_data, colWidths=[45*mm, 50*mm, 45*mm, 50*mm])
+        info_table = Table(info_data, colWidths=[60*mm, 130*mm])
         info_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('ALIGN', (1, 0), (1, -1), 'LEFT'),
             ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-            ('FONTNAME', (2, 0), (2, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
             ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('BACKGROUND', (0, 0), (0, -1), colors.lightgrey),
-            ('BACKGROUND', (2, 0), (2, -1), colors.lightgrey),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('PADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
         ]))
         
         story.append(info_table)
@@ -314,89 +440,115 @@ class MaterialIssuePDFGenerator:
     
     def create_materials_table(self, story: list, data: Dict[str, Any], 
                               styles: Any, language: str = 'vi'):
-        """Create materials table"""
+        """Create materials table with substitution info"""
+        details = data['details']
+        
         # Table headers
         if language == 'vi':
-            headers = ["STT\nNo", "Mã VT\nMaterial Code", "Tên vật liệu\nMaterial Name",
-                      "Số lô\nBatch", "SL\nQuantity", "ĐVT\nUOM", "HSD\nExpiry", "Ghi chú\nNotes"]
+            headers = ['STT', 'Mã VT', 'Tên vật tư', 'Batch/Lot', 'SL', 'ĐVT', 'HSD', 'Ghi chú']
         else:
-            headers = ["No", "Material Code", "Material Name", "Batch", 
-                      "Quantity", "UOM", "Expiry Date", "Notes"]
+            headers = ['No.', 'Code', 'Material Name', 'Batch/Lot', 'Qty', 'UOM', 'Expiry', 'Note']
         
-        # Prepare table data
+        # Table data
         table_data = [headers]
-        for i, row in enumerate(data['details'], 1):
-            table_data.append([
-                str(i),
-                str(row['material_id']),
-                row['material_name'] or '',
-                row['batch_no'] or '',
-                f"{row['quantity']:.2f}" if pd.notna(row['quantity']) else '',
-                row['uom'] or '',
-                row['expired_date'] or '',
-                'Vật liệu thay thế' if row.get('is_alternative') else ''
-            ])
         
-        # Add totals row
-        total_items = len(data['details'])
-        table_data.append(['', '', f'Tổng/Total: {total_items} items', '', '', '', '', ''])
+        for idx, detail in enumerate(details, 1):
+            # Format expiry date
+            exp_date = detail.get('expired_date', '')
+            if exp_date and exp_date != 'None':
+                if isinstance(exp_date, str):
+                    try:
+                        exp_date = datetime.strptime(exp_date, '%Y-%m-%d %H:%M:%S')
+                    except:
+                        try:
+                            exp_date = datetime.strptime(exp_date, '%Y-%m-%d')
+                        except:
+                            exp_date = ''
+                if exp_date:
+                    exp_date = exp_date.strftime('%d/%m/%Y')
+            else:
+                exp_date = 'N/A'
+            
+            # Check if alternative
+            note = ''
+            material_name = detail['material_name']
+            if detail.get('is_alternative') and detail.get('original_material_name'):
+                if language == 'vi':
+                    note = f"Thay thế cho: {detail['original_material_name']}"
+                else:
+                    note = f"Substitute for: {detail['original_material_name']}"
+                material_name = f"* {material_name}"  # Mark with asterisk
+            
+            row = [
+                str(idx),
+                detail.get('pt_code', 'N/A'),
+                material_name,
+                detail.get('batch_no', 'N/A'),
+                f"{detail['quantity']:,.2f}",
+                detail['uom'],
+                exp_date,
+                note
+            ]
+            table_data.append(row)
         
         # Create table
-        mat_table = Table(table_data, colWidths=[15*mm, 25*mm, 65*mm, 25*mm, 20*mm, 15*mm, 25*mm, 15*mm])
-        mat_table.setStyle(TableStyle([
-            # Header row
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4472C4')),
+        materials_table = Table(table_data, colWidths=[
+            10*mm,  # STT
+            25*mm,  # Code
+            55*mm,  # Name
+            25*mm,  # Batch
+            20*mm,  # Qty
+            15*mm,  # UOM
+            20*mm,  # Expiry
+            30*mm   # Note
+        ])
+        
+        materials_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('ALIGN', (2, 1), (2, -1), 'LEFT'),  # Material name left aligned
+            ('ALIGN', (7, 1), (7, -1), 'LEFT'),  # Note left aligned
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 9),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-            
-            # Data rows
-            ('FONTNAME', (0, 1), (-1, -2), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -2), 9),
-            ('ALIGN', (0, 1), (0, -1), 'CENTER'),
-            ('ALIGN', (3, 1), (5, -1), 'CENTER'),
-            
-            # Total row
-            ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
-            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-            
-            # Grid
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('PADDING', (0, 0), (-1, -1), 3),
-            
-            # Highlight alternative materials
-            *[(('BACKGROUND', (0, i), (-1, i), colors.lightyellow) 
-               for i, detail in enumerate(data['details'], 1) 
-               if detail.get('is_alternative'))]
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f0f0')]),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         
-        story.append(Paragraph("CHI TIẾT VẬT LIỆU / MATERIAL DETAILS", styles['SectionHeader']))
-        story.append(mat_table)
-        story.append(Spacer(1, 10*mm))
+        story.append(materials_table)
+        
+        # Add note if there are substitutions
+        if any(d.get('is_alternative') for d in details):
+            story.append(Spacer(1, 5*mm))
+            if language == 'vi':
+                note_text = "(*) Vật tư thay thế được sử dụng do không đủ vật tư chính"
+            else:
+                note_text = "(*) Alternative materials used due to insufficient primary materials"
+            story.append(Paragraph(f"<i>{note_text}</i>", styles['Footer']))
     
     def create_signature_section(self, story: list, styles: Any, language: str = 'vi'):
         """Create signature section"""
         if language == 'vi':
-            sig_data = [
-                ['Người lập phiếu', 'Thủ kho', 'Người nhận', 'Phê duyệt'],
-                ['Prepared by', 'Warehouse keeper', 'Receiver', 'Approved by'],
-                ['', '', '', ''],
-                ['', '', '', ''],
-                ['', '', '', ''],
-                ['Ký, ghi rõ họ tên', 'Ký, ghi rõ họ tên', 'Ký, ghi rõ họ tên', 'Ký, ghi rõ họ tên'],
-            ]
+            sig_headers = ['Người xuất', 'Người nhận', 'Giám sát']
+            sig_labels = ['Ký, họ tên', 'Ký, họ tên', 'Ký, họ tên']
+            date_label = 'Ngày:'
         else:
-            sig_data = [
-                ['Prepared by', 'Warehouse keeper', 'Receiver', 'Approved by'],
-                ['', '', '', ''],
-                ['', '', '', ''],
-                ['', '', '', ''],
-                ['', '', '', ''],
-                ['Sign & Name', 'Sign & Name', 'Sign & Name', 'Sign & Name'],
-            ]
+            sig_headers = ['Issued By', 'Received By', 'Supervisor']
+            sig_labels = ['Sign & Name', 'Sign & Name', 'Sign & Name']
+            date_label = 'Date:'
         
-        sig_table = Table(sig_data, colWidths=[47.5*mm]*4)
+        sig_data = [
+            sig_headers,
+            ['', '', ''],
+            ['', '', ''],
+            ['', '', ''],
+            ['_____________', '_____________', '_____________'],
+            sig_labels,
+            [f'{date_label} ___/___/_____', f'{date_label} ___/___/_____', f'{date_label} ___/___/_____']
+        ]
+        
+        sig_table = Table(sig_data, colWidths=[60*mm, 60*mm, 60*mm])
         sig_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('FONTNAME', (0, 0), (-1, 1), 'Helvetica-Bold'),
@@ -409,65 +561,81 @@ class MaterialIssuePDFGenerator:
         story.append(Spacer(1, 15*mm))
         story.append(sig_table)
     
-    def generate_pdf(self, issue_id: int, language: str = 'vi') -> bytes:
+    def generate_pdf(self, issue_id: int, language: str = 'vi') -> Optional[bytes]:
         """
-        Generate PDF for material issue
+        Generate PDF for material issue with error handling
         
         Args:
             issue_id: Material issue ID
             language: 'vi' for Vietnamese, 'en' for English
             
         Returns:
-            PDF content as bytes
+            PDF content as bytes or None if failed
         """
-        # Get data
-        data = self.get_issue_data(issue_id)
-        
-        # Create PDF
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            rightMargin=10*mm,
-            leftMargin=10*mm,
-            topMargin=10*mm,
-            bottomMargin=10*mm
-        )
-        
-        # Build story
-        story = []
-        styles = self.get_custom_styles()
-        
-        # Add content
-        self.create_header(story, data, styles, language)
-        self.create_issue_info(story, data, styles, language)
-        self.create_materials_table(story, data, styles, language)
-        
-        # Notes section if exists
-        if data['issue'].get('notes'):
-            story.append(Paragraph(f"<b>Ghi chú / Notes:</b> {data['issue']['notes']}", 
-                                 styles['Normal']))
+        try:
+            # Validate data first
+            if not self.validate_issue_data(issue_id):
+                logger.error(f"Invalid issue data for ID {issue_id}")
+                return None
+            
+            # Get data
+            data = self.get_issue_data(issue_id)
+            
+            # Create PDF
+            buffer = BytesIO()
+            doc = SimpleDocTemplate(
+                buffer,
+                pagesize=A4,
+                rightMargin=10*mm,
+                leftMargin=10*mm,
+                topMargin=10*mm,
+                bottomMargin=10*mm
+            )
+            
+            # Build story
+            story = []
+            styles = self.get_custom_styles()
+            
+            # Add content
+            self.create_header(story, data, styles, language)
+            self.create_issue_info(story, data, styles, language)
+            self.create_materials_table(story, data, styles, language)
+            
+            # Notes section if exists
+            if data['issue'].get('notes'):
+                story.append(Spacer(1, 5*mm))
+                if language == 'vi':
+                    story.append(Paragraph(f"<b>Ghi chú:</b> {data['issue']['notes']}", 
+                                         styles['NormalViet']))
+                else:
+                    story.append(Paragraph(f"<b>Notes:</b> {data['issue']['notes']}", 
+                                         styles['Normal']))
+                story.append(Spacer(1, 10*mm))
+            
+            # Signature section
+            self.create_signature_section(story, styles, language)
+            
+            # Footer
             story.append(Spacer(1, 10*mm))
-        
-        # Signature section
-        self.create_signature_section(story, styles, language)
-        
-        # Footer
-        story.append(Spacer(1, 10*mm))
-        footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        story.append(Paragraph(footer_text, styles['Footer']))
-        
-        # Build PDF
-        doc.build(story)
-        
-        # Get PDF bytes
-        pdf_bytes = buffer.getvalue()
-        buffer.close()
-        
-        return pdf_bytes
+            footer_text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            story.append(Paragraph(footer_text, styles['Footer']))
+            
+            # Build PDF
+            doc.build(story)
+            
+            # Get PDF bytes
+            pdf_bytes = buffer.getvalue()
+            buffer.close()
+            
+            logger.info(f"PDF generated successfully for issue {issue_id}")
+            return pdf_bytes
+            
+        except Exception as e:
+            logger.error(f"Failed to generate PDF for issue {issue_id}: {e}", exc_info=True)
+            return None
     
     def generate_pdf_with_options(self, issue_id: int, 
-                                 options: Dict[str, Any]) -> bytes:
+                                 options: Dict[str, Any]) -> Optional[bytes]:
         """
         Generate PDF with custom options
         
@@ -480,7 +648,7 @@ class MaterialIssuePDFGenerator:
                 - notes: custom notes string
                 
         Returns:
-            PDF bytes
+            PDF bytes or None if failed
         """
         language = options.get('language', 'vi')
         doc_type = options.get('doc_type', 'issue_slip')
