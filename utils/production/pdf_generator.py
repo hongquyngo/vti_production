@@ -1,7 +1,14 @@
 # utils/production/pdf_generator.py
 """
-PDF Generator for Material Issues with Multi-language Support - REFACTORED
-Fixed: Schema issues, font handling, logo loading, error handling
+PDF Generator for Material Issues with Multi-language Support - REFACTORED v5.0
+FIXED: Vietnamese font support + Cell text wrapping + Table overflow
+
+CHANGES v5.0:
+- ✅ CRITICAL FIX: Use DejaVuSans for ALL text (not Helvetica) - fixes Vietnamese display
+- ✅ CRITICAL FIX: Wrap long text (Material Name, Note) in Paragraph objects - prevents cell overflow
+- ✅ Enhanced table padding and layout for better readability
+- ✅ Improved font fallback mechanism
+- ✅ All existing features preserved
 """
 
 import logging
@@ -59,10 +66,10 @@ class MaterialIssuePDFGenerator:
     
     def __init__(self):
         self.engine = get_db_engine()
-        self._setup_fonts()
+        self.font_available = self._setup_fonts()
     
-    def _setup_fonts(self):
-        """Setup fonts for PDF with proper fallback"""
+    def _setup_fonts(self) -> bool:
+        """Setup fonts for PDF with proper fallback - returns True if DejaVu fonts registered"""
         try:
             # Try multiple possible font locations
             font_paths = [
@@ -99,17 +106,22 @@ class MaterialIssuePDFGenerator:
                                 else:
                                     # Use regular font as bold if bold not found
                                     pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', dejavu_path))
-                                logger.info(f"Fonts registered from: {path}")
+                                logger.info(f"✅ DejaVu fonts registered successfully from: {path}")
                                 font_registered = True
                                 break
                     except Exception as e:
                         logger.warning(f"Failed to register fonts from {path}: {e}")
             
             if not font_registered:
-                logger.warning("Using default PDF fonts - Vietnamese may not display correctly")
+                logger.warning("⚠️ DejaVu fonts not found - Vietnamese text may not display correctly")
+                logger.warning("Consider installing: sudo apt-get install fonts-dejavu")
+                return False
+            
+            return True
                 
         except Exception as e:
             logger.error(f"Font setup error: {e}")
+            return False
     
     def validate_issue_data(self, issue_id: int) -> bool:
         """Validate that issue has all required data"""
@@ -229,20 +241,18 @@ class MaterialIssuePDFGenerator:
         }
     
     def get_custom_styles(self):
-        """Get custom paragraph styles"""
+        """Get custom paragraph styles with Vietnamese font support"""
         styles = getSampleStyleSheet()
         
-        # Determine font to use
-        try:
-            if pdfmetrics.registered('DejaVuSans'):
-                base_font = 'DejaVuSans'
-                bold_font = 'DejaVuSans-Bold'
-            else:
-                base_font = 'Helvetica'
-                bold_font = 'Helvetica-Bold'
-        except:
+        # FIXED: Determine font to use - prefer DejaVu for Vietnamese support
+        if self.font_available and pdfmetrics.registered('DejaVuSans'):
+            base_font = 'DejaVuSans'
+            bold_font = 'DejaVuSans-Bold'
+            logger.debug("Using DejaVu fonts for Vietnamese support")
+        else:
             base_font = 'Helvetica'
             bold_font = 'Helvetica-Bold'
+            logger.warning("Falling back to Helvetica - Vietnamese may not display correctly")
         
         # Title style
         styles.add(ParagraphStyle(
@@ -250,7 +260,8 @@ class MaterialIssuePDFGenerator:
             parent=styles['Title'],
             fontSize=16,
             textColor=colors.HexColor('#1f4788'),
-            fontName=bold_font
+            fontName=bold_font,
+            alignment=TA_CENTER
         ))
         
         # Company info style
@@ -278,6 +289,26 @@ class MaterialIssuePDFGenerator:
             parent=styles['Normal'],
             fontSize=10,
             fontName=base_font
+        ))
+        
+        # FIXED: Table cell style for wrapping text
+        styles.add(ParagraphStyle(
+            name='TableCell',
+            parent=styles['Normal'],
+            fontSize=9,
+            fontName=base_font,
+            leading=11,  # Line height
+            alignment=TA_LEFT
+        ))
+        
+        # Table cell centered
+        styles.add(ParagraphStyle(
+            name='TableCellCenter',
+            parent=styles['Normal'],
+            fontSize=9,
+            fontName=base_font,
+            leading=11,
+            alignment=TA_CENTER
         ))
         
         # Footer style
@@ -373,10 +404,9 @@ class MaterialIssuePDFGenerator:
                 """, styles['CompanyInfo'])
             ]]
         
-        header_table = Table(header_data, colWidths=[60*mm, 130*mm])
+        header_table = Table(header_data, colWidths=[60*mm, 130*mm] if logo_img else [190*mm])
         header_table.setStyle(TableStyle([
-            ('ALIGN', (0, 0), (0, 0), 'CENTER'),
-            ('ALIGN', (1, 0), (1, 0), 'LEFT'),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
             ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         
@@ -402,6 +432,10 @@ class MaterialIssuePDFGenerator:
         if isinstance(issue_date, str):
             issue_date = datetime.strptime(issue_date, '%Y-%m-%d %H:%M:%S')
         formatted_date = issue_date.strftime('%d/%m/%Y %H:%M')
+        
+        # FIXED: Use DejaVu font (from styles) instead of hardcoded Helvetica
+        base_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
+        normal_font = 'DejaVuSans' if self.font_available else 'Helvetica'
         
         # Issue info table
         if language == 'vi':
@@ -429,10 +463,11 @@ class MaterialIssuePDFGenerator:
         info_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (0, -1), 'LEFT'),
             ('ALIGN', (1, 0), (1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-            ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+            ('FONTNAME', (0, 0), (0, -1), base_font),  # FIXED: Use DejaVu
+            ('FONTNAME', (1, 0), (1, -1), normal_font),  # FIXED: Use DejaVu
             ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),  # Increased padding
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
         ]))
         
         story.append(info_table)
@@ -440,7 +475,7 @@ class MaterialIssuePDFGenerator:
     
     def create_materials_table(self, story: list, data: Dict[str, Any], 
                               styles: Any, language: str = 'vi'):
-        """Create materials table with substitution info"""
+        """Create materials table with substitution info - FIXED CELL WRAPPING"""
         details = data['details']
         
         # Table headers
@@ -449,8 +484,12 @@ class MaterialIssuePDFGenerator:
         else:
             headers = ['No.', 'Code', 'Material Name', 'Batch/Lot', 'Qty', 'UOM', 'Expiry', 'Note']
         
-        # Table data
-        table_data = [headers]
+        # FIXED: Use DejaVu font for header
+        header_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
+        
+        # Create header as Paragraphs for font consistency
+        header_row = [Paragraph(f'<b>{h}</b>', styles['TableCellCenter']) for h in headers]
+        table_data = [header_row]
         
         for idx, detail in enumerate(details, 1):
             # Format expiry date
@@ -479,41 +518,47 @@ class MaterialIssuePDFGenerator:
                     note = f"Substitute for: {detail['original_material_name']}"
                 material_name = f"* {material_name}"  # Mark with asterisk
             
+            # CRITICAL FIX: Wrap long text in Paragraph objects to prevent cell overflow
             row = [
-                str(idx),
-                detail.get('pt_code', 'N/A'),
-                material_name,
-                detail.get('batch_no', 'N/A'),
-                f"{detail['quantity']:,.2f}",
-                detail['uom'],
-                exp_date,
-                note
+                Paragraph(str(idx), styles['TableCellCenter']),
+                Paragraph(detail.get('pt_code', 'N/A'), styles['TableCellCenter']),
+                Paragraph(material_name, styles['TableCell']),  # FIXED: Wrapped in Paragraph
+                Paragraph(detail.get('batch_no', 'N/A'), styles['TableCellCenter']),
+                Paragraph(f"{detail['quantity']:,.2f}", styles['TableCellCenter']),
+                Paragraph(detail['uom'], styles['TableCellCenter']),
+                Paragraph(exp_date, styles['TableCellCenter']),
+                Paragraph(note if note else '', styles['TableCell'])  # FIXED: Wrapped in Paragraph
             ]
             table_data.append(row)
         
-        # Create table
+        # Create table with adjusted column widths
         materials_table = Table(table_data, colWidths=[
             10*mm,  # STT
-            25*mm,  # Code
-            55*mm,  # Name
-            25*mm,  # Batch
-            20*mm,  # Qty
-            15*mm,  # UOM
+            22*mm,  # Code
+            52*mm,  # Name - slightly reduced to fit better
+            22*mm,  # Batch
+            18*mm,  # Qty
+            12*mm,  # UOM
             20*mm,  # Expiry
-            30*mm   # Note
+            34*mm   # Note - slightly increased for wrapped text
         ])
         
+        # FIXED: Enhanced table style with better padding
         materials_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
             ('ALIGN', (2, 1), (2, -1), 'LEFT'),  # Material name left aligned
             ('ALIGN', (7, 1), (7, -1), 'LEFT'),  # Note left aligned
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (-1, 0), header_font),  # FIXED: Use DejaVu
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f0f0')]),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),  # FIXED: TOP alignment for wrapped text
+            ('TOPPADDING', (0, 0), (-1, -1), 4),  # Increased padding
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING', (0, 0), (-1, -1), 3),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 3),
         ]))
         
         story.append(materials_table)
@@ -529,6 +574,10 @@ class MaterialIssuePDFGenerator:
     
     def create_signature_section(self, story: list, styles: Any, language: str = 'vi'):
         """Create signature section"""
+        # FIXED: Use DejaVu font for signatures
+        sig_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
+        normal_font = 'DejaVuSans' if self.font_available else 'Helvetica'
+        
         if language == 'vi':
             sig_headers = ['Người xuất', 'Người nhận', 'Giám sát']
             sig_labels = ['Ký, họ tên', 'Ký, họ tên', 'Ký, họ tên']
@@ -551,11 +600,14 @@ class MaterialIssuePDFGenerator:
         sig_table = Table(sig_data, colWidths=[60*mm, 60*mm, 60*mm])
         sig_table.setStyle(TableStyle([
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 1), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 0), (-1, 1), sig_font),  # FIXED: Use DejaVu
+            ('FONTNAME', (0, 2), (-1, -1), normal_font),  # FIXED: Use DejaVu
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('LINEBELOW', (0, 4), (-1, 4), 0.5, colors.black),
             ('FONTSIZE', (0, -1), (-1, -1), 8),
             ('TEXTCOLOR', (0, -1), (-1, -1), colors.grey),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
         ]))
         
         story.append(Spacer(1, 15*mm))
@@ -609,7 +661,7 @@ class MaterialIssuePDFGenerator:
                                          styles['NormalViet']))
                 else:
                     story.append(Paragraph(f"<b>Notes:</b> {data['issue']['notes']}", 
-                                         styles['Normal']))
+                                         styles['NormalViet']))
                 story.append(Spacer(1, 10*mm))
             
             # Signature section
@@ -627,11 +679,11 @@ class MaterialIssuePDFGenerator:
             pdf_bytes = buffer.getvalue()
             buffer.close()
             
-            logger.info(f"PDF generated successfully for issue {issue_id}")
+            logger.info(f"✅ PDF generated successfully for issue {issue_id} (language: {language})")
             return pdf_bytes
             
         except Exception as e:
-            logger.error(f"Failed to generate PDF for issue {issue_id}: {e}", exc_info=True)
+            logger.error(f"❌ Failed to generate PDF for issue {issue_id}: {e}", exc_info=True)
             return None
     
     def generate_pdf_with_options(self, issue_id: int, 

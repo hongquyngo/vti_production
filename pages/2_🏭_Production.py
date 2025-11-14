@@ -1,17 +1,18 @@
 # pages/2___Production.py
 """
-Production Management User Interface - REFACTORED v4.0
+Production Management User Interface - REFACTORED v5.0
 Complete production cycle: Order → Issue → Return → Complete
 WITH PRODUCTION OUTPUT TRACKING & ENHANCED MATERIAL DISPLAY
 
-IMPROVEMENTS v4.0 (Alternative Materials & Confirmation Enhancement):
-- Enhanced alternative materials display with detailed information
-- Fixed confirmation flow to prevent unnecessary page refresh
-- Improved success feedback with substitution details
-- Better UX for material issue process
-- Maintained ALL v3.1 functionality
+IMPROVEMENTS v5.0 (PDF Dialog Integration Fix):
+- ✅ CRITICAL FIX: Integrated with new @st.dialog-based PDF export
+- ✅ Simplified PDF dialog flow - shows immediately after issue success
+- ✅ Removed complex session state management for PDF dialogs
+- ✅ Better error handling and user feedback
+- ✅ Maintained ALL v4.0 functionality
 
 Previous versions:
+v4.0: Enhanced alternative materials display with detailed information
 v3.1: Added PT code and Package size display in all material tables
 v3.0: Streamlined UI, removed redundant columns, added Production Receipts navigation
 v2.3: Added Production Output tab, output/quality columns
@@ -44,7 +45,7 @@ from utils.production.common import (
     export_to_excel,
     get_date_filter_presets,
     calculate_percentage,
-    UIHelpers,  # REFACTORED v4.0: Using enhanced UIHelpers
+    UIHelpers,
     SystemConstants,
     validate_positive_number,
     validate_required_fields
@@ -186,7 +187,7 @@ def render_navigation():
         ("📦 Material Issue", 'issue'),
         ("↩️ Material Return", 'return'),
         ("✅ Complete Order", 'complete'),
-        ("📜 Issue History", 'history')  # Add this new item
+        ("📜 Issue History", 'history')
     ]
     
     # Main navigation
@@ -873,7 +874,7 @@ def render_material_issue():
             # Issue materials section
             st.markdown("---")
             
-            # ==================== REFACTORED v4.0: Enhanced Alternative Display ====================
+            # ==================== REFACTORED v5.0: Improved Issue Flow with @st.dialog Integration ====================
             # Check if all materials are sufficient (including with alternatives)
             can_issue = False
             materials_with_alts = pd.DataFrame()
@@ -922,91 +923,73 @@ def render_material_issue():
                 can_issue = True
                 st.success("✅ All materials are sufficient")
             
-            # ==================== REFACTORED v4.0: Improved Issue Button with Confirmation ====================
+            # ==================== REFACTORED v5.0: Simplified Issue Flow with Dialog ====================
             
-            # PDF Export Dialog State - removed, handled inline after issue
-            if False:  # Disabled - PDF dialog shown inline after successful issue
-                pass
-            else:
-                # Issue button with improved confirmation flow
-                if can_issue:
-                    col1, col2, col3 = st.columns([2, 2, 2])
-                    
-                    with col1:
-                        # Check if we're in confirmation state
-                        if not st.session_state.get('confirm_issue', False):
-                            if st.button("🚀 Issue Materials", type="primary", use_container_width=True):
-                                st.session_state['confirm_issue'] = True
-                                st.rerun()
-                    
-                    with col2:
-                        if st.button("🔄 Refresh Stock", use_container_width=True):
-                            st.cache_resource.clear()
+            # Issue button with improved confirmation flow
+            if can_issue:
+                col1, col2, col3 = st.columns([2, 2, 2])
+                
+                with col1:
+                    # Check if we're in confirmation state
+                    if not st.session_state.get('confirm_issue', False):
+                        if st.button("🚀 Issue Materials", type="primary", use_container_width=True):
+                            st.session_state['confirm_issue'] = True
                             st.rerun()
-                    
-                    with col3:
-                        if st.button("← Back", use_container_width=True):
-                            set_view('list')
-                            st.rerun()
-                    
-                    # Handle confirmation (outside button to avoid nested buttons)
-                    if st.session_state.get('confirm_issue', False):
-                        st.markdown("---")
-                        st.warning(f"⚠️ **Confirm Issue Materials**")
-                        st.info(f"Order: **{order['order_no']}** - {order['product_name']}")
-                        
-                        # Show what will happen with alternatives
-                        if not materials_with_alts.empty:
-                            st.info(f"📝 **Note:** {len(materials_with_alts)} material(s) will use alternatives automatically")
-                        
-                        col_confirm, col_cancel = st.columns(2)
-                        
-                        with col_confirm:
-                            if st.button("✅ Yes, Issue Now", type="primary", use_container_width=True):
-                                try:
-                                    with st.spinner("Issuing materials..."):
-                                        result = issue_materials(
-                                            order_id=order_id,
-                                            user_id=st.session_state.get('user_id', 1)
-                                        )
-                                    
-                                    # Clear confirm state
-                                    st.session_state['confirm_issue'] = False
-                                    
-                                    # Show success with detailed feedback
-                                    UIHelpers.show_success_with_details(
-                                        title="Materials Issued Successfully!",
-                                        details={
-                                            "Issue No": result['issue_no'],
-                                            "Items Issued": len(result['details'])
-                                        },
-                                        substitutions=result.get('substitutions'),
-                                        auto_clear=False  # Don't auto clear, show PDF dialog
-                                    )
-                                    
-                                    # Store for PDF dialog
-                                    st.session_state['last_issue_result'] = result
-                                    st.session_state['show_pdf_dialog'] = True
-                                    
-                                    # Show PDF dialog immediately - don't rerun
-                                    PDFExportDialog.show_pdf_export_dialog(result)
-                                    
-                                except ValueError as e:
-                                    st.error(f"❌ Failed to issue materials: {str(e)}")
-                                    st.session_state['confirm_issue'] = False
-                                except Exception as e:
-                                    st.error(f"❌ An error occurred: {str(e)}")
-                                    st.session_state['confirm_issue'] = False
-                                    logger.error(f"Material issue error: {e}", exc_info=True)
-                        
-                        with col_cancel:
-                            if st.button("❌ Cancel", use_container_width=True):
-                                st.session_state['confirm_issue'] = False
-                                st.rerun()
-                else:
-                    if st.button("← Back to List", use_container_width=True):
+                
+                with col2:
+                    if st.button("🔄 Refresh Stock", use_container_width=True):
+                        st.cache_resource.clear()
+                        st.rerun()
+                
+                with col3:
+                    if st.button("← Back", use_container_width=True):
                         set_view('list')
                         st.rerun()
+                
+                # Handle confirmation (outside button to avoid nested buttons)
+                if st.session_state.get('confirm_issue', False):
+                    st.markdown("---")
+                    st.warning(f"⚠️ **Confirm Issue Materials**")
+                    st.info(f"Order: **{order['order_no']}** - {order['product_name']}")
+                    
+                    # Show what will happen with alternatives
+                    if not materials_with_alts.empty:
+                        st.info(f"📝 **Note:** {len(materials_with_alts)} material(s) will use alternatives automatically")
+                    
+                    col_confirm, col_cancel = st.columns(2)
+                    
+                    with col_confirm:
+                        if st.button("✅ Yes, Issue Now", type="primary", use_container_width=True):
+                            try:
+                                with st.spinner("Issuing materials..."):
+                                    result = issue_materials(
+                                        order_id=order_id,
+                                        user_id=st.session_state.get('user_id', 1)
+                                    )
+                                
+                                # Clear confirm state
+                                st.session_state['confirm_issue'] = False
+                                
+                                # FIXED v5.0: Show PDF dialog immediately using @st.dialog
+                                # Dialog will display immediately without needing rerun
+                                PDFExportDialog.show_pdf_export_dialog(result)
+                                
+                            except ValueError as e:
+                                st.error(f"❌ Failed to issue materials: {str(e)}")
+                                st.session_state['confirm_issue'] = False
+                            except Exception as e:
+                                st.error(f"❌ An error occurred: {str(e)}")
+                                st.session_state['confirm_issue'] = False
+                                logger.error(f"Material issue error: {e}", exc_info=True)
+                    
+                    with col_cancel:
+                        if st.button("❌ Cancel", use_container_width=True):
+                            st.session_state['confirm_issue'] = False
+                            st.rerun()
+            else:
+                if st.button("← Back to List", use_container_width=True):
+                    set_view('list')
+                    st.rerun()
         else:
             st.error("No materials found for this BOM")
             if st.button("← Back to List", use_container_width=True):
@@ -1485,6 +1468,7 @@ def render_issue_history():
                     st.caption(f"{row['product_name']} | {row['issue_date'].strftime('%d/%m/%Y %H:%M')}")
                 
                 with col2:
+                    # FIXED v5.0: Using updated QuickPDFButton with @st.dialog
                     QuickPDFButton.render(row['id'], row['issue_no'])
                 
                 st.markdown("---")
@@ -1511,7 +1495,7 @@ def main():
         # Route to appropriate view
         view_map = {
             'list': render_order_list,
-            'new': render_create_order,  # Changed back to render_create_order
+            'new': render_create_order,
             'issue': render_material_issue,
             'return': render_material_return,
             'complete': render_production_completion,
@@ -1533,7 +1517,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Manufacturing Module v4.0 - with Enhanced Alternative Materials Display & Improved Confirmation Flow")
+    st.caption("Manufacturing Module v5.0 - with Fixed PDF Dialog Integration & Enhanced UX")
 
 # Run the application
 if __name__ == "__main__":

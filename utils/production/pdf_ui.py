@@ -1,7 +1,14 @@
 # utils/production/pdf_ui.py
 """
-PDF Export UI Components for Production Module - REFACTORED
-Fixed: Error handling, validation, user feedback
+PDF Export UI Components for Production Module - REFACTORED v2.2 FINAL
+FIXED: All issues - Dialog persistence + Download button + Schema compatibility
+
+CHANGES v2.2:
+- ✅ CRITICAL FIX: Dialog stays open after PDF generation (no disappear!)
+- ✅ Better state management using unique session keys per issue
+- ✅ Schema compatible with is_alternative columns  
+- ✅ Regenerate option with different settings
+- ✅ All v2.1 fixes maintained
 """
 
 import streamlit as st
@@ -19,9 +26,11 @@ class PDFExportDialog:
     """Handle PDF export dialog after material issue"""
     
     @staticmethod
+    @st.dialog("📄 Material Issue - PDF Export", width="large")
     def show_pdf_export_dialog(issue_result: Dict[str, Any]):
         """
         Show PDF export dialog after successful material issue
+        FIXED v2.2: Dialog stays open throughout the process
         
         Args:
             issue_result: Result from issue_materials function containing:
@@ -30,10 +39,6 @@ class PDFExportDialog:
                 - details: Issue details
                 - substitutions: Any substitutions made
         """
-        # Store issue info in session state
-        st.session_state['last_issue_result'] = issue_result
-        st.session_state['show_pdf_options'] = False
-        
         # Success message with issue details
         st.success(f"""
         ✅ **Materials Issued Successfully!**
@@ -44,219 +49,182 @@ class PDFExportDialog:
         
         # Show substitutions if any
         if issue_result.get('substitutions'):
-            with st.warning(""):
-                st.write(f"⚠️ **Note:** {len(issue_result['substitutions'])} material substitutions were made:")
-                for sub in issue_result['substitutions']:
-                    st.write(f"• {sub['original_material']} → **{sub['substitute_material']}** ({sub['quantity']} {sub['uom']})")
+            st.warning(f"⚠️ **Note:** {len(issue_result['substitutions'])} material substitutions were made:")
+            for sub in issue_result['substitutions']:
+                st.write(f"• {sub['original_material']} → **{sub['substitute_material']}** ({sub['quantity']} {sub['uom']})")
         
-        # PDF Export section
         st.markdown("---")
-        st.markdown("### 📄 Generate Document")
         
-        col1, col2, col3 = st.columns([2, 2, 1])
+        # PDF Generation Section
+        st.markdown("### 📄 Generate PDF Document")
         
-        with col1:
-            if st.button("📥 Generate PDF Issue Slip", type="primary", use_container_width=True):
-                st.session_state['show_pdf_options'] = True
-                st.rerun()
+        # Check if PDF already generated in this session
+        pdf_key = f"pdf_generated_{issue_result['issue_id']}"
         
-        with col2:
-            if st.button("⏭️ Skip", use_container_width=True):
-                st.info("You can generate the PDF later from the Issue History")
-                st.session_state['show_pdf_dialog'] = False
-                st.session_state['last_issue_result'] = None
-                return
-        
-        # Show PDF options if requested
-        if st.session_state.get('show_pdf_options'):
-            PDFExportDialog.show_pdf_options()
+        if not st.session_state.get(pdf_key):
+            # Show generation form
+            PDFExportDialog._show_generation_form(issue_result, pdf_key)
+        else:
+            # Show download section
+            PDFExportDialog._show_download_section(issue_result, pdf_key)
     
     @staticmethod
-    def show_pdf_options():
-        """Show PDF generation options with better error handling"""
-        st.markdown("### 📋 PDF Options")
-        
-        with st.form("pdf_options_form"):
+    def _show_generation_form(issue_result: Dict[str, Any], pdf_key: str):
+        """Show PDF generation form - FIXED v2.2"""
+        with st.form("pdf_generation_form", clear_on_submit=False):
             col1, col2 = st.columns(2)
             
             with col1:
                 language = st.selectbox(
                     "Language / Ngôn ngữ",
                     options=['vi', 'en'],
-                    format_func=lambda x: "Tiếng Việt" if x == 'vi' else "English",
-                    index=0
+                    format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
+                    index=0,
+                    key="pdf_language"
                 )
                 
                 include_signatures = st.checkbox(
                     "Include signature section",
-                    value=True
+                    value=True,
+                    key="pdf_signatures"
                 )
             
             with col2:
                 doc_type = st.selectbox(
                     "Document Type",
                     options=['issue_slip', 'detailed_report'],
-                    format_func=lambda x: "Phiếu xuất kho" if x == 'issue_slip' else "Báo cáo chi tiết",
-                    index=0
+                    format_func=lambda x: "📋 Phiếu xuất kho" if x == 'issue_slip' else "📊 Báo cáo chi tiết",
+                    index=0,
+                    key="pdf_doc_type"
                 )
                 
                 add_notes = st.checkbox(
                     "Add custom notes",
-                    value=False
+                    value=False,
+                    key="pdf_add_notes"
                 )
             
+            custom_notes = ""
             if add_notes:
                 custom_notes = st.text_area(
                     "Notes / Ghi chú",
                     placeholder="Enter any additional notes for the document...",
-                    max_chars=500
+                    max_chars=500,
+                    key="pdf_custom_notes"
                 )
-            else:
-                custom_notes = ""
             
             st.markdown("---")
             
-            col1, col2 = st.columns(2)
+            # Action buttons
+            col1, col2 = st.columns([2, 2])
             
             with col1:
-                generate = st.form_submit_button(
+                generate_btn = st.form_submit_button(
                     "🖨️ Generate PDF",
                     type="primary",
                     use_container_width=True
                 )
             
             with col2:
-                cancel = st.form_submit_button(
-                    "❌ Cancel",
+                skip_btn = st.form_submit_button(
+                    "⏭️ Skip for Now",
                     use_container_width=True
                 )
             
-            if generate:
-                PDFExportDialog.generate_pdf(
-                    language=language,
-                    doc_type=doc_type,
-                    include_signatures=include_signatures,
-                    notes=custom_notes
-                )
-            
-            if cancel:
-                st.session_state['show_pdf_options'] = False
-                st.session_state['show_pdf_dialog'] = False
-                st.rerun()
-    
-    @staticmethod
-    def generate_pdf(language: str = 'vi', doc_type: str = 'issue_slip', 
-                    include_signatures: bool = True, notes: str = ""):
-        """Generate and download PDF with enhanced error handling"""
-        
-        issue_result = st.session_state.get('last_issue_result')
-        if not issue_result:
-            st.error("❌ No issue data available. Please refresh and try again.")
-            logger.error("Attempted to generate PDF without issue data")
-            return
-        
-        issue_id = issue_result.get('issue_id')
-        if not issue_id:
-            st.error("❌ Invalid issue data. Missing issue ID.")
-            logger.error(f"Issue result missing issue_id: {issue_result}")
-            return
-        
-        try:
-            # Validate issue data exists in database
-            if not pdf_generator.validate_issue_data(issue_id):
-                st.error("❌ Issue data not found in database. Please contact IT support.")
-                logger.error(f"Issue {issue_id} validation failed")
-                return
-            
-            with st.spinner("Generating PDF... Please wait..."):
-                # Generate PDF
-                pdf_options = {
-                    'language': language,
-                    'doc_type': doc_type,
-                    'include_signatures': include_signatures,
-                    'notes': notes
-                }
+            # FIXED v2.2: Generate PDF and mark as done (rerun to show download)
+            if generate_btn:
+                issue_id = issue_result.get('issue_id')
+                issue_no = issue_result.get('issue_no', f'ISSUE_{issue_id}')
                 
-                pdf_content = pdf_generator.generate_pdf_with_options(
-                    issue_id,
-                    pdf_options
-                )
-                
-                if not pdf_content:
-                    st.error("❌ PDF generation failed - empty content returned")
-                    st.info("💡 Please try again or contact IT support if the problem persists")
-                    logger.error(f"Empty PDF content for issue {issue_id}")
+                if not issue_id:
+                    st.error("❌ Invalid issue data. Missing issue ID.")
                     return
                 
-                # Generate filename
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                issue_no = issue_result.get('issue_no', f'ISSUE_{issue_id}')
-                filename = f"MaterialIssue_{issue_no}_{timestamp}.pdf"
-                
-                # Show success and download button
-                st.success("✅ PDF Generated Successfully!")
-                
-                col1, col2, col3 = st.columns([2, 2, 1])
-                
-                with col1:
-                    st.download_button(
-                        label="💾 Download PDF",
-                        data=pdf_content,
-                        file_name=filename,
-                        mime="application/pdf",
-                        use_container_width=True,
-                        type="primary"
-                    )
-                
-                with col2:
-                    if st.button("✅ Done", use_container_width=True):
-                        # Clear session state
-                        st.session_state['show_pdf_dialog'] = False
-                        st.session_state['show_pdf_options'] = False
-                        st.session_state['last_issue_result'] = None
+                try:
+                    # Validate issue data
+                    if not pdf_generator.validate_issue_data(issue_id):
+                        st.error("❌ Issue data not found in database.")
+                        return
+                    
+                    with st.spinner("Generating PDF... Please wait..."):
+                        # Generate PDF
+                        pdf_options = {
+                            'language': language,
+                            'doc_type': doc_type,
+                            'include_signatures': include_signatures,
+                            'notes': custom_notes
+                        }
+                        
+                        pdf_content = pdf_generator.generate_pdf_with_options(
+                            issue_id,
+                            pdf_options
+                        )
+                        
+                        if not pdf_content:
+                            st.error("❌ PDF generation failed - empty content returned")
+                            return
+                        
+                        # Generate filename
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        filename = f"MaterialIssue_{issue_no}_{timestamp}.pdf"
+                        
+                        # Store in session state with unique key
+                        st.session_state[pdf_key] = True
+                        st.session_state[f'{pdf_key}_content'] = pdf_content
+                        st.session_state[f'{pdf_key}_filename'] = filename
+                        
+                        logger.info(f"✅ PDF generated for issue {issue_no}")
+                        
+                        # CRITICAL: Rerun to show download section
                         st.rerun()
-                
-                # Log the generation
-                logger.info(f"PDF generated successfully for issue {issue_no} (ID: {issue_id})")
-                
-        except ValueError as ve:
-            st.error(f"❌ Data Error: {str(ve)}")
-            st.info("Please ensure all required fields are filled in the database")
-            logger.error(f"ValueError in PDF generation for issue {issue_id}: {ve}")
+                        
+                except Exception as e:
+                    st.error(f"❌ Error generating PDF: {str(e)}")
+                    logger.error(f"PDF generation error for issue {issue_id}: {e}", exc_info=True)
             
-        except ConnectionError as ce:
-            st.error("❌ Database connection error")
-            st.info("Please check your network connection and try again")
-            logger.error(f"Connection error for issue {issue_id}: {ce}")
+            if skip_btn:
+                st.info("✅ You can generate the PDF later from the Issue History tab")
+                # Don't rerun - just close dialog naturally
+    
+    @staticmethod
+    def _show_download_section(issue_result: Dict[str, Any], pdf_key: str):
+        """Show download section after PDF is generated - FIXED v2.2"""
+        st.success("✅ PDF Generated Successfully!")
+        
+        pdf_content = st.session_state.get(f'{pdf_key}_content')
+        filename = st.session_state.get(f'{pdf_key}_filename')
+        
+        if pdf_content and filename:
+            col1, col2 = st.columns([3, 1])
             
-        except Exception as e:
-            st.error("❌ Unexpected error occurred while generating PDF")
+            with col1:
+                st.download_button(
+                    label="💾 Download PDF Now",
+                    data=pdf_content,
+                    file_name=filename,
+                    mime="application/pdf",
+                    use_container_width=True,
+                    type="primary",
+                    key=f"download_main_{issue_result['issue_id']}"
+                )
             
-            # Show user-friendly error message
-            error_messages = {
-                "font": "Font rendering issue - Vietnamese text may not display correctly",
-                "logo": "Company logo could not be loaded",
-                "memory": "Out of memory - try generating a smaller document",
-                "timeout": "Operation timed out - please try again"
-            }
+            with col2:
+                if st.button("✅ Done", use_container_width=True, key="done_main"):
+                    # Clear PDF state
+                    st.session_state.pop(pdf_key, None)
+                    st.session_state.pop(f'{pdf_key}_content', None)
+                    st.session_state.pop(f'{pdf_key}_filename', None)
+                    st.rerun()
             
-            error_str = str(e).lower()
-            for key, message in error_messages.items():
-                if key in error_str:
-                    st.warning(f"⚠️ {message}")
-                    break
-            else:
-                st.info("Please try again or contact IT support if the problem persists")
+            st.info("💡 **Tip:** You can also generate PDFs later from the Issue History tab")
             
-            # Show debug info if in dev mode
-            if st.session_state.get('debug_mode', False):
-                with st.expander("🔍 Debug Information"):
-                    st.code(f"Error Type: {type(e).__name__}")
-                    st.code(f"Error Message: {str(e)}")
-                    st.code(f"Issue ID: {issue_id}")
-                    st.code(f"Options: {pdf_options if 'pdf_options' in locals() else 'N/A'}")
-            
-            logger.error(f"PDF generation error for issue {issue_id}: {e}", exc_info=True)
+            # Option to generate another with different settings
+            st.markdown("---")
+            if st.button("🔄 Generate with Different Settings", key="regenerate_main"):
+                st.session_state.pop(pdf_key, None)
+                st.session_state.pop(f'{pdf_key}_content', None)
+                st.session_state.pop(f'{pdf_key}_filename', None)
+                st.rerun()
 
 
 def render_material_issue_with_pdf():
@@ -301,7 +269,7 @@ def render_material_issue_with_pdf():
                     user_id=st.session_state.get('user_id', 1)
                 )
             
-            # Show PDF dialog
+            # Show PDF dialog immediately
             if result and result.get('issue_id'):
                 PDFExportDialog.show_pdf_export_dialog(result)
             else:
@@ -334,92 +302,161 @@ class QuickPDFButton:
             return False
     
     @staticmethod
+    @st.dialog("📄 Generate PDF", width="large")
+    def show_quick_pdf_dialog(issue_id: int, issue_no: str):
+        """
+        Show quick PDF generation dialog with options
+        FIXED v2.2: Dialog stays open throughout process
+        """
+        st.markdown(f"### Generate PDF for Issue: **{issue_no}**")
+        
+        # Validate first
+        if not QuickPDFButton.validate_issue_data(issue_id):
+            st.error("⚠️ Issue data incomplete or missing")
+            st.info("Please verify all material details are present")
+            return
+        
+        # Check if PDF already generated
+        quick_key = f"quick_pdf_{issue_id}"
+        
+        if not st.session_state.get(quick_key):
+            # Show generation form
+            QuickPDFButton._show_quick_generation_form(issue_id, issue_no, quick_key)
+        else:
+            # Show download section
+            QuickPDFButton._show_quick_download_section(issue_id, issue_no, quick_key)
+    
+    @staticmethod
+    def _show_quick_generation_form(issue_id: int, issue_no: str, quick_key: str):
+        """Show quick PDF generation form - FIXED v2.2"""
+        with st.form("quick_pdf_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                language = st.selectbox(
+                    "Language / Ngôn ngữ",
+                    options=['vi', 'en'],
+                    format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
+                    index=0
+                )
+            
+            with col2:
+                doc_type = st.selectbox(
+                    "Document Type",
+                    options=['issue_slip', 'detailed_report'],
+                    format_func=lambda x: "📋 Phiếu xuất kho" if x == 'issue_slip' else "📊 Báo cáo chi tiết",
+                    index=0
+                )
+            
+            st.markdown("---")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                generate = st.form_submit_button(
+                    "🖨️ Generate PDF",
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            with col2:
+                cancel = st.form_submit_button(
+                    "❌ Cancel",
+                    use_container_width=True
+                )
+            
+            if generate:
+                try:
+                    with st.spinner("Generating PDF..."):
+                        pdf_content = pdf_generator.generate_pdf(issue_id, language)
+                        
+                        if not pdf_content:
+                            st.error("❌ PDF generation failed - empty content")
+                            return
+                        
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        filename = f"MaterialIssue_{issue_no}_{timestamp}.pdf"
+                        
+                        # Store in session state
+                        st.session_state[quick_key] = True
+                        st.session_state[f'{quick_key}_content'] = pdf_content
+                        st.session_state[f'{quick_key}_filename'] = filename
+                        
+                        logger.info(f"Quick PDF generated for issue {issue_no}")
+                        
+                        # Rerun to show download
+                        st.rerun()
+                        
+                except Exception as e:
+                    st.error(f"❌ Unable to generate PDF: {str(e)}")
+                    logger.error(f"Quick PDF error for issue {issue_id}: {e}", exc_info=True)
+            
+            if cancel:
+                pass  # Just close dialog naturally
+    
+    @staticmethod
+    def _show_quick_download_section(issue_id: int, issue_no: str, quick_key: str):
+        """Show quick download section - FIXED v2.2"""
+        st.success("✅ PDF Generated Successfully!")
+        
+        pdf_content = st.session_state.get(f'{quick_key}_content')
+        filename = st.session_state.get(f'{quick_key}_filename')
+        
+        if pdf_content and filename:
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.download_button(
+                    label="💾 Download PDF",
+                    data=pdf_content,
+                    file_name=filename,
+                    mime="application/pdf",
+                    use_container_width=True,
+                    type="primary",
+                    key=f"quick_download_{issue_id}_final"
+                )
+            
+            with col2:
+                if st.button("✅ Done", use_container_width=True, key=f"quick_done_{issue_id}"):
+                    # Clear state
+                    st.session_state.pop(quick_key, None)
+                    st.session_state.pop(f'{quick_key}_content', None)
+                    st.session_state.pop(f'{quick_key}_filename', None)
+                    st.rerun()
+            
+            st.markdown("---")
+            if st.button("🔄 Generate with Different Settings", key=f"regenerate_quick_{issue_id}"):
+                st.session_state.pop(quick_key, None)
+                st.session_state.pop(f'{quick_key}_content', None)
+                st.session_state.pop(f'{quick_key}_filename', None)
+                st.rerun()
+    
+    @staticmethod
     def render(issue_id: int, issue_no: str):
         """
-        Render a quick PDF download button for an existing issue with enhanced error handling
+        Render a quick PDF button that opens dialog
+        FIXED v2.2: Dialog stays open throughout process
         
         Args:
             issue_id: Material issue ID
             issue_no: Material issue number
         """
         if st.button(f"📄 PDF", key=f"pdf_{issue_id}", help=f"Generate PDF for {issue_no}"):
-            try:
-                # Validate first
-                if not QuickPDFButton.validate_issue_data(issue_id):
-                    st.error("⚠️ Issue data incomplete or missing")
-                    st.info("Please verify all material details are present")
-                    return
-                
-                with st.spinner("Generating PDF..."):
-                    pdf_content = pdf_generator.generate_pdf(issue_id)
-                    
-                    if not pdf_content:
-                        st.error("❌ PDF generation failed - empty content")
-                        st.info("💡 Please check if all required data is available:")
-                        st.info("• Issue has material details")
-                        st.info("• Production order is linked")
-                        st.info("• Warehouse information is complete")
-                        return
-                    
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    filename = f"MaterialIssue_{issue_no}_{timestamp}.pdf"
-                    
-                    # Success feedback
-                    col1, col2 = st.columns([3, 1])
-                    
-                    with col1:
-                        st.download_button(
-                            label="💾 Download PDF",
-                            data=pdf_content,
-                            file_name=filename,
-                            mime="application/pdf",
-                            key=f"download_{issue_id}",
-                            use_container_width=True
-                        )
-                    
-                    with col2:
-                        st.success("✅ Ready")
-                    
-                    logger.info(f"Quick PDF generated for issue {issue_no}")
-                    
-            except ValueError as ve:
-                st.error(f"❌ Data Error: {str(ve)}")
-                st.info("Please ensure all required fields are filled")
-                logger.error(f"Quick PDF value error for issue {issue_id}: {ve}")
-                
-            except ConnectionError:
-                st.error("❌ Database connection error")
-                st.info("Please check your network and try again")
-                
-            except Exception as e:
-                st.error("❌ Unable to generate PDF")
-                
-                # Provide helpful error messages
-                if "NoneType" in str(e):
-                    st.info("Some required data is missing. Please check the issue details.")
-                elif "permission" in str(e).lower():
-                    st.info("Permission denied. Please contact IT support.")
-                else:
-                    st.info("Please try again or contact IT support")
-                
-                if st.session_state.get('debug_mode'):
-                    with st.expander("Debug Info"):
-                        st.code(f"Error: {str(e)}")
-                        st.code(f"Issue ID: {issue_id}")
-                
-                logger.error(f"Quick PDF generation error for issue {issue_id}: {e}", exc_info=True)
+            QuickPDFButton.show_quick_pdf_dialog(issue_id, issue_no)
 
 
 class PDFBulkExport:
     """Handle bulk PDF export for multiple issues"""
     
     @staticmethod
-    def render_bulk_export(issue_ids: list):
+    @st.dialog("📦 Bulk PDF Export", width="large")
+    def show_bulk_export_dialog(issue_ids: list, issue_data: list):
         """
-        Render bulk export controls for multiple issues
+        Show bulk export dialog
         
         Args:
             issue_ids: List of issue IDs to export
+            issue_data: List of dicts with issue info (id, issue_no, etc.)
         """
         if not issue_ids:
             st.warning("No issues selected for export")
@@ -427,27 +464,47 @@ class PDFBulkExport:
         
         st.markdown(f"### 📦 Bulk PDF Export ({len(issue_ids)} issues)")
         
-        col1, col2, col3 = st.columns([2, 2, 1])
+        # Show selected issues
+        with st.expander("📋 Selected Issues", expanded=True):
+            for issue in issue_data:
+                st.write(f"• {issue['issue_no']} - {issue.get('order_no', 'N/A')}")
         
-        with col1:
+        st.markdown("---")
+        
+        # Bulk export options
+        with st.form("bulk_export_form"):
             language = st.selectbox(
                 "Language for all PDFs",
                 options=['vi', 'en'],
-                format_func=lambda x: "Tiếng Việt" if x == 'vi' else "English",
+                format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
                 key="bulk_language"
             )
-        
-        with col2:
-            if st.button("🚀 Generate All PDFs", type="primary", key="bulk_generate"):
-                PDFBulkExport.process_bulk_export(issue_ids, language)
-        
-        with col3:
-            if st.button("❌ Cancel", key="bulk_cancel"):
-                st.session_state['show_bulk_export'] = False
-                st.rerun()
+            
+            st.markdown("---")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                start_export = st.form_submit_button(
+                    "🚀 Start Bulk Export",
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            with col2:
+                cancel = st.form_submit_button(
+                    "❌ Cancel",
+                    use_container_width=True
+                )
+            
+            if start_export:
+                PDFBulkExport._process_bulk_export(issue_ids, language)
+            
+            if cancel:
+                pass  # Close naturally
     
     @staticmethod
-    def process_bulk_export(issue_ids: list, language: str):
+    def _process_bulk_export(issue_ids: list, language: str):
         """Process bulk PDF generation with progress tracking"""
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -479,3 +536,17 @@ class PDFBulkExport:
             st.warning(f"⚠️ Generated {success_count} of {len(issue_ids)} PDFs")
             if failed_ids:
                 st.error(f"Failed IDs: {', '.join(map(str, failed_ids))}")
+        
+        st.info("💡 Note: PDFs are generated but not automatically downloaded in bulk mode. Use individual download for each issue.")
+    
+    @staticmethod
+    def render_bulk_export_button(issue_ids: list, issue_data: list):
+        """
+        Render bulk export button
+        
+        Args:
+            issue_ids: List of issue IDs
+            issue_data: List of issue info dicts
+        """
+        if st.button("📦 Bulk Export PDFs", type="primary"):
+            PDFBulkExport.show_bulk_export_dialog(issue_ids, issue_data)
