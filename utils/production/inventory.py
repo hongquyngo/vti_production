@@ -1,14 +1,20 @@
 # utils/production/inventory.py
 """
-Inventory Management for Production
-Stock queries, FEFO logic, and inventory transactions with alternatives support
+Inventory Management for Production - REFACTORED v2.0
+Stock queries, FEFO logic, and inventory transactions with enhanced alternatives support
 BACKWARD COMPATIBLE - Does not require is_primary column
+
+CHANGES v2.0:
+- Enhanced check_material_availability to include detailed alternatives info
+- Added alternative_details with name, PT code, available qty for each alternative
+- Calculate if alternatives can fulfill shortage
+- Improved logging for alternatives checking
 """
 
 import logging
 from datetime import date
 from decimal import Decimal
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 import pandas as pd
 from sqlalchemy import text
 
@@ -18,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class InventoryManager:
-    """Inventory Management for Production with Alternatives Support"""
+    """Inventory Management for Production with Enhanced Alternatives Support"""
     
     def __init__(self):
         self.engine = get_db_engine()
@@ -77,7 +83,7 @@ class InventoryManager:
     def check_material_availability(self, bom_id: int, quantity: float, 
                                    warehouse_id: int) -> pd.DataFrame:
         """
-        Check material availability for a BOM including alternatives
+        Check material availability for a BOM including detailed alternatives info
         All materials in bom_details are primary materials
         
         Args:
@@ -86,7 +92,12 @@ class InventoryManager:
             warehouse_id: Source warehouse ID
             
         Returns:
-            DataFrame with material availability status including alternatives
+            DataFrame with material availability status including detailed alternatives
+            
+        ENHANCED v2.0:
+        - Added alternative_details column with list of alternative materials
+        - Added alternative_total_qty for total available from alternatives
+        - Added alternatives_sufficient flag if alternatives can cover shortage
         """
         query = """
             SELECT 
@@ -124,23 +135,62 @@ class InventoryManager:
             df = pd.read_sql(query, self.engine, 
                            params=(quantity, quantity, warehouse_id, bom_id))
             
-            # For materials with insufficient stock, check alternatives
+            # For materials with insufficient stock, check and get detailed alternatives
             for idx, row in df.iterrows():
                 if row['availability_status'] != 'SUFFICIENT':
+                    shortage = row['required_qty'] - row['available_qty']
                     alternatives = self.get_alternative_availability(
                         row['bom_detail_id'], 
-                        row['required_qty'] - row['available_qty'],
+                        shortage,
                         warehouse_id
                     )
+                    
                     if not alternatives.empty:
                         df.at[idx, 'has_alternatives'] = True
                         df.at[idx, 'alternative_count'] = len(alternatives)
+                        
+                        # NEW v2.0: Add detailed alternatives info
+                        alt_details = []
+                        for _, alt in alternatives.iterrows():
+                            alt_details.append({
+                                'id': int(alt['alternative_id']),
+                                'material_id': int(alt['alternative_material_id']),
+                                'name': alt['alternative_material_name'],
+                                'pt_code': alt['alternative_pt_code'],
+                                'package_size': alt['alternative_package_size'],
+                                'available': float(alt['available_qty']),
+                                'required': shortage,  # How much we need
+                                'uom': alt['uom'],
+                                'status': alt['availability_status'],
+                                'priority': int(alt['priority'])
+                            })
+                        df.at[idx, 'alternative_details'] = alt_details
+                        
+                        # Calculate total available from all alternatives
+                        total_alt_available = alternatives['available_qty'].sum()
+                        df.at[idx, 'alternative_total_qty'] = float(total_alt_available)
+                        
+                        # Check if alternatives together can fulfill the shortage
+                        df.at[idx, 'alternatives_sufficient'] = (total_alt_available >= shortage)
+                        
+                        logger.info(
+                            f"Material {row['material_name']}: shortage={shortage:.2f}, "
+                            f"alternatives_available={total_alt_available:.2f}, "
+                            f"can_fulfill={total_alt_available >= shortage}"
+                        )
                     else:
                         df.at[idx, 'has_alternatives'] = False
                         df.at[idx, 'alternative_count'] = 0
+                        df.at[idx, 'alternative_details'] = []
+                        df.at[idx, 'alternative_total_qty'] = 0.0
+                        df.at[idx, 'alternatives_sufficient'] = False
                 else:
+                    # Material is sufficient, no need for alternatives
                     df.at[idx, 'has_alternatives'] = False
                     df.at[idx, 'alternative_count'] = 0
+                    df.at[idx, 'alternative_details'] = []
+                    df.at[idx, 'alternative_total_qty'] = 0.0
+                    df.at[idx, 'alternatives_sufficient'] = False
             
             return df
             
@@ -152,15 +202,15 @@ class InventoryManager:
                                     required_qty: float,
                                     warehouse_id: int) -> pd.DataFrame:
         """
-        Get available alternatives for a BOM detail
+        Get available alternatives for a BOM detail with enhanced info
         
         Args:
             bom_detail_id: Primary material's BOM detail ID
-            required_qty: Quantity needed
+            required_qty: Quantity needed (shortage to cover)
             warehouse_id: Warehouse to check
             
         Returns:
-            DataFrame with alternative materials and their availability
+            DataFrame with alternative materials and their detailed availability
         """
         query = """
             SELECT 
@@ -199,6 +249,17 @@ class InventoryManager:
             df = pd.read_sql(query, self.engine, 
                            params=(required_qty, warehouse_id, bom_detail_id))
             logger.info(f"Found {len(df)} active alternatives for BOM detail {bom_detail_id}")
+            
+            # Log details for debugging
+            if not df.empty:
+                for _, alt in df.iterrows():
+                    logger.debug(
+                        f"  Alternative: {alt['alternative_material_name']} "
+                        f"(priority {alt['priority']}): "
+                        f"{alt['available_qty']:.2f} available, "
+                        f"status={alt['availability_status']}"
+                    )
+            
             return df
         except Exception as e:
             logger.error(f"Error getting alternatives for BOM detail {bom_detail_id}: {e}")
@@ -280,9 +341,9 @@ class InventoryManager:
             return False
     
     def get_material_stock_summary(self, bom_id: int, warehouse_id: int,
-                                   quantity: float) -> Dict[str, any]:
+                                   quantity: float) -> Dict[str, Any]:
         """
-        Get comprehensive stock summary for BOM materials including alternatives
+        Get comprehensive stock summary for BOM materials including detailed alternatives
         
         Args:
             bom_id: BOM header ID
@@ -290,7 +351,12 @@ class InventoryManager:
             quantity: Planned production quantity
             
         Returns:
-            Dictionary with summary information
+            Dictionary with enhanced summary information including alternatives details
+            
+        ENHANCED v2.0:
+        - Added materials_can_use_alternatives count
+        - Added total_alternatives_available count
+        - Include alternative_details in the details list
         """
         availability = self.check_material_availability(bom_id, quantity, warehouse_id)
         
@@ -301,6 +367,8 @@ class InventoryManager:
                 'sufficient_materials': 0,
                 'insufficient_materials': 0,
                 'materials_with_alternatives': 0,
+                'materials_can_use_alternatives': 0,
+                'total_alternatives_available': 0,
                 'details': []
             }
         
@@ -308,11 +376,22 @@ class InventoryManager:
         insufficient = len(availability[availability['availability_status'] != 'SUFFICIENT'])
         with_alternatives = len(availability[availability.get('has_alternatives', False) == True])
         
+        # NEW v2.0: Count materials where alternatives can fulfill shortage
+        can_use_alternatives = len(
+            availability[availability.get('alternatives_sufficient', False) == True]
+        )
+        
+        # Count total alternatives available across all materials
+        total_alternatives = availability['alternative_count'].sum() if 'alternative_count' in availability.columns else 0
+        
         return {
             'all_sufficient': insufficient == 0,
+            'all_can_be_fulfilled': (insufficient == 0) or (insufficient == can_use_alternatives),
             'total_materials': len(availability),
             'sufficient_materials': sufficient,
             'insufficient_materials': insufficient,
             'materials_with_alternatives': with_alternatives,
+            'materials_can_use_alternatives': can_use_alternatives,
+            'total_alternatives_available': int(total_alternatives),
             'details': availability.to_dict('records')
         }

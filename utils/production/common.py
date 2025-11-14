@@ -1,14 +1,21 @@
 # utils/production/common.py
 """
-Common utilities for Production module
+Common utilities for Production module - REFACTORED v2.0
 Formatting, validation, UI helpers, and date utilities
+
+CHANGES v2.0:
+- Removed old confirm_action that causes page refresh issues
+- Added inline_confirmation for better UX
+- Added show_success_with_details for better feedback
+- Enhanced status indicators and formatting
 """
 
 import logging
 from datetime import date, timedelta, datetime
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, Tuple, Union, Optional
+from typing import Dict, Tuple, Union, Optional, List, Any
 from io import BytesIO
+import time
 
 import pandas as pd
 import streamlit as st
@@ -25,6 +32,7 @@ class SystemConstants:
     MAX_SCRAP_RATE = 50.0
     QUANTITY_DECIMALS = 4
     CURRENCY_DECIMALS = 0  # VND
+    SUCCESS_MESSAGE_DELAY = 2  # seconds to show success message
 
 
 # ==================== Number Formatting ====================
@@ -107,14 +115,21 @@ def get_date_filter_presets() -> Dict[str, Tuple[date, date]]:
     }
 
 
-# ==================== UI Helpers ====================
+# ==================== Enhanced UI Helpers v2.0 ====================
 
 class UIHelpers:
-    """Streamlit UI helper functions"""
+    """Streamlit UI helper functions - REFACTORED v2.0"""
     
     @staticmethod
-    def show_message(message: str, type: str = "info"):
-        """Show message in Streamlit"""
+    def show_message(message: str, type: str = "info", duration: Optional[int] = None):
+        """
+        Show message in Streamlit with optional auto-clear
+        
+        Args:
+            message: Message to display
+            type: Message type (success, error, warning, info)
+            duration: Optional seconds to show message before clearing
+        """
         message_functions = {
             "success": st.success,
             "error": st.error,
@@ -123,38 +138,156 @@ class UIHelpers:
         }
         
         show_func = message_functions.get(type, st.info)
-        show_func(message)
+        msg_container = show_func(message)
+        
+        if duration:
+            time.sleep(duration)
+            msg_container.empty()
     
     @staticmethod
-    def confirm_action(message: str, key: str) -> bool:
+    def show_success_with_details(title: str, details: Dict[str, Any], 
+                                  substitutions: Optional[List[Dict]] = None,
+                                  auto_clear: bool = False):
         """
-        Show confirmation dialog with proper Streamlit state handling
-        Returns True only after user confirms
+        Show detailed success message with optional substitutions
+        
+        Args:
+            title: Main success message
+            details: Dictionary of detail items to show
+            substitutions: Optional list of substitution details
+            auto_clear: Whether to clear message after delay
         """
-        # Initialize confirmation state
+        # Build success message
+        message_parts = [f"✅ **{title}**", ""]
+        
+        for key, value in details.items():
+            message_parts.append(f"• {key}: **{value}**")
+        
+        success_msg = st.success("\n".join(message_parts))
+        
+        # Show substitutions if any
+        if substitutions:
+            with st.expander(f"ℹ️ {len(substitutions)} Material Substitutions Made", expanded=True):
+                for sub in substitutions:
+                    st.write(
+                        f"• {sub['original_material']} → **{sub['substitute_material']}** "
+                        f"({format_number(sub['quantity'], 2)} {sub.get('uom', '')})"
+                    )
+        
+        if auto_clear:
+            time.sleep(SystemConstants.SUCCESS_MESSAGE_DELAY)
+            success_msg.empty()
+    
+    @staticmethod
+    def inline_confirmation(prompt: str, key: str, 
+                           details: Optional[List[str]] = None) -> Optional[bool]:
+        """
+        Show inline confirmation with optional details
+        Returns: True if confirmed, False if cancelled, None if waiting
+        
+        REFACTORED v2.0: Better state management without page refresh
+        """
+        # Initialize state
         confirm_key = f"{key}_confirm_state"
         if confirm_key not in st.session_state:
-            st.session_state[confirm_key] = False
+            st.session_state[confirm_key] = "waiting"
         
-        # If already confirmed, reset and return True
-        if st.session_state[confirm_key]:
-            st.session_state[confirm_key] = False
+        # Check if already decided
+        if st.session_state[confirm_key] == "confirmed":
+            st.session_state[confirm_key] = "waiting"  # Reset for next time
             return True
+        elif st.session_state[confirm_key] == "cancelled":
+            st.session_state[confirm_key] = "waiting"  # Reset for next time
+            return False
         
         # Show confirmation UI
-        st.warning(f"⚠️ {message}")
+        st.warning(f"⚠️ {prompt}")
+        
+        # Show additional details if provided
+        if details:
+            for detail in details:
+                st.info(detail)
+        
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("✓ Confirm", key=f"{key}_yes", type="primary", use_container_width=True):
-                st.session_state[confirm_key] = True
+            if st.button("✅ Confirm", key=f"{key}_yes", type="primary", use_container_width=True):
+                st.session_state[confirm_key] = "confirmed"
                 st.rerun()
         
         with col2:
-            if st.button("✗ Cancel", key=f"{key}_no", use_container_width=True):
-                return False
+            if st.button("❌ Cancel", key=f"{key}_no", use_container_width=True):
+                st.session_state[confirm_key] = "cancelled"
+                st.rerun()
         
-        return False
+        return None  # Still waiting for decision
+    
+    @staticmethod
+    def show_alternative_materials(materials_df: pd.DataFrame):
+        """
+        Display materials with alternatives in a nice format
+        
+        Args:
+            materials_df: DataFrame with material availability including alternative_details
+        """
+        materials_with_alts = materials_df[
+            (materials_df['availability_status'] != 'SUFFICIENT') & 
+            (materials_df.get('has_alternatives', False) == True)
+        ]
+        
+        if materials_with_alts.empty:
+            return
+        
+        st.markdown("### 🔄 Alternative Materials Available")
+        
+        for _, mat in materials_with_alts.iterrows():
+            shortage = mat['required_qty'] - mat['available_qty']
+            
+            # Create expander with status indicator
+            status_icon = "✅" if mat.get('alternatives_sufficient', False) else "⚠️"
+            
+            with st.expander(
+                f"{status_icon} {mat['material_name']} "
+                f"({mat.get('pt_code', 'N/A')}) - Short by {format_number(shortage, 2)} {mat['uom']}"
+            ):
+                # Show primary material status
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Required", f"{format_number(mat['required_qty'], 2)} {mat['uom']}")
+                with col2:
+                    st.metric("Available", f"{format_number(mat['available_qty'], 2)} {mat['uom']}")
+                with col3:
+                    st.metric("Shortage", f"{format_number(shortage, 2)} {mat['uom']}", delta_color="inverse")
+                
+                # Show alternatives table if available
+                if 'alternative_details' in mat and mat['alternative_details']:
+                    st.markdown("**Available Alternatives:**")
+                    
+                    alt_data = []
+                    for alt in mat['alternative_details']:
+                        alt_data.append({
+                            'Priority': alt['priority'],
+                            'Material': alt['name'],
+                            'PT Code': alt.get('pt_code', 'N/A'),
+                            'Available': f"{format_number(alt['available'], 2)} {alt['uom']}",
+                            'Status': '✅' if alt['status'] == 'SUFFICIENT' else '⚠️ Partial'
+                        })
+                    
+                    alt_df = pd.DataFrame(alt_data)
+                    st.dataframe(alt_df, use_container_width=True, hide_index=True)
+                    
+                    # Summary
+                    total_alt_available = mat.get('alternative_total_qty', 0)
+                    if mat.get('alternatives_sufficient', False):
+                        st.success(
+                            f"✅ Total from alternatives: {format_number(total_alt_available, 2)} {mat['uom']} "
+                            f"(Sufficient to cover shortage)"
+                        )
+                    else:
+                        st.warning(
+                            f"⚠️ Total from alternatives: {format_number(total_alt_available, 2)} {mat['uom']} "
+                            f"(Not sufficient - short by {format_number(shortage - total_alt_available, 2)} {mat['uom']})"
+                        )
 
 
 def create_status_indicator(status: str) -> str:
@@ -222,9 +355,7 @@ def validate_required_fields(data: Dict, required_fields: list) -> None:
     
     if missing:
         raise ValueError(f"Missing required fields: {', '.join(missing)}")
-    
 
-    # Thêm vào cuối file common.py
 
 class FormValidator:
     """Production form validation helpers"""
