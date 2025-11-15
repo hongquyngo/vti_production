@@ -1,5 +1,3 @@
-# utils/auth.py 
-
 import streamlit as st
 import hashlib
 import secrets
@@ -47,6 +45,7 @@ class AuthManager:
                 u.last_login,
                 u.employee_id,
                 e.id as emp_id,
+                e.keycloak_id,
                 CONCAT(e.first_name, ' ', e.last_name) as full_name
             FROM users u
             LEFT JOIN employees e ON u.employee_id = e.id
@@ -91,6 +90,7 @@ class AuthManager:
                 'email': user['email'],
                 'role': user['role'],
                 'employee_id': user['employee_id'],
+                'keycloak_id': user.get('keycloak_id'),  # ← ADD THIS
                 'full_name': user['full_name'] or user['username'],
                 'login_time': datetime.now()
             }
@@ -123,6 +123,7 @@ class AuthManager:
         st.session_state.user_id = user_info['id']
         st.session_state.username = user_info['username']
         st.session_state.user_email = user_info['email']
+        st.session_state.user_keycloak_id = user_info.get('keycloak_id')  # ← ADD THIS
         st.session_state.user_role = user_info['role']
         st.session_state.user_fullname = user_info['full_name']
         st.session_state.employee_id = user_info['employee_id']
@@ -131,7 +132,7 @@ class AuthManager:
         # Initialize other session state variables
         st.session_state.debug_mode = False
         
-        logger.info(f"User {user_info['username']} logged in successfully")
+        logger.info(f"User {user_info['username']} (keycloak_id: {user_info.get('keycloak_id')}) logged in successfully")
     
     def logout(self):
         """Clear user session"""
@@ -141,7 +142,8 @@ class AuthManager:
         # Clear authentication-related session state
         auth_keys = [
             'authenticated', 'user_id', 'username', 'user_email', 
-            'user_role', 'user_fullname', 'employee_id', 'login_time'
+            'user_keycloak_id', 'user_role', 'user_fullname', 
+            'employee_id', 'login_time'
         ]
         
         for key in auth_keys:
@@ -166,6 +168,10 @@ class AuthManager:
         if 'user_fullname' in st.session_state and st.session_state.user_fullname:
             return st.session_state.user_fullname
         return st.session_state.get('username', 'User')
+    
+    def get_user_keycloak_id(self) -> Optional[str]:
+        """Get user's keycloak_id for database operations"""
+        return st.session_state.get('user_keycloak_id')
     
     def update_session_activity(self):
         """Update session activity to prevent timeout"""

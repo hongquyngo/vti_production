@@ -44,19 +44,9 @@ class Config:
         # Database configuration
         self.db_config = dict(st.secrets["DB_CONFIG"])
         
-        # AWS S3 configuration from secrets
-        aws_secrets = st.secrets.get("AWS", {})
-        self.aws_config = {
-            "bucket_name": aws_secrets.get("BUCKET_NAME", "prostech-erp-dev"),
-            "app_prefix": aws_secrets.get("APP_PREFIX", "streamlit-app"),
-            "region": aws_secrets.get("REGION", "ap-southeast-1"),
-            "access_key_id": aws_secrets.get("ACCESS_KEY_ID"),
-            "secret_access_key": aws_secrets.get("SECRET_ACCESS_KEY")
-        }
-        
         # API Keys
         self.api_keys = {
-            "exchange_rate": st.secrets.get("API", {}).get("EXCHANGE_RATE_API_KEY")
+            "exchange_rate": st.secrets["API"]["EXCHANGE_RATE_API_KEY"]
         }
         
         # Google Cloud Service Account
@@ -79,6 +69,16 @@ class Config:
             }
         }
         
+        # AWS S3 Configuration
+        aws_config = st.secrets.get("AWS", {})
+        self.aws_config = {
+            "access_key_id": aws_config.get("ACCESS_KEY_ID"),
+            "secret_access_key": aws_config.get("SECRET_ACCESS_KEY"),
+            "region": aws_config.get("REGION", "ap-southeast-1"),
+            "bucket_name": aws_config.get("BUCKET_NAME", "prostech-erp-dev"),
+            "app_prefix": aws_config.get("APP_PREFIX", "streamlit-app")
+        }
+        
         logger.info("☁️ Running in STREAMLIT CLOUD")
         self._log_config_status()
         
@@ -87,7 +87,7 @@ class Config:
         # Load .env file
         load_dotenv()
         
-        # Database configuration
+        # Database configuration - No hardcoding!
         self.db_config = {
             "host": os.getenv("DB_HOST"),
             "port": int(os.getenv("DB_PORT", "3306")),
@@ -99,15 +99,6 @@ class Config:
         # Validate required DB config
         if not all([self.db_config["host"], self.db_config["user"], self.db_config["password"]]):
             raise ValueError("Missing required database configuration. Please check .env file.")
-        
-        # AWS S3 configuration from environment
-        self.aws_config = {
-            "bucket_name": os.getenv("AWS_BUCKET_NAME", "prostech-erp-dev"),
-            "app_prefix": os.getenv("AWS_APP_PREFIX", "streamlit-app"),
-            "region": os.getenv("AWS_REGION", "ap-southeast-1"),
-            "access_key_id": os.getenv("AWS_ACCESS_KEY_ID"),
-            "secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY")
-        }
         
         # API Keys
         self.api_keys = {
@@ -138,6 +129,15 @@ class Config:
                 "host": os.getenv("SMTP_HOST", "smtp.gmail.com"),
                 "port": int(os.getenv("SMTP_PORT", "587"))
             }
+        }
+        
+        # AWS S3 Configuration
+        self.aws_config = {
+            "access_key_id": os.getenv("AWS_ACCESS_KEY_ID"),
+            "secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
+            "region": os.getenv("AWS_REGION", "ap-southeast-1"),
+            "bucket_name": os.getenv("S3_BUCKET_NAME", "prostech-erp-dev"),
+            "app_prefix": os.getenv("S3_APP_PREFIX", "streamlit-app")
         }
         
         logger.info("💻 Running in LOCAL environment")
@@ -173,21 +173,16 @@ class Config:
     def _log_config_status(self):
         """Log configuration status for debugging"""
         logger.info(f"✅ Database: {self.db_config.get('host', 'N/A')} / {self.db_config.get('database', 'N/A')}")
-        logger.info(f"✅ S3 Bucket: {self.aws_config.get('bucket_name', 'N/A')}")
-        logger.info(f"✅ S3 Region: {self.aws_config.get('region', 'N/A')}")
-        logger.info(f"✅ AWS Keys: {'Configured' if self.aws_config.get('access_key_id') else 'Missing'}")
         logger.info(f"✅ Exchange API Key: {'Configured' if self.api_keys.get('exchange_rate') else 'Missing'}")
         logger.info(f"✅ Google Service Account: {'Loaded' if self.google_service_account else 'Missing'}")
+        logger.info(f"✅ AWS S3 Bucket: {self.aws_config.get('bucket_name', 'Not configured')}")
+        logger.info(f"✅ AWS Access Key: {'Configured' if self.aws_config.get('access_key_id') else 'Missing'}")
         logger.info(f"✅ Inbound Email: {self.email_config['inbound']['sender'] or 'Not configured'}")
         logger.info(f"✅ Outbound Email: {self.email_config['outbound']['sender'] or 'Not configured'}")
         
     def get_db_config(self) -> Dict[str, Any]:
         """Get database configuration"""
         return self.db_config.copy()
-    
-    def get_aws_config(self) -> Dict[str, Any]:
-        """Get AWS S3 configuration"""
-        return self.aws_config.copy()
         
     def get_email_config(self, module: str = "outbound") -> Dict[str, Any]:
         """Get email configuration for specific module"""
@@ -200,6 +195,14 @@ class Config:
     def get_api_key(self, service: str) -> Optional[str]:
         """Get API key for specific service"""
         return self.api_keys.get(service)
+        
+    def get_google_service_account(self) -> Dict[str, Any]:
+        """Get Google service account configuration"""
+        return self.google_service_account.copy()
+        
+    def get_aws_config(self) -> Dict[str, Any]:
+        """Get AWS configuration"""
+        return self.aws_config.copy()
         
     def get_app_setting(self, key: str, default: Any = None) -> Any:
         """Get application setting"""
@@ -216,18 +219,19 @@ config = Config()
 # Export commonly used values for backward compatibility
 IS_RUNNING_ON_CLOUD = config.is_cloud
 DB_CONFIG = config.db_config
-AWS_CONFIG = config.aws_config  # ✨ NEW: Export AWS configuration
+AWS_CONFIG = config.aws_config
 EXCHANGE_RATE_API_KEY = config.api_keys.get("exchange_rate")
 GOOGLE_SERVICE_ACCOUNT_JSON = config.google_service_account
 APP_CONFIG = config.app_config
 
-# Module-specific email configs  
+# Module-specific email configs
 INBOUND_EMAIL_CONFIG = config.get_email_config("inbound")
 OUTBOUND_EMAIL_CONFIG = config.get_email_config("outbound")
 
-# Legacy support - keep EMAIL_SENDER and EMAIL_PASSWORD for backward compatibility
-EMAIL_SENDER = OUTBOUND_EMAIL_CONFIG.get("sender")
-EMAIL_PASSWORD = OUTBOUND_EMAIL_CONFIG.get("password")
+# For backward compatibility - single email config
+EMAIL_SENDER = config.email_config.get("outbound", {}).get("sender")
+EMAIL_PASSWORD = config.email_config.get("outbound", {}).get("password")
+
 
 # Export all
 __all__ = [
@@ -235,7 +239,7 @@ __all__ = [
     'Config',
     'IS_RUNNING_ON_CLOUD',
     'DB_CONFIG',
-    'AWS_CONFIG',  # ✨ NEW: Added to exports
+    'AWS_CONFIG',
     'EXCHANGE_RATE_API_KEY',
     'GOOGLE_SERVICE_ACCOUNT_JSON',
     'APP_CONFIG',
