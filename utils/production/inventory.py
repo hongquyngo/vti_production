@@ -135,6 +135,13 @@ class InventoryManager:
             df = pd.read_sql(query, self.engine, 
                            params=(quantity, quantity, warehouse_id, bom_id))
             
+            # Initialize alternative-related columns BEFORE the loop to avoid pandas assignment issues
+            df['has_alternatives'] = False
+            df['alternative_count'] = 0
+            df['alternative_details'] = [[] for _ in range(len(df))]  # Initialize with empty lists
+            df['alternative_total_qty'] = 0.0
+            df['alternatives_sufficient'] = False
+            
             # For materials with insufficient stock, check and get detailed alternatives
             for idx, row in df.iterrows():
                 if row['availability_status'] != 'SUFFICIENT':
