@@ -1,7 +1,13 @@
 # utils/production/pdf_ui.py
 """
-PDF Export UI Components for Production Module - REFACTORED v2.3 FINAL
-FIXED: Dialog persistence issue - no more disappearing after PDF generation!
+PDF Export UI Components for Production Module - REFACTORED v2.3.1 FINAL
+FIXED: Dialog persistence + Cancel/Skip button close behavior
+
+CHANGES v2.3.1:
+- ✅ CRITICAL FIX: Cancel and Skip buttons now properly close dialogs
+- ✅ Added st.rerun() to all close actions (cancel/skip/done)
+- ✅ Clear session state when canceling Quick PDF generation
+- ✅ All v2.3 fixes maintained
 
 CHANGES v2.3:
 - ✅ CRITICAL FIX: QuickPDF dialog stays open after generation (removed st.rerun)
@@ -188,7 +194,7 @@ class PDFExportDialog:
             
             if skip_btn:
                 st.info("✅ You can generate the PDF later from the Issue History tab")
-                # Don't rerun - just close dialog naturally
+                st.rerun()  # Close dialog after skip
     
     @staticmethod
     def _show_download_section(issue_result: Dict[str, Any], pdf_key: str):
@@ -345,7 +351,11 @@ class QuickPDFButton:
                 logger.error(f"Quick PDF error for issue {issue_id}: {e}", exc_info=True)
         
         if cancel:
-            pass  # Just close dialog naturally
+            # Clear any stored state for this issue
+            st.session_state.pop(quick_key, None)
+            st.session_state.pop(f'{quick_key}_content', None)
+            st.session_state.pop(f'{quick_key}_filename', None)
+            st.rerun()  # Close dialog by rerunning
     
     @staticmethod
     def _show_quick_download_section(issue_id: int, issue_no: str, quick_key: str):
@@ -454,7 +464,7 @@ class PDFBulkExport:
                 PDFBulkExport._process_bulk_export(issue_ids, language)
             
             if cancel:
-                pass  # Close naturally
+                st.rerun()  # Close dialog
     
     @staticmethod
     def _process_bulk_export(issue_ids: list, language: str):
