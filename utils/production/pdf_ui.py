@@ -227,68 +227,6 @@ class PDFExportDialog:
                 st.rerun()
 
 
-def render_material_issue_with_pdf():
-    """
-    Enhanced material issue function with PDF export
-    This wraps the existing material issue process
-    """
-    import streamlit as st
-    from ..production.materials import issue_materials
-    
-    # Get the selected order
-    order_id = st.session_state.get('selected_order')
-    if not order_id:
-        st.warning("⚠️ Please select a production order first")
-        return
-    
-    # Material issue button
-    if st.button("📤 Issue Materials", type="primary", use_container_width=True):
-        try:
-            # Validate order status first
-            from ..db import get_db_engine
-            import pandas as pd
-            
-            engine = get_db_engine()
-            order_check = pd.read_sql(
-                "SELECT status FROM manufacturing_orders WHERE id = %s",
-                engine, params=(order_id,)
-            )
-            
-            if order_check.empty:
-                st.error("❌ Order not found")
-                return
-            
-            if order_check.iloc[0]['status'] not in ['DRAFT', 'CONFIRMED']:
-                st.error(f"❌ Cannot issue materials for {order_check.iloc[0]['status']} order")
-                return
-            
-            # Issue materials
-            with st.spinner("Issuing materials... Please wait..."):
-                result = issue_materials(
-                    order_id=order_id,
-                    user_id=st.session_state.get('user_id', 1)
-                )
-            
-            # Show PDF dialog immediately
-            if result and result.get('issue_id'):
-                PDFExportDialog.show_pdf_export_dialog(result)
-            else:
-                st.error("❌ Material issue failed - no result returned")
-                
-        except ValueError as e:
-            st.error(f"❌ {str(e)}")
-            logger.error(f"Material issue error: {e}")
-            
-        except ConnectionError:
-            st.error("❌ Database connection lost. Please check your network.")
-            
-        except Exception as e:
-            st.error(f"❌ An unexpected error occurred")
-            if st.session_state.get('debug_mode'):
-                st.code(str(e))
-            logger.error(f"Unexpected error: {e}", exc_info=True)
-
-
 class QuickPDFButton:
     """Quick PDF generation button for existing issues"""
     
