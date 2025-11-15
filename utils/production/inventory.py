@@ -164,7 +164,7 @@ class InventoryManager:
                                 'status': alt['availability_status'],
                                 'priority': int(alt['priority'])
                             })
-                        df.at[idx, 'alternative_details'] = alt_details
+                        df.at[idx, 'alternative_details'] = alt_details  # Use .at for scalar assignment
                         
                         # Calculate total available from all alternatives
                         total_alt_available = alternatives['available_qty'].sum()
@@ -181,14 +181,14 @@ class InventoryManager:
                     else:
                         df.at[idx, 'has_alternatives'] = False
                         df.at[idx, 'alternative_count'] = 0
-                        df.at[idx, 'alternative_details'] = []
+                        df.at[idx, 'alternative_details'] = []  # Use .at for scalar assignment
                         df.at[idx, 'alternative_total_qty'] = 0.0
                         df.at[idx, 'alternatives_sufficient'] = False
                 else:
                     # Material is sufficient, no need for alternatives
                     df.at[idx, 'has_alternatives'] = False
                     df.at[idx, 'alternative_count'] = 0
-                    df.at[idx, 'alternative_details'] = []
+                    df.at[idx, 'alternative_details'] = []  # Use .at for scalar assignment
                     df.at[idx, 'alternative_total_qty'] = 0.0
                     df.at[idx, 'alternatives_sufficient'] = False
             
