@@ -1,8 +1,15 @@
 # pages/2___Production.py
 """
-Production Management User Interface - REFACTORED v5.0
+Production Management User Interface - REFACTORED v6.0
 Complete production cycle: Order → Issue → Return → Complete
 WITH PRODUCTION OUTPUT TRACKING & ENHANCED MATERIAL DISPLAY
+
+IMPROVEMENTS v6.0 (Inventory Tracking Fix):
+- ✅ CRITICAL FIX: Updated to use keycloak_id for inventory_histories.created_by
+- ✅ CRITICAL FIX: Added entity_id tracking for all inventory operations
+- ✅ UPDATED: All material operations (issue/return/complete) now pass proper audit fields
+- ✅ FIXED: Proper separation of user_id (manufacturing tables) vs keycloak_id (inventory tables)
+- ✅ MAINTAINED: All v5.0 functionality including PDF dialogs and enhanced UX
 
 IMPROVEMENTS v5.0 (PDF Dialog Integration Fix):
 - ✅ CRITICAL FIX: Integrated with new @st.dialog-based PDF export
@@ -165,7 +172,62 @@ def set_view(view: str, order_id: Optional[int] = None):
     if order_id is not None:
         st.session_state.selected_order = order_id
 
-initialize_session_state()
+# ==================== Helper Functions for Audit Fields ====================
+
+def get_user_audit_info() -> Dict[str, any]:
+    """
+    Get user audit information for database operations
+    
+    Returns:
+        Dict with user_id (INT for manufacturing tables) 
+        and keycloak_id (VARCHAR for inventory tables)
+    """
+    user_id = st.session_state.get('user_id', 1)
+    keycloak_id = st.session_state.get('user_keycloak_id')
+    
+    # Log warning if keycloak_id is missing
+    if not keycloak_id:
+        logger.warning("⚠️ keycloak_id not found in session state - using fallback")
+        # Fallback: try to get from employee_id or use user_id as string
+        keycloak_id = str(user_id)  # Emergency fallback
+    
+    return {
+        'user_id': user_id,
+        'keycloak_id': keycloak_id
+    }
+
+def get_entity_id_from_order(order: Dict) -> int:
+    """
+    Extract entity_id from order details
+    
+    Args:
+        order: Order dictionary with order details
+        
+    Returns:
+        Entity ID (defaults to 1 if not found)
+    """
+    entity_id = order.get('entity_id', 1)
+    
+    if not entity_id:
+        logger.warning(f"⚠️ entity_id not found in order {order.get('order_no', 'Unknown')}, using default 1")
+        entity_id = 1
+    
+    return entity_id
+
+    defaults = {
+        'current_view': 'list',
+        'selected_order': None,
+        'page_number': 1,
+    }
+    
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+def set_view(view: str, order_id: Optional[int] = None):
+    """Set current view and optionally selected order"""
+    st.session_state.current_view = view
+    if order_id is not None:
+        st.session_state.selected_order = order_id
 
 # ==================== Header & Navigation ====================
 
@@ -961,10 +1023,16 @@ def render_material_issue():
                     with col_confirm:
                         if st.button("✅ Yes, Issue Now", type="primary", use_container_width=True):
                             try:
+                                # ==================== v6.0 FIX: Get proper audit info ====================
+                                audit_info = get_user_audit_info()
+                                entity_id = get_entity_id_from_order(order)
+                                
                                 with st.spinner("Issuing materials..."):
                                     result = issue_materials(
                                         order_id=order_id,
-                                        user_id=st.session_state.get('user_id', 1)
+                                        user_id=audit_info['user_id'],        # INT for manufacturing tables
+                                        keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
+                                        entity_id=entity_id                    # Company ID
                                     )
                                 
                                 # Clear confirm state
@@ -1017,6 +1085,9 @@ def render_material_return():
     order_id = order_dict[selected_order_label]
     
     # Get returnable materials
+    
+    # Get order details for entity_id
+    order = prod_manager.get_order_details(order_id)
     returnable = get_returnable_materials(order_id)
     
     if returnable.empty:
@@ -1095,7 +1166,18 @@ def render_material_return():
                 UIHelpers.show_message("⚠️ No materials selected for return", "warning")
             else:
                 try:
-                    result = return_materials(order_id, returns, reason, st.session_state.user_id)
+                    # ==================== v6.0 FIX: Get proper audit info ====================
+                    audit_info = get_user_audit_info()
+                    entity_id = get_entity_id_from_order(order)
+                    
+                    result = return_materials(
+                        order_id=order_id,
+                        returns=returns,
+                        reason=reason,
+                        user_id=audit_info['user_id'],        # INT for manufacturing tables
+                        keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
+                        entity_id=entity_id                    # Company ID
+                    )
                     
                     UIHelpers.show_message(
                         f"✅ Materials returned! Return No: **{result['return_no']}**",
@@ -1248,15 +1330,22 @@ def render_production_completion():
         
         if submitted:
             try:
+                # ==================== v6.0 FIX: Get proper audit info ====================
+                audit_info = get_user_audit_info()
+                entity_id = get_entity_id_from_order(order)
+                
                 with st.spinner("Recording production output..."):
                     result = complete_production(
                         order_id=order_id,
                         produced_qty=produced_qty,
                         batch_no=batch_no,
+                        warehouse_id=order['target_warehouse_id'],
                         quality_status=quality_status,
-                        notes=notes,
-                        user_id=st.session_state.get('user_id', 1),
-                        expired_date=expired_date
+                        user_id=audit_info['user_id'],        # INT for manufacturing tables
+                        keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
+                        entity_id=entity_id,                   # Company ID
+                        expiry_date=expired_date,
+                        notes=notes
                     )
                 
                 UIHelpers.show_success_with_details(
@@ -1484,6 +1573,9 @@ def render_issue_history():
 def main():
     """Main application entry point"""
     try:
+        # Initialize session state first
+        initialize_session_state()
+        
         # Render header
         render_header()
         
@@ -1517,7 +1609,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Manufacturing Module v5.0 - with Fixed PDF Dialog Integration & Enhanced UX")
+    st.caption("Manufacturing Module v6.0 - with Proper Inventory Tracking & Audit Fields")
 
 # Run the application
 if __name__ == "__main__":

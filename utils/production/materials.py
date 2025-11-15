@@ -1,8 +1,18 @@
 # utils/production/materials.py
 """
-Material Issue, Return, and Production Completion Logic - REFACTORED
+Material Issue, Return, and Production Completion Logic - REFACTORED v6.0
 FEFO-based material issuing with automatic alternative substitution and tracking
-Fixed: Alternative material tracking, database recording
+
+MAJOR CHANGES v6.0:
+✅ FIXED: inventory_histories.operation field (stockOutProduction, stockInProductionReturn, stockInProduction)
+✅ FIXED: inventory_histories.created_by uses keycloak_id (VARCHAR) instead of user_id (INT)
+✅ ADDED: reference_type, reference_id, entity_id tracking in inventory_histories
+✅ FIXED: Material returns preserve alternative tracking (is_alternative, original_material_id)
+✅ ENHANCED: Full audit trail for all inventory movements
+
+Previous versions:
+v5.0: Alternative material tracking and substitution
+v4.0: FEFO with batch tracking
 """
 
 import logging
@@ -17,10 +27,17 @@ from ..db import get_db_engine
 logger = logging.getLogger(__name__)
 
 
-def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
+def issue_materials(order_id: int, user_id: int, keycloak_id: str, 
+                   entity_id: int) -> Dict[str, Any]:
     """
     Issue materials for production using FEFO (First Expiry, First Out)
     with automatic alternative material substitution and tracking
+    
+    Args:
+        order_id: Manufacturing order ID
+        user_id: User ID for manufacturing tables (INT)
+        keycloak_id: Keycloak ID for inventory tables (VARCHAR)
+        entity_id: Company/Entity ID
     
     Raises:
         ValueError: If order not found, invalid status, or insufficient stock
@@ -45,10 +62,12 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
             issue_query = text("""
                 INSERT INTO material_issues (
                     issue_no, manufacturing_order_id, warehouse_id,
-                    issue_date, status, issued_by, created_by, created_date, group_id
+                    issue_date, status, issued_by, created_by, created_date, 
+                    group_id, entity_id
                 ) VALUES (
                     :issue_no, :order_id, :warehouse_id,
-                    NOW(), 'CONFIRMED', :user_id, :user_id, NOW(), :group_id
+                    NOW(), 'CONFIRMED', :user_id, :user_id, NOW(), 
+                    :group_id, :entity_id
                 )
             """)
             
@@ -57,7 +76,8 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
                 'order_id': order_id,
                 'warehouse_id': order['warehouse_id'],
                 'user_id': user_id,
-                'group_id': group_id
+                'group_id': group_id,
+                'entity_id': entity_id
             })
             
             issue_id = issue_result.lastrowid
@@ -75,7 +95,8 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
                         # Try issuing primary material first
                         issued = _issue_material_with_alternatives(
                             conn, issue_id, order_id, mat,
-                            remaining, order['warehouse_id'], group_id, user_id
+                            remaining, order['warehouse_id'], 
+                            group_id, user_id, keycloak_id, entity_id
                         )
                         issue_details.extend(issued['details'])
                         if issued['substitutions']:
@@ -87,14 +108,19 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
             # Update order status to IN_PROGRESS
             status_query = text("""
                 UPDATE manufacturing_orders
-                SET status = 'IN_PROGRESS', updated_date = NOW()
+                SET status = 'IN_PROGRESS', 
+                    updated_by = :user_id,
+                    updated_date = NOW()
                 WHERE id = :order_id
             """)
-            conn.execute(status_query, {'order_id': order_id})
+            conn.execute(status_query, {
+                'order_id': order_id,
+                'user_id': user_id
+            })
             
-            logger.info(f"Issued materials for order {order_id}, issue no: {issue_no}")
+            logger.info(f"✅ Issued materials for order {order_id}, issue no: {issue_no}")
             if substitutions:
-                logger.info(f"Material substitutions made: {substitutions}")
+                logger.info(f"🔄 Material substitutions made: {len(substitutions)} items")
             
             return {
                 'issue_no': issue_no,
@@ -104,20 +130,23 @@ def issue_materials(order_id: int, user_id: int) -> Dict[str, Any]:
             }
             
         except Exception as e:
-            logger.error(f"Error issuing materials for order {order_id}: {e}")
+            logger.error(f"❌ Error issuing materials for order {order_id}: {e}")
             raise
 
 
 def return_materials(order_id: int, returns: List[Dict],
-                    reason: str, user_id: int) -> Dict[str, Any]:
+                    reason: str, user_id: int, keycloak_id: str,
+                    entity_id: int) -> Dict[str, Any]:
     """
-    Return unused materials with validation
+    Return unused materials with validation and proper tracking
     
     Args:
         order_id: Production order ID
         returns: List of return items with issue_detail_id, quantity, etc.
         reason: Return reason code
-        user_id: User performing the return
+        user_id: User ID for manufacturing tables (INT)
+        keycloak_id: Keycloak ID for inventory tables (VARCHAR)
+        entity_id: Company/Entity ID
         
     Returns:
         Dictionary with return_no and details
@@ -145,7 +174,7 @@ def return_materials(order_id: int, returns: List[Dict],
             if not issue_row:
                 raise ValueError("No material issue found for this order")
             
-            issue = dict(zip(issue_result.keys(), issue_row))  # Convert to dict
+            issue = dict(zip(issue_result.keys(), issue_row))
             
             # Validate all returns
             for ret in returns:
@@ -153,16 +182,17 @@ def return_materials(order_id: int, returns: List[Dict],
             
             # Create return header
             return_no = _generate_return_number(conn)
+            group_id = str(uuid.uuid4())
             
             return_query = text("""
                 INSERT INTO material_returns (
                     return_no, material_issue_id, manufacturing_order_id,
                     return_date, warehouse_id, status, returned_by,
-                    reason, created_by, created_date
+                    reason, created_by, created_date, group_id, entity_id
                 ) VALUES (
                     :return_no, :issue_id, :order_id,
                     NOW(), :warehouse_id, 'CONFIRMED', :user_id,
-                    :reason, :user_id, NOW()
+                    :reason, :user_id, NOW(), :group_id, :entity_id
                 )
             """)
             
@@ -172,23 +202,27 @@ def return_materials(order_id: int, returns: List[Dict],
                 'order_id': order_id,
                 'warehouse_id': order['warehouse_id'],
                 'user_id': user_id,
-                'reason': reason
+                'reason': reason,
+                'group_id': group_id,
+                'entity_id': entity_id
             })
             
             return_id = return_result.lastrowid
             
             # Create return details and update inventory
             return_details = []
-            group_id = str(uuid.uuid4())
             
             for ret in returns:
-                detail = _process_return_item(conn, return_id, ret, order['warehouse_id'], group_id, user_id)
+                detail = _process_return_item(
+                    conn, return_id, ret, order['warehouse_id'], 
+                    group_id, user_id, keycloak_id, entity_id
+                )
                 return_details.append(detail)
             
             # Update manufacturing_order_materials issued quantities
             _update_order_materials_for_return(conn, return_details)
             
-            logger.info(f"Created return {return_no} for order {order_id}")
+            logger.info(f"✅ Created return {return_no} for order {order_id}")
             
             return {
                 'return_no': return_no,
@@ -197,13 +231,14 @@ def return_materials(order_id: int, returns: List[Dict],
             }
             
         except Exception as e:
-            logger.error(f"Error processing returns for order {order_id}: {e}")
+            logger.error(f"❌ Error processing returns for order {order_id}: {e}")
             raise
 
 
 def complete_production(order_id: int, produced_qty: float,
                        batch_no: str, warehouse_id: int,
-                       quality_status: str, user_id: int,
+                       quality_status: str, user_id: int, keycloak_id: str,
+                       entity_id: int,
                        expiry_date: Optional[date] = None,
                        notes: str = '') -> Dict[str, Any]:
     """
@@ -215,7 +250,9 @@ def complete_production(order_id: int, produced_qty: float,
         batch_no: Production batch number
         warehouse_id: Target warehouse for finished goods
         quality_status: 'PENDING', 'PASSED', 'FAILED'
-        user_id: User completing production
+        user_id: User ID for manufacturing tables (INT)
+        keycloak_id: Keycloak ID for inventory tables (VARCHAR)
+        entity_id: Company/Entity ID
         expiry_date: Optional expiry date for finished goods
         notes: Production notes
         
@@ -234,19 +271,22 @@ def complete_production(order_id: int, produced_qty: float,
             if order['status'] not in ['IN_PROGRESS']:
                 raise ValueError(f"Cannot complete {order['status']} order")
             
-            # Generate receipt number
+            # Generate receipt number and group ID
             receipt_no = _generate_receipt_number(conn)
+            group_id = str(uuid.uuid4())
             
             # Create production receipt
             receipt_query = text("""
                 INSERT INTO production_receipts (
                     receipt_no, manufacturing_order_id, receipt_date,
                     product_id, quantity, uom, batch_no, expired_date,
-                    warehouse_id, quality_status, notes, created_by, created_date
+                    warehouse_id, quality_status, notes, 
+                    created_by, created_date, entity_id
                 ) VALUES (
                     :receipt_no, :order_id, NOW(),
                     :product_id, :quantity, :uom, :batch_no, :expired_date,
-                    :warehouse_id, :quality_status, :notes, :user_id, NOW()
+                    :warehouse_id, :quality_status, :notes, 
+                    :user_id, NOW(), :entity_id
                 )
             """)
             
@@ -261,17 +301,18 @@ def complete_production(order_id: int, produced_qty: float,
                 'warehouse_id': warehouse_id,
                 'quality_status': quality_status,
                 'notes': notes,
-                'user_id': user_id
+                'user_id': user_id,
+                'entity_id': entity_id
             })
             
             receipt_id = receipt_result.lastrowid
             
             # Update inventory if quality passed
             if quality_status == 'PASSED':
-                group_id = str(uuid.uuid4())
                 _add_production_to_inventory(
                     conn, order, produced_qty, batch_no,
-                    warehouse_id, expiry_date, group_id, user_id
+                    warehouse_id, expiry_date, 
+                    group_id, keycloak_id, entity_id, receipt_id
                 )
             
             # Update order produced quantity
@@ -286,16 +327,18 @@ def complete_production(order_id: int, produced_qty: float,
                         WHEN COALESCE(produced_qty, 0) + :produced_qty >= planned_qty 
                         THEN NOW() ELSE NULL 
                     END,
+                    updated_by = :user_id,
                     updated_date = NOW()
                 WHERE id = :order_id
             """)
             
             conn.execute(update_query, {
                 'produced_qty': produced_qty,
-                'order_id': order_id
+                'order_id': order_id,
+                'user_id': user_id
             })
             
-            logger.info(f"Completed production receipt {receipt_no} for order {order_id}")
+            logger.info(f"✅ Completed production receipt {receipt_no} for order {order_id}")
             
             return {
                 'receipt_no': receipt_no,
@@ -306,7 +349,7 @@ def complete_production(order_id: int, produced_qty: float,
             }
             
         except Exception as e:
-            logger.error(f"Error completing production for order {order_id}: {e}")
+            logger.error(f"❌ Error completing production for order {order_id}: {e}")
             raise
 
 
@@ -316,7 +359,8 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
     
     Returns DataFrame with columns:
     - issue_detail_id, material_id, material_name, batch_no,
-    - issued_qty, returned_qty, returnable_qty, uom, expired_date
+    - issued_qty, returned_qty, returnable_qty, uom, expired_date,
+    - is_alternative, original_material_id
     """
     engine = get_db_engine()
     
@@ -330,10 +374,18 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
             COALESCE(SUM(mrd.quantity), 0) as returned_qty,
             mid.quantity - COALESCE(SUM(mrd.quantity), 0) as returnable_qty,
             mid.uom,
-            mid.expired_date
+            mid.expired_date,
+            COALESCE(mid.is_alternative, 0) as is_alternative,
+            mid.original_material_id,
+            CASE 
+                WHEN mid.is_alternative = 1 THEN 
+                    CONCAT(p.name, ' (Alt for: ', p2.name, ')')
+                ELSE p.name
+            END as display_name
         FROM material_issues mi
         JOIN material_issue_details mid ON mi.id = mid.material_issue_id
         JOIN products p ON mid.material_id = p.id
+        LEFT JOIN products p2 ON mid.original_material_id = p2.id
         LEFT JOIN material_return_details mrd 
             ON mrd.original_issue_detail_id = mid.id
         LEFT JOIN material_returns mr 
@@ -341,7 +393,8 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
         WHERE mi.manufacturing_order_id = %s
             AND mi.status = 'CONFIRMED'
         GROUP BY mid.id, mid.material_id, p.name, mid.batch_no, 
-                 mid.quantity, mid.uom, mid.expired_date
+                 mid.quantity, mid.uom, mid.expired_date,
+                 mid.is_alternative, mid.original_material_id, p2.name
         HAVING returnable_qty > 0
         ORDER BY p.name, mid.batch_no
     """
@@ -349,56 +402,72 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
     try:
         return pd.read_sql(query, engine, params=(order_id,))
     except Exception as e:
-        logger.error(f"Error getting returnable materials for order {order_id}: {e}")
+        logger.error(f"❌ Error getting returnable materials: {e}")
         return pd.DataFrame()
 
 
-# ==================== Internal Helper Functions ====================
+# ==================== INTERNAL HELPER FUNCTIONS ====================
 
 def _get_order_info(conn, order_id: int) -> Optional[Dict]:
-    """Get order information with lock"""
+    """Get order information with necessary fields"""
     query = text("""
         SELECT 
-            id, order_no, status, warehouse_id, target_warehouse_id,
-            product_id, planned_qty, uom, bom_header_id
-        FROM manufacturing_orders
-        WHERE id = :order_id AND delete_flag = 0
+            mo.id,
+            mo.order_no,
+            mo.status,
+            mo.product_id,
+            mo.planned_qty,
+            mo.uom,
+            mo.warehouse_id,
+            mo.entity_id
+        FROM manufacturing_orders mo
+        WHERE mo.id = :order_id
+            AND mo.delete_flag = 0
         FOR UPDATE
     """)
     
     result = conn.execute(query, {'order_id': order_id})
     row = result.fetchone()
     
-    return dict(zip(result.keys(), row)) if row else None
+    if not row:
+        return None
+    
+    return dict(zip(result.keys(), row))
 
 
 def _get_pending_materials(conn, order_id: int) -> pd.DataFrame:
-    """Get materials that still need to be issued"""
+    """Get materials pending issue for an order"""
     query = text("""
         SELECT 
-            m.id as order_material_id,
-            m.material_id,
+            mom.id as order_material_id,
+            mom.material_id,
             p.name as material_name,
-            m.required_qty,
-            COALESCE(m.issued_qty, 0) as issued_qty,
-            m.uom
-        FROM manufacturing_order_materials m
-        JOIN products p ON m.material_id = p.id
-        WHERE m.manufacturing_order_id = :order_id
-            AND m.required_qty > COALESCE(m.issued_qty, 0)
+            mom.required_qty,
+            COALESCE(mom.issued_qty, 0) as issued_qty,
+            mom.uom,
+            mom.status
+        FROM manufacturing_order_materials mom
+        JOIN products p ON mom.material_id = p.id
+        WHERE mom.manufacturing_order_id = :order_id
+            AND mom.status IN ('PENDING', 'PARTIAL')
         ORDER BY p.name
     """)
     
     result = conn.execute(query, {'order_id': order_id})
-    rows = result.fetchall()
     
-    return pd.DataFrame([dict(row._mapping) for row in rows])
+    # Convert to DataFrame
+    rows = []
+    for row in result:
+        rows.append(dict(zip(result.keys(), row)))
+    
+    return pd.DataFrame(rows)
 
 
 def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
                                      material: pd.Series, required_qty: float,
                                      warehouse_id: int, group_id: str,
-                                     user_id: int) -> Dict[str, Any]:
+                                     user_id: int, keycloak_id: str,
+                                     entity_id: int) -> Dict[str, Any]:
     """
     Issue material using FEFO, automatically substituting alternatives if needed
     
@@ -407,27 +476,27 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
     """
     issued_details = []
     substitutions = []
-    remaining = float(required_qty)  # Ensure float type
+    remaining = float(required_qty)
     
     # Try primary material first
-    primary_issued = 0.0  # Ensure float type
+    primary_issued = 0.0
     try:
         primary_details = _issue_single_material_fefo(
             conn, issue_id, order_id, material, remaining,
-            warehouse_id, group_id, user_id,
+            warehouse_id, group_id, user_id, keycloak_id, entity_id,
             is_alternative=False, original_material_id=None
         )
         issued_details.extend(primary_details)
         
         # Calculate how much was issued from primary
         for detail in primary_details:
-            primary_issued += float(detail['quantity'])  # Ensure float
+            primary_issued += float(detail['quantity'])
         
         remaining -= primary_issued
         
     except ValueError as e:
         # Insufficient stock for primary - log but continue with alternatives
-        logger.warning(f"Insufficient primary material {material['material_name']}: {e}")
+        logger.warning(f"⚠️ Insufficient primary material {material['material_name']}: {e}")
     
     # If still need more, try alternatives
     if remaining > 0:
@@ -451,7 +520,7 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
                 raise ValueError(f"No materials available for {material['material_name']}")
             else:
                 # Partial issue from primary only
-                logger.warning(f"Only partial issue possible for {material['material_name']}: {primary_issued}/{required_qty}")
+                logger.warning(f"⚠️ Only partial issue possible for {material['material_name']}: {primary_issued}/{required_qty}")
                 return {'details': issued_details, 'substitutions': []}
         
         bom_detail = dict(zip(result.keys(), bom_detail_row))
@@ -499,13 +568,13 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
                 # Try issuing alternative with tracking
                 alt_details = _issue_single_material_fefo(
                     conn, issue_id, order_id, alt_material, remaining,
-                    warehouse_id, group_id, user_id,
+                    warehouse_id, group_id, user_id, keycloak_id, entity_id,
                     is_alternative=True, 
-                    original_material_id=material['material_id']  # Track original material
+                    original_material_id=material['material_id']
                 )
                 
                 # Calculate how much was issued from this alternative
-                alt_issued = sum(float(d['quantity']) for d in alt_details)  # Ensure float
+                alt_issued = sum(float(d['quantity']) for d in alt_details)
                 
                 if alt_issued > 0:
                     issued_details.extend(alt_details)
@@ -522,10 +591,10 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
                     })
                     
                     remaining -= alt_issued
-                    logger.info(f"Substituted {alt_issued} {alt['uom']} of {alt['alternative_material_name']} for {material['material_name']}")
+                    logger.info(f"🔄 Substituted {alt_issued} {alt['uom']} of {alt['alternative_material_name']} for {material['material_name']}")
                 
             except ValueError as e:
-                logger.warning(f"Alternative {alt['alternative_material_name']} also insufficient: {e}")
+                logger.warning(f"⚠️ Alternative {alt['alternative_material_name']} also insufficient: {e}")
                 continue
         
         # Check if we fulfilled the requirement
@@ -534,7 +603,7 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
             if total_issued == 0:
                 raise ValueError(f"No materials available (primary or alternatives) for {material['material_name']}")
             else:
-                logger.warning(f"Only partial issue possible for {material['material_name']}: {total_issued}/{required_qty}")
+                logger.warning(f"⚠️ Only partial issue possible for {material['material_name']}: {total_issued}/{required_qty}")
     
     return {
         'details': issued_details,
@@ -544,14 +613,23 @@ def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
 
 def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
                                material: pd.Series, required_qty: float,
-                               warehouse_id: int, group_id: str, user_id: int,
+                               warehouse_id: int, group_id: str, 
+                               user_id: int, keycloak_id: str, entity_id: int,
                                is_alternative: bool = False,
                                original_material_id: Optional[int] = None) -> List[Dict]:
     """
     Issue single material using FEFO with alternative tracking
     
     Args:
-        ... (existing args)
+        issue_id: Material issue ID
+        order_id: Manufacturing order ID
+        material: Material series with material_id, name, etc.
+        required_qty: Quantity required
+        warehouse_id: Source warehouse
+        group_id: Transaction group ID
+        user_id: User ID for manufacturing tables (INT)
+        keycloak_id: Keycloak ID for inventory tables (VARCHAR)
+        entity_id: Company/Entity ID
         is_alternative: Whether this is an alternative material
         original_material_id: ID of original material if this is alternative
     
@@ -590,13 +668,13 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
     
     # Issue from batches
     issued_details = []
-    total_issued = 0.0  # Ensure float type
+    total_issued = 0.0
     
     for batch in batches:
         if total_issued >= required_qty:
             break
         
-        # Calculate quantity to issue from this batch - ensure all are float
+        # Calculate quantity to issue from this batch
         batch_available = float(batch['available_qty'])
         required_remaining = float(required_qty) - float(total_issued)
         issue_qty = min(batch_available, required_remaining)
@@ -608,10 +686,11 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
             is_alternative, original_material_id
         )
         
-        # Update inventory
+        # Update inventory with proper operation tracking
         _update_inventory_for_issue(
             conn, batch['inventory_history_id'], material['material_id'],
-            warehouse_id, issue_qty, group_id, user_id
+            warehouse_id, issue_qty, group_id, keycloak_id, 
+            entity_id, issue_id
         )
         
         issued_details.append({
@@ -661,7 +740,7 @@ def _insert_issue_detail(conn, issue_id: int, order_material_id: int,
     Returns:
         Inserted detail ID
     """
-    # First check if columns exist
+    # First check if alternative tracking columns exist
     check_columns_query = text("""
         SELECT COUNT(*) as col_count
         FROM INFORMATION_SCHEMA.COLUMNS 
@@ -732,8 +811,13 @@ def _insert_issue_detail(conn, issue_id: int, order_material_id: int,
 
 def _update_inventory_for_issue(conn, inv_history_id: int, material_id: int,
                                warehouse_id: int, quantity: float,
-                               group_id: str, user_id: int):
-    """Update inventory for material issue"""
+                               group_id: str, keycloak_id: str,
+                               entity_id: int, issue_id: int):
+    """
+    Update inventory for material issue with proper tracking
+    
+    CRITICAL: Uses keycloak_id for created_by (VARCHAR), not user_id (INT)
+    """
     # Update remain in original record
     update_query = text("""
         UPDATE inventory_histories
@@ -749,24 +833,63 @@ def _update_inventory_for_issue(conn, inv_history_id: int, material_id: int,
     if result.rowcount == 0:
         raise ValueError("Inventory update failed - concurrent modification")
     
-    # Create OUT record
-    out_query = text("""
-        INSERT INTO inventory_histories (
-            product_id, warehouse_id, type, quantity, remain,
-            group_id, created_by, created_date
-        ) VALUES (
-            :material_id, :warehouse_id, 'OUT', :quantity, 0,
-            :group_id, :user_id, NOW()
-        )
+    # Create OUT record with proper operation tracking
+    # Check if new columns exist
+    check_columns_query = text("""
+        SELECT COUNT(*) as col_count
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE table_schema = DATABASE() 
+            AND table_name = 'inventory_histories' 
+            AND column_name IN ('operation', 'reference_type', 'reference_id', 'entity_id')
     """)
     
-    conn.execute(out_query, {
-        'material_id': material_id,
-        'warehouse_id': warehouse_id,
-        'quantity': quantity,
-        'group_id': group_id,
-        'user_id': user_id
-    })
+    result = conn.execute(check_columns_query)
+    col_count = result.fetchone()[0]
+    
+    if col_count == 4:
+        # New columns exist - use enhanced tracking
+        out_query = text("""
+            INSERT INTO inventory_histories (
+                product_id, warehouse_id, type, operation,
+                quantity, remain, group_id, 
+                reference_type, reference_id, entity_id,
+                created_by, created_date
+            ) VALUES (
+                :material_id, :warehouse_id, 'OUT', 'stockOutProduction',
+                :quantity, 0, :group_id,
+                'MATERIAL_ISSUE', :issue_id, :entity_id,
+                :created_by, NOW()
+            )
+        """)
+        
+        conn.execute(out_query, {
+            'material_id': material_id,
+            'warehouse_id': warehouse_id,
+            'quantity': quantity,
+            'group_id': group_id,
+            'issue_id': issue_id,
+            'entity_id': entity_id,
+            'created_by': keycloak_id  # CRITICAL: Use keycloak_id, not user_id
+        })
+    else:
+        # Fallback to basic tracking
+        out_query = text("""
+            INSERT INTO inventory_histories (
+                product_id, warehouse_id, type, quantity, remain,
+                group_id, created_by, created_date
+            ) VALUES (
+                :material_id, :warehouse_id, 'OUT', :quantity, 0,
+                :group_id, :created_by, NOW()
+            )
+        """)
+        
+        conn.execute(out_query, {
+            'material_id': material_id,
+            'warehouse_id': warehouse_id,
+            'quantity': quantity,
+            'group_id': group_id,
+            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
+        })
 
 
 def _validate_return(conn, return_item: Dict):
@@ -796,68 +919,173 @@ def _validate_return(conn, return_item: Dict):
 
 
 def _process_return_item(conn, return_id: int, return_item: Dict,
-                        warehouse_id: int, group_id: str, user_id: int) -> Dict:
-    """Process single return item"""
-    # Get original issue details
+                        warehouse_id: int, group_id: str, 
+                        user_id: int, keycloak_id: str, entity_id: int) -> Dict:
+    """
+    Process single return item with proper tracking
+    
+    CRITICAL: Preserves alternative tracking from original issue
+    """
+    # Get original issue details INCLUDING alternative tracking
     query = text("""
-        SELECT material_id, batch_no, expired_date
-        FROM material_issue_details
-        WHERE id = :issue_detail_id
+        SELECT 
+            mid.material_id, 
+            mid.batch_no, 
+            mid.expired_date,
+            COALESCE(mid.is_alternative, 0) as is_alternative,
+            mid.original_material_id
+        FROM material_issue_details mid
+        WHERE mid.id = :issue_detail_id
     """)
     
     result = conn.execute(query, {'issue_detail_id': return_item['issue_detail_id']})
     row = result.fetchone()
     issue_detail = dict(zip(result.keys(), row))
     
-    # Insert return detail
-    detail_query = text("""
-        INSERT INTO material_return_details (
-            material_return_id, material_id, original_issue_detail_id,
-            batch_no, quantity, uom, condition, expired_date
-        ) VALUES (
-            :return_id, :material_id, :issue_detail_id,
-            :batch_no, :quantity, :uom, :condition, :expired_date
-        )
+    # Check if material_return_details has alternative tracking columns
+    check_return_columns = text("""
+        SELECT COUNT(*) as col_count
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE table_schema = DATABASE() 
+            AND table_name = 'material_return_details' 
+            AND column_name IN ('is_alternative', 'original_material_id')
     """)
     
-    conn.execute(detail_query, {
-        'return_id': return_id,
-        'material_id': issue_detail['material_id'],
-        'issue_detail_id': return_item['issue_detail_id'],
-        'batch_no': issue_detail['batch_no'],
-        'quantity': return_item['quantity'],
-        'uom': return_item['uom'],
-        'condition': return_item.get('condition', 'GOOD'),
-        'expired_date': issue_detail['expired_date']
-    })
+    result = conn.execute(check_return_columns)
+    has_alt_columns = result.fetchone()[0] == 2
+    
+    if has_alt_columns:
+        # Insert return detail WITH alternative tracking
+        detail_query = text("""
+            INSERT INTO material_return_details (
+                material_return_id, material_id, original_issue_detail_id,
+                batch_no, quantity, uom, condition, expired_date,
+                is_alternative, original_material_id
+            ) VALUES (
+                :return_id, :material_id, :issue_detail_id,
+                :batch_no, :quantity, :uom, :condition, :expired_date,
+                :is_alternative, :original_material_id
+            )
+        """)
+        
+        conn.execute(detail_query, {
+            'return_id': return_id,
+            'material_id': issue_detail['material_id'],
+            'issue_detail_id': return_item['issue_detail_id'],
+            'batch_no': issue_detail['batch_no'],
+            'quantity': return_item['quantity'],
+            'uom': return_item['uom'],
+            'condition': return_item.get('condition', 'GOOD'),
+            'expired_date': issue_detail['expired_date'],
+            'is_alternative': issue_detail['is_alternative'],
+            'original_material_id': issue_detail['original_material_id']
+        })
+    else:
+        # Fallback to basic return detail
+        detail_query = text("""
+            INSERT INTO material_return_details (
+                material_return_id, material_id, original_issue_detail_id,
+                batch_no, quantity, uom, condition, expired_date
+            ) VALUES (
+                :return_id, :material_id, :issue_detail_id,
+                :batch_no, :quantity, :uom, :condition, :expired_date
+            )
+        """)
+        
+        conn.execute(detail_query, {
+            'return_id': return_id,
+            'material_id': issue_detail['material_id'],
+            'issue_detail_id': return_item['issue_detail_id'],
+            'batch_no': issue_detail['batch_no'],
+            'quantity': return_item['quantity'],
+            'uom': return_item['uom'],
+            'condition': return_item.get('condition', 'GOOD'),
+            'expired_date': issue_detail['expired_date']
+        })
     
     # Add back to inventory if condition is GOOD
     if return_item.get('condition', 'GOOD') == 'GOOD':
+        _update_inventory_for_return(
+            conn, issue_detail, return_item['quantity'],
+            warehouse_id, group_id, keycloak_id, entity_id, return_id
+        )
+    
+    return {
+        'material_id': issue_detail['material_id'],
+        'quantity': return_item['quantity'],
+        'condition': return_item.get('condition', 'GOOD'),
+        'is_alternative': issue_detail['is_alternative']
+    }
+
+
+def _update_inventory_for_return(conn, issue_detail: Dict, quantity: float,
+                                warehouse_id: int, group_id: str, 
+                                keycloak_id: str, entity_id: int, return_id: int):
+    """
+    Update inventory for material return with proper tracking
+    
+    CRITICAL: Uses keycloak_id for created_by (VARCHAR), not user_id (INT)
+    """
+    # Check if new columns exist
+    check_columns_query = text("""
+        SELECT COUNT(*) as col_count
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE table_schema = DATABASE() 
+            AND table_name = 'inventory_histories' 
+            AND column_name IN ('operation', 'reference_type', 'reference_id', 'entity_id')
+    """)
+    
+    result = conn.execute(check_columns_query)
+    col_count = result.fetchone()[0]
+    
+    if col_count == 4:
+        # New columns exist - use enhanced tracking
         inv_query = text("""
             INSERT INTO inventory_histories (
-                product_id, warehouse_id, type, quantity, remain,
-                batch_no, expired_date, group_id, created_by, created_date
+                product_id, warehouse_id, type, operation,
+                quantity, remain, batch_no, expired_date, 
+                group_id, reference_type, reference_id, entity_id,
+                created_by, created_date
             ) VALUES (
-                :material_id, :warehouse_id, 'IN', :quantity, :quantity,
-                :batch_no, :expired_date, :group_id, :user_id, NOW()
+                :material_id, :warehouse_id, 'IN', 'stockInProductionReturn',
+                :quantity, :quantity, :batch_no, :expired_date,
+                :group_id, 'MATERIAL_RETURN', :return_id, :entity_id,
+                :created_by, NOW()
             )
         """)
         
         conn.execute(inv_query, {
             'material_id': issue_detail['material_id'],
             'warehouse_id': warehouse_id,
-            'quantity': return_item['quantity'],
+            'quantity': quantity,
             'batch_no': issue_detail['batch_no'],
             'expired_date': issue_detail['expired_date'],
             'group_id': group_id,
-            'user_id': user_id
+            'return_id': return_id,
+            'entity_id': entity_id,
+            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
         })
-    
-    return {
-        'material_id': issue_detail['material_id'],
-        'quantity': return_item['quantity'],
-        'condition': return_item.get('condition', 'GOOD')
-    }
+    else:
+        # Fallback to basic tracking
+        inv_query = text("""
+            INSERT INTO inventory_histories (
+                product_id, warehouse_id, type, quantity, remain,
+                batch_no, expired_date, group_id, created_by, created_date
+            ) VALUES (
+                :material_id, :warehouse_id, 'IN', :quantity, :quantity,
+                :batch_no, :expired_date, :group_id, :created_by, NOW()
+            )
+        """)
+        
+        conn.execute(inv_query, {
+            'material_id': issue_detail['material_id'],
+            'warehouse_id': warehouse_id,
+            'quantity': quantity,
+            'batch_no': issue_detail['batch_no'],
+            'expired_date': issue_detail['expired_date'],
+            'group_id': group_id,
+            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
+        })
 
 
 def _update_order_materials_for_return(conn, return_details: List[Dict]):
@@ -889,27 +1117,73 @@ def _update_order_materials_for_return(conn, return_details: List[Dict]):
 def _add_production_to_inventory(conn, order: Dict, quantity: float,
                                 batch_no: str, warehouse_id: int,
                                 expiry_date: Optional[date],
-                                group_id: str, user_id: int):
-    """Add production output to inventory"""
-    query = text("""
-        INSERT INTO inventory_histories (
-            product_id, warehouse_id, type, quantity, remain,
-            batch_no, expired_date, group_id, created_by, created_date
-        ) VALUES (
-            :product_id, :warehouse_id, 'IN', :quantity, :quantity,
-            :batch_no, :expired_date, :group_id, :user_id, NOW()
-        )
+                                group_id: str, keycloak_id: str, 
+                                entity_id: int, receipt_id: int):
+    """
+    Add production output to inventory with proper tracking
+    
+    CRITICAL: Uses keycloak_id for created_by (VARCHAR), not user_id (INT)
+    """
+    # Check if new columns exist
+    check_columns_query = text("""
+        SELECT COUNT(*) as col_count
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE table_schema = DATABASE() 
+            AND table_name = 'inventory_histories' 
+            AND column_name IN ('operation', 'reference_type', 'reference_id', 'entity_id')
     """)
     
-    conn.execute(query, {
-        'product_id': order['product_id'],
-        'warehouse_id': warehouse_id,
-        'quantity': quantity,
-        'batch_no': batch_no,
-        'expired_date': expiry_date,
-        'group_id': group_id,
-        'user_id': user_id
-    })
+    result = conn.execute(check_columns_query)
+    col_count = result.fetchone()[0]
+    
+    if col_count == 4:
+        # New columns exist - use enhanced tracking
+        query = text("""
+            INSERT INTO inventory_histories (
+                product_id, warehouse_id, type, operation,
+                quantity, remain, batch_no, expired_date,
+                group_id, reference_type, reference_id, entity_id,
+                created_by, created_date
+            ) VALUES (
+                :product_id, :warehouse_id, 'IN', 'stockInProduction',
+                :quantity, :quantity, :batch_no, :expired_date,
+                :group_id, 'PRODUCTION_RECEIPT', :receipt_id, :entity_id,
+                :created_by, NOW()
+            )
+        """)
+        
+        conn.execute(query, {
+            'product_id': order['product_id'],
+            'warehouse_id': warehouse_id,
+            'quantity': quantity,
+            'batch_no': batch_no,
+            'expired_date': expiry_date,
+            'group_id': group_id,
+            'receipt_id': receipt_id,
+            'entity_id': entity_id,
+            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
+        })
+    else:
+        # Fallback to basic tracking
+        query = text("""
+            INSERT INTO inventory_histories (
+                product_id, warehouse_id, type, quantity, remain,
+                batch_no, expired_date, group_id, created_by, created_date
+            ) VALUES (
+                :product_id, :warehouse_id, 'IN', :quantity, :quantity,
+                :batch_no, :expired_date, :group_id, :created_by, NOW()
+            )
+        """)
+        
+        conn.execute(query, {
+            'product_id': order['product_id'],
+            'warehouse_id': warehouse_id,
+            'quantity': quantity,
+            'batch_no': batch_no,
+            'expired_date': expiry_date,
+            'group_id': group_id,
+            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
+        })
 
 
 def _generate_issue_number(conn) -> str:
