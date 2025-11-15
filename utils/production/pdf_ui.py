@@ -1,24 +1,13 @@
 # utils/production/pdf_ui.py
 """
-PDF Export UI Components for Production Module - REFACTORED v2.3.1 FINAL
-FIXED: Dialog persistence + Cancel/Skip button close behavior
+PDF Export UI Components for Production Module - REFACTORED v2.4
+SIMPLIFIED: Removed Document Type option, streamlined UI
 
-CHANGES v2.3.1:
-- ✅ CRITICAL FIX: Cancel and Skip buttons now properly close dialogs
-- ✅ Added st.rerun() to all close actions (cancel/skip/done)
-- ✅ Clear session state when canceling Quick PDF generation
-- ✅ All v2.3 fixes maintained
-
-CHANGES v2.3:
-- ✅ CRITICAL FIX: QuickPDF dialog stays open after generation (removed st.rerun)
-- ✅ Show success message and download button inline (no dialog close)
-- ✅ Converted from form-based to button-based for better state control
-- ✅ All v2.2 fixes maintained (schema compatibility, regenerate option)
-
-Previous changes:
-v2.2: Dialog stays open, better state management, schema compatibility
-v2.1: Download button fixes
-v2.0: Initial @st.dialog implementation
+CHANGES v2.4:
+- ✅ REMOVED: Document Type selector (không cần thiết)
+- ✅ REMOVED: Add custom notes option (giữ giao diện đơn giản)
+- ✅ SIMPLIFIED: Chỉ giữ Language và Include signatures
+- ✅ Maintained all v2.3.1 fixes (dialog persistence, button behavior)
 """
 
 import streamlit as st
@@ -40,7 +29,6 @@ class PDFExportDialog:
     def show_pdf_export_dialog(issue_result: Dict[str, Any]):
         """
         Show PDF export dialog after successful material issue
-        FIXED v2.2: Dialog stays open throughout the process
         
         Args:
             issue_result: Result from issue_materials function containing:
@@ -80,7 +68,7 @@ class PDFExportDialog:
     
     @staticmethod
     def _show_generation_form(issue_result: Dict[str, Any], pdf_key: str):
-        """Show PDF generation form - FIXED v2.2"""
+        """Show simplified PDF generation form"""
         with st.form("pdf_generation_form", clear_on_submit=False):
             col1, col2 = st.columns(2)
             
@@ -92,35 +80,12 @@ class PDFExportDialog:
                     index=0,
                     key="pdf_language"
                 )
-                
+            
+            with col2:
                 include_signatures = st.checkbox(
                     "Include signature section",
                     value=True,
                     key="pdf_signatures"
-                )
-            
-            with col2:
-                doc_type = st.selectbox(
-                    "Document Type",
-                    options=['issue_slip', 'detailed_report'],
-                    format_func=lambda x: "📋 Phiếu xuất kho" if x == 'issue_slip' else "📊 Báo cáo chi tiết",
-                    index=0,
-                    key="pdf_doc_type"
-                )
-                
-                add_notes = st.checkbox(
-                    "Add custom notes",
-                    value=False,
-                    key="pdf_add_notes"
-                )
-            
-            custom_notes = ""
-            if add_notes:
-                custom_notes = st.text_area(
-                    "Notes / Ghi chú",
-                    placeholder="Enter any additional notes for the document...",
-                    max_chars=500,
-                    key="pdf_custom_notes"
                 )
             
             st.markdown("---")
@@ -141,7 +106,6 @@ class PDFExportDialog:
                     use_container_width=True
                 )
             
-            # FIXED v2.2: Generate PDF and mark as done (rerun to show download)
             if generate_btn:
                 issue_id = issue_result.get('issue_id')
                 issue_no = issue_result.get('issue_no', f'ISSUE_{issue_id}')
@@ -157,12 +121,10 @@ class PDFExportDialog:
                         return
                     
                     with st.spinner("Generating PDF... Please wait..."):
-                        # Generate PDF
+                        # Generate PDF with simplified options
                         pdf_options = {
                             'language': language,
-                            'doc_type': doc_type,
                             'include_signatures': include_signatures,
-                            'notes': custom_notes
                         }
                         
                         pdf_content = pdf_generator.generate_pdf_with_options(
@@ -185,7 +147,7 @@ class PDFExportDialog:
                         
                         logger.info(f"✅ PDF generated for issue {issue_no}")
                         
-                        # CRITICAL: Rerun to show download section
+                        # Rerun to show download section
                         st.rerun()
                         
                 except Exception as e:
@@ -198,39 +160,37 @@ class PDFExportDialog:
     
     @staticmethod
     def _show_download_section(issue_result: Dict[str, Any], pdf_key: str):
-        """Show download section after PDF is generated - FIXED v2.2"""
+        """Show download section after PDF generation"""
         st.success("✅ PDF Generated Successfully!")
         
         pdf_content = st.session_state.get(f'{pdf_key}_content')
         filename = st.session_state.get(f'{pdf_key}_filename')
+        issue_id = issue_result.get('issue_id')
         
         if pdf_content and filename:
             col1, col2 = st.columns([3, 1])
             
             with col1:
                 st.download_button(
-                    label="💾 Download PDF Now",
+                    label="💾 Download PDF",
                     data=pdf_content,
                     file_name=filename,
                     mime="application/pdf",
                     use_container_width=True,
                     type="primary",
-                    key=f"download_main_{issue_result['issue_id']}"
+                    key=f"download_{issue_id}_final"
                 )
             
             with col2:
-                if st.button("✅ Done", use_container_width=True, key="done_main"):
-                    # Clear PDF state
+                if st.button("✅ Done", use_container_width=True, key=f"done_{issue_id}"):
+                    # Clear state and close
                     st.session_state.pop(pdf_key, None)
                     st.session_state.pop(f'{pdf_key}_content', None)
                     st.session_state.pop(f'{pdf_key}_filename', None)
                     st.rerun()
             
-            st.info("💡 **Tip:** You can also generate PDFs later from the Issue History tab")
-            
-            # Option to generate another with different settings
             st.markdown("---")
-            if st.button("🔄 Generate with Different Settings", key="regenerate_main"):
+            if st.button("🔄 Regenerate with Different Settings", key=f"regenerate_{issue_id}"):
                 st.session_state.pop(pdf_key, None)
                 st.session_state.pop(f'{pdf_key}_content', None)
                 st.session_state.pop(f'{pdf_key}_filename', None)
@@ -238,40 +198,30 @@ class PDFExportDialog:
 
 
 class QuickPDFButton:
-    """Quick PDF generation button for existing issues"""
-    
-    @staticmethod
-    def validate_issue_data(issue_id: int) -> bool:
-        """Validate that issue has required data before attempting PDF generation"""
-        try:
-            return pdf_generator.validate_issue_data(issue_id)
-        except Exception as e:
-            logger.error(f"Failed to validate issue {issue_id}: {e}")
-            return False
+    """Quick PDF generation button for Issue History list"""
     
     @staticmethod
     @st.dialog("📄 Generate PDF", width="large")
     def show_quick_pdf_dialog(issue_id: int, issue_no: str):
         """
-        Show quick PDF generation dialog with options
-        FIXED v2.3: Always show fresh form, success inline
+        Show quick PDF generation dialog from Issue History
+        
+        Args:
+            issue_id: Material issue ID
+            issue_no: Material issue number
         """
         st.markdown(f"### Generate PDF for Issue: **{issue_no}**")
         
-        # Validate first
-        if not QuickPDFButton.validate_issue_data(issue_id):
-            st.error("⚠️ Issue data incomplete or missing")
-            st.info("Please verify all material details are present")
-            return
-        
-        # Always show generation form (clean state each time)
         quick_key = f"quick_pdf_{issue_id}"
-        QuickPDFButton._show_quick_generation_form(issue_id, issue_no, quick_key)
+        
+        if not st.session_state.get(quick_key):
+            QuickPDFButton._show_quick_generation_form(issue_id, issue_no, quick_key)
+        else:
+            QuickPDFButton._show_quick_download_section(issue_id, issue_no, quick_key)
     
     @staticmethod
     def _show_quick_generation_form(issue_id: int, issue_no: str, quick_key: str):
-        """Show quick PDF generation form - FIXED v2.3: No rerun, inline success"""
-        # Language and doc type selection (not in form to preserve state)
+        """Show quick generation form"""
         col1, col2 = st.columns(2)
         
         with col1:
@@ -279,17 +229,14 @@ class QuickPDFButton:
                 "Language / Ngôn ngữ",
                 options=['vi', 'en'],
                 format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
-                index=0,
                 key=f"quick_lang_{issue_id}"
             )
         
         with col2:
-            doc_type = st.selectbox(
-                "Document Type",
-                options=['issue_slip', 'detailed_report'],
-                format_func=lambda x: "📋 Phiếu xuất kho" if x == 'issue_slip' else "📊 Báo cáo chi tiết",
-                index=0,
-                key=f"quick_doctype_{issue_id}"
+            include_signatures = st.checkbox(
+                "Include signatures",
+                value=True,
+                key=f"quick_sig_{issue_id}"
             )
         
         st.markdown("---")
@@ -301,7 +248,7 @@ class QuickPDFButton:
                 "🖨️ Generate PDF",
                 type="primary",
                 use_container_width=True,
-                key=f"quick_generate_{issue_id}"
+                key=f"quick_gen_{issue_id}"
             )
         
         with col2:
@@ -311,11 +258,22 @@ class QuickPDFButton:
                 key=f"quick_cancel_{issue_id}"
             )
         
-        # Handle generate click
         if generate:
             try:
+                if not pdf_generator.validate_issue_data(issue_id):
+                    st.error("❌ Issue data not found")
+                    return
+                
                 with st.spinner("Generating PDF..."):
-                    pdf_content = pdf_generator.generate_pdf(issue_id, language)
+                    pdf_options = {
+                        'language': language,
+                        'include_signatures': include_signatures,
+                    }
+                    
+                    pdf_content = pdf_generator.generate_pdf_with_options(
+                        issue_id,
+                        pdf_options
+                    )
                     
                     if not pdf_content:
                         st.error("❌ PDF generation failed - empty content")
@@ -331,7 +289,7 @@ class QuickPDFButton:
                     
                     logger.info(f"Quick PDF generated for issue {issue_no}")
                     
-                    # SUCCESS - Show download immediately (NO RERUN!)
+                    # Show download immediately
                     st.success("✅ PDF Generated Successfully!")
                     
                     st.download_button(
@@ -355,11 +313,11 @@ class QuickPDFButton:
             st.session_state.pop(quick_key, None)
             st.session_state.pop(f'{quick_key}_content', None)
             st.session_state.pop(f'{quick_key}_filename', None)
-            st.rerun()  # Close dialog by rerunning
+            st.rerun()
     
     @staticmethod
     def _show_quick_download_section(issue_id: int, issue_no: str, quick_key: str):
-        """Show quick download section - FIXED v2.2"""
+        """Show quick download section"""
         st.success("✅ PDF Generated Successfully!")
         
         pdf_content = st.session_state.get(f'{quick_key}_content')
@@ -398,7 +356,6 @@ class QuickPDFButton:
     def render(issue_id: int, issue_no: str):
         """
         Render a quick PDF button that opens dialog
-        FIXED v2.2: Dialog stays open throughout process
         
         Args:
             issue_id: Material issue ID
@@ -464,7 +421,7 @@ class PDFBulkExport:
                 PDFBulkExport._process_bulk_export(issue_ids, language)
             
             if cancel:
-                st.rerun()  # Close dialog
+                st.rerun()
     
     @staticmethod
     def _process_bulk_export(issue_ids: list, language: str):
