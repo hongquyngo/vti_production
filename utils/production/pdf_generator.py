@@ -444,9 +444,9 @@ class MaterialIssuePDFGenerator:
         story.append(header_table)
         story.append(Spacer(1, 10*mm))
         
-        # Title
+        # Title - FIXED: Vietnamese vs English
         if language == 'vi':
-            title = "MATERIAL ISSUE SLIP FOR PRODUCTION"
+            title = "PHIẾU XUẤT KHO VẬT TƯ SẢN XUẤT"
         else:
             title = "MATERIAL ISSUE SLIP FOR PRODUCTION"
         
@@ -460,15 +460,16 @@ class MaterialIssuePDFGenerator:
         # Use DejaVu fonts
         normal_font = 'DejaVuSans' if self.font_available else 'Helvetica'
         
+        # FIXED: Vietnamese vs English labels
         if language == 'vi':
             labels = {
-                'issue_no': 'Issue No:',
-                'issue_date': 'Issue Date:',
-                'order': 'Production Order:',
-                'product': 'Product:',
-                'planned_qty': 'Planned Qty:',
-                'warehouse': 'Warehouse:',
-                'issued_by': 'Issued By:'
+                'issue_no': 'Số phiếu xuất:',
+                'issue_date': 'Ngày xuất:',
+                'order': 'Lệnh sản xuất:',
+                'product': 'Sản phẩm:',
+                'planned_qty': 'Số lượng kế hoạch:',
+                'warehouse': 'Kho:',
+                'issued_by': 'Người xuất:'
             }
         else:
             labels = {
@@ -526,9 +527,9 @@ class MaterialIssuePDFGenerator:
         # Use DejaVu fonts
         header_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
         
-        # Table headers
+        # FIXED: Vietnamese vs English table headers
         if language == 'vi':
-            headers = ['No.', 'Code', 'Material Name', 'Batch/Lot', 'Qty', 'UOM', 'Expiry', 'Note']
+            headers = ['STT', 'Mã VT', 'Tên vật tư', 'Batch/Lot', 'SL', 'ĐVT', 'HSD', 'Ghi chú']
         else:
             headers = ['No.', 'Code', 'Material Name', 'Batch/Lot', 'Qty', 'UOM', 'Expiry', 'Note']
         
@@ -666,6 +667,8 @@ class MaterialIssuePDFGenerator:
             PDF content as bytes or None if failed
         """
         try:
+            logger.info(f"🔧 Generating PDF for issue {issue_id} with language: {language}")
+            
             # Validate data first
             if not self.validate_issue_data(issue_id):
                 logger.error(f"Invalid issue data for ID {issue_id}")
@@ -706,6 +709,7 @@ class MaterialIssuePDFGenerator:
                 story.append(Spacer(1, 10*mm))
             
             # Signature section
+            logger.info(f"🔧 Creating signature section with language: {language}")
             self.create_signature_section(story, styles, language)
             
             # Footer
@@ -743,6 +747,8 @@ class MaterialIssuePDFGenerator:
         """
         language = options.get('language', 'vi')
         include_signatures = options.get('include_signatures', True)
+        
+        logger.info(f"🔧 generate_pdf_with_options called with language: {language}, include_signatures: {include_signatures}")
         
         # Generate standard PDF (signature control can be added later if needed)
         return self.generate_pdf(issue_id, language)

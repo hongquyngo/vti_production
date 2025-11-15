@@ -136,9 +136,10 @@ class PDFExportDialog:
                             st.error("❌ PDF generation failed - empty content returned")
                             return
                         
-                        # Generate filename
+                        # Generate filename with language indicator
                         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        filename = f"MaterialIssue_{issue_no}_{timestamp}.pdf"
+                        lang_suffix = 'EN' if language == 'en' else 'VI'
+                        filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{timestamp}.pdf"
                         
                         # Store in session state with unique key
                         st.session_state[pdf_key] = True
@@ -280,7 +281,8 @@ class QuickPDFButton:
                         return
                     
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    filename = f"MaterialIssue_{issue_no}_{timestamp}.pdf"
+                    lang_suffix = 'EN' if language == 'en' else 'VI'
+                    filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{timestamp}.pdf"
                     
                     # Store in session state
                     st.session_state[quick_key] = True
