@@ -196,39 +196,6 @@ def get_user_audit_info() -> Dict[str, any]:
         'keycloak_id': keycloak_id
     }
 
-def get_entity_id_from_order(order: Dict) -> int:
-    """
-    Extract entity_id from order details
-    
-    Args:
-        order: Order dictionary with order details
-        
-    Returns:
-        Entity ID (defaults to 1 if not found)
-    """
-    entity_id = order.get('entity_id', 1)
-    
-    if not entity_id:
-        logger.warning(f"⚠️ entity_id not found in order {order.get('order_no', 'Unknown')}, using default 1")
-        entity_id = 1
-    
-    return entity_id
-
-    defaults = {
-        'current_view': 'list',
-        'selected_order': None,
-        'page_number': 1,
-    }
-    
-    for key, value in defaults.items():
-        st.session_state.setdefault(key, value)
-
-def set_view(view: str, order_id: Optional[int] = None):
-    """Set current view and optionally selected order"""
-    st.session_state.current_view = view
-    if order_id is not None:
-        st.session_state.selected_order = order_id
-
 # ==================== Header & Navigation ====================
 
 def render_header():

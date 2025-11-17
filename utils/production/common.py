@@ -178,50 +178,7 @@ class UIHelpers:
             time.sleep(SystemConstants.SUCCESS_MESSAGE_DELAY)
             success_msg.empty()
     
-    @staticmethod
-    def inline_confirmation(prompt: str, key: str, 
-                           details: Optional[List[str]] = None) -> Optional[bool]:
-        """
-        Show inline confirmation with optional details
-        Returns: True if confirmed, False if cancelled, None if waiting
-        
-        REFACTORED v2.0: Better state management without page refresh
-        """
-        # Initialize state
-        confirm_key = f"{key}_confirm_state"
-        if confirm_key not in st.session_state:
-            st.session_state[confirm_key] = "waiting"
-        
-        # Check if already decided
-        if st.session_state[confirm_key] == "confirmed":
-            st.session_state[confirm_key] = "waiting"  # Reset for next time
-            return True
-        elif st.session_state[confirm_key] == "cancelled":
-            st.session_state[confirm_key] = "waiting"  # Reset for next time
-            return False
-        
-        # Show confirmation UI
-        st.warning(f"⚠️ {prompt}")
-        
-        # Show additional details if provided
-        if details:
-            for detail in details:
-                st.info(detail)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("✅ Confirm", key=f"{key}_yes", type="primary", use_container_width=True):
-                st.session_state[confirm_key] = "confirmed"
-                st.rerun()
-        
-        with col2:
-            if st.button("❌ Cancel", key=f"{key}_no", use_container_width=True):
-                st.session_state[confirm_key] = "cancelled"
-                st.rerun()
-        
-        return None  # Still waiting for decision
-    
+
     @staticmethod
     def show_alternative_materials(materials_df: pd.DataFrame):
         """
