@@ -1,18 +1,16 @@
 # utils/production/materials.py
 """
-Material Issue, Return, and Production Completion Logic - REFACTORED v6.0
+Material Issue, Return, and Production Completion Logic - REFACTORED v6.1 BACKWARD COMPATIBLE
 FEFO-based material issuing with automatic alternative substitution and tracking
 
-MAJOR CHANGES v6.0:
-✅ FIXED: inventory_histories.operation field (stockOutProduction, stockInProductionReturn, stockInProduction)
-✅ FIXED: inventory_histories.created_by uses keycloak_id (VARCHAR) instead of user_id (INT)
-✅ ADDED: reference_type, reference_id, entity_id tracking in inventory_histories
-✅ FIXED: Material returns preserve alternative tracking (is_alternative, original_material_id)
-✅ ENHANCED: Full audit trail for all inventory movements
-
-Previous versions:
-v5.0: Alternative material tracking and substitution
-v4.0: FEFO with batch tracking
+MAJOR CHANGES v6.1 (Backward Compatible Fix):
+✅ FIXED: Removed entity_id from material_issues INSERT (column doesn't exist in DB)
+✅ FIXED: Removed entity_id and group_id from material_returns INSERT (columns don't exist)
+✅ FIXED: Removed entity_id from production_receipts INSERT (column doesn't exist)
+✅ FIXED: Updated function signatures to remove entity_id parameter
+✅ MAINTAINED: All inventory_histories logic with fallback (checks if columns exist)
+✅ MAINTAINED: Full alternative material tracking and substitution logic
+✅ MAINTAINED: FEFO logic and batch tracking
 """
 
 import logging
@@ -27,8 +25,7 @@ from ..db import get_db_engine
 logger = logging.getLogger(__name__)
 
 
-def issue_materials(order_id: int, user_id: int, keycloak_id: str, 
-                   entity_id: int) -> Dict[str, Any]:
+def issue_materials(order_id: int, user_id: int, keycloak_id: str) -> Dict[str, Any]:
     """
     Issue materials for production using FEFO (First Expiry, First Out)
     with automatic alternative material substitution and tracking
@@ -37,7 +34,6 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
         order_id: Manufacturing order ID
         user_id: User ID for manufacturing tables (INT)
         keycloak_id: Keycloak ID for inventory tables (VARCHAR)
-        entity_id: Company/Entity ID
     
     Raises:
         ValueError: If order not found, invalid status, or insufficient stock
@@ -58,16 +54,16 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
             issue_no = _generate_issue_number(conn)
             group_id = str(uuid.uuid4())
             
-            # Create issue header
+            # Create issue header - REMOVED entity_id (doesn't exist in DB)
             issue_query = text("""
                 INSERT INTO material_issues (
                     issue_no, manufacturing_order_id, warehouse_id,
                     issue_date, status, issued_by, created_by, created_date, 
-                    group_id, entity_id
+                    group_id
                 ) VALUES (
                     :issue_no, :order_id, :warehouse_id,
                     NOW(), 'CONFIRMED', :user_id, :user_id, NOW(), 
-                    :group_id, :entity_id
+                    :group_id
                 )
             """)
             
@@ -76,8 +72,7 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
                 'order_id': order_id,
                 'warehouse_id': order['warehouse_id'],
                 'user_id': user_id,
-                'group_id': group_id,
-                'entity_id': entity_id
+                'group_id': group_id
             })
             
             issue_id = issue_result.lastrowid
@@ -96,7 +91,8 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
                         issued = _issue_material_with_alternatives(
                             conn, issue_id, order_id, mat,
                             remaining, order['warehouse_id'], 
-                            group_id, user_id, keycloak_id, entity_id
+                            group_id, user_id, keycloak_id, 
+                            order.get('entity_id', 1)  # Get from order, fallback to 1
                         )
                         issue_details.extend(issued['details'])
                         if issued['substitutions']:
@@ -135,8 +131,7 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
 
 
 def return_materials(order_id: int, returns: List[Dict],
-                    reason: str, user_id: int, keycloak_id: str,
-                    entity_id: int) -> Dict[str, Any]:
+                    reason: str, user_id: int, keycloak_id: str) -> Dict[str, Any]:
     """
     Return unused materials with validation and proper tracking
     
@@ -146,7 +141,6 @@ def return_materials(order_id: int, returns: List[Dict],
         reason: Return reason code
         user_id: User ID for manufacturing tables (INT)
         keycloak_id: Keycloak ID for inventory tables (VARCHAR)
-        entity_id: Company/Entity ID
         
     Returns:
         Dictionary with return_no and details
@@ -180,19 +174,19 @@ def return_materials(order_id: int, returns: List[Dict],
             for ret in returns:
                 _validate_return(conn, ret)
             
-            # Create return header
+            # Create return header - REMOVED entity_id and group_id (don't exist in DB)
             return_no = _generate_return_number(conn)
-            group_id = str(uuid.uuid4())
+            group_id = str(uuid.uuid4())  # Still use for inventory tracking
             
             return_query = text("""
                 INSERT INTO material_returns (
                     return_no, material_issue_id, manufacturing_order_id,
                     return_date, warehouse_id, status, returned_by,
-                    reason, created_by, created_date, group_id, entity_id
+                    reason, created_by, created_date
                 ) VALUES (
                     :return_no, :issue_id, :order_id,
                     NOW(), :warehouse_id, 'CONFIRMED', :user_id,
-                    :reason, :user_id, NOW(), :group_id, :entity_id
+                    :reason, :user_id, NOW()
                 )
             """)
             
@@ -202,9 +196,7 @@ def return_materials(order_id: int, returns: List[Dict],
                 'order_id': order_id,
                 'warehouse_id': order['warehouse_id'],
                 'user_id': user_id,
-                'reason': reason,
-                'group_id': group_id,
-                'entity_id': entity_id
+                'reason': reason
             })
             
             return_id = return_result.lastrowid
@@ -215,7 +207,8 @@ def return_materials(order_id: int, returns: List[Dict],
             for ret in returns:
                 detail = _process_return_item(
                     conn, return_id, ret, order['warehouse_id'], 
-                    group_id, user_id, keycloak_id, entity_id
+                    group_id, user_id, keycloak_id, 
+                    order.get('entity_id', 1)  # Get from order, fallback to 1
                 )
                 return_details.append(detail)
             
@@ -238,7 +231,6 @@ def return_materials(order_id: int, returns: List[Dict],
 def complete_production(order_id: int, produced_qty: float,
                        batch_no: str, warehouse_id: int,
                        quality_status: str, user_id: int, keycloak_id: str,
-                       entity_id: int,
                        expiry_date: Optional[date] = None,
                        notes: str = '') -> Dict[str, Any]:
     """
@@ -252,7 +244,6 @@ def complete_production(order_id: int, produced_qty: float,
         quality_status: 'PENDING', 'PASSED', 'FAILED'
         user_id: User ID for manufacturing tables (INT)
         keycloak_id: Keycloak ID for inventory tables (VARCHAR)
-        entity_id: Company/Entity ID
         expiry_date: Optional expiry date for finished goods
         notes: Production notes
         
@@ -275,18 +266,18 @@ def complete_production(order_id: int, produced_qty: float,
             receipt_no = _generate_receipt_number(conn)
             group_id = str(uuid.uuid4())
             
-            # Create production receipt
+            # Create production receipt - REMOVED entity_id (doesn't exist in DB)
             receipt_query = text("""
                 INSERT INTO production_receipts (
                     receipt_no, manufacturing_order_id, receipt_date,
                     product_id, quantity, uom, batch_no, expired_date,
                     warehouse_id, quality_status, notes, 
-                    created_by, created_date, entity_id
+                    created_by, created_date
                 ) VALUES (
                     :receipt_no, :order_id, NOW(),
                     :product_id, :quantity, :uom, :batch_no, :expired_date,
                     :warehouse_id, :quality_status, :notes, 
-                    :user_id, NOW(), :entity_id
+                    :user_id, NOW()
                 )
             """)
             
@@ -301,8 +292,7 @@ def complete_production(order_id: int, produced_qty: float,
                 'warehouse_id': warehouse_id,
                 'quality_status': quality_status,
                 'notes': notes,
-                'user_id': user_id,
-                'entity_id': entity_id
+                'user_id': user_id
             })
             
             receipt_id = receipt_result.lastrowid
@@ -312,7 +302,9 @@ def complete_production(order_id: int, produced_qty: float,
                 _add_production_to_inventory(
                     conn, order, produced_qty, batch_no,
                     warehouse_id, expiry_date, 
-                    group_id, keycloak_id, entity_id, receipt_id
+                    group_id, keycloak_id, 
+                    order.get('entity_id', 1),  # Get from order, fallback to 1
+                    receipt_id
                 )
             
             # Update order produced quantity
@@ -629,7 +621,7 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
         group_id: Transaction group ID
         user_id: User ID for manufacturing tables (INT)
         keycloak_id: Keycloak ID for inventory tables (VARCHAR)
-        entity_id: Company/Entity ID
+        entity_id: Company/Entity ID (for inventory tracking if columns exist)
         is_alternative: Whether this is an alternative material
         original_material_id: ID of original material if this is alternative
     
@@ -817,6 +809,7 @@ def _update_inventory_for_issue(conn, inv_history_id: int, material_id: int,
     Update inventory for material issue with proper tracking
     
     CRITICAL: Uses keycloak_id for created_by (VARCHAR), not user_id (INT)
+    Checks if operation/reference columns exist before using them
     """
     # Update remain in original record
     update_query = text("""

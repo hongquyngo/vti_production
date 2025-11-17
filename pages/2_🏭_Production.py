@@ -1025,14 +1025,12 @@ def render_material_issue():
                             try:
                                 # ==================== v6.0 FIX: Get proper audit info ====================
                                 audit_info = get_user_audit_info()
-                                entity_id = get_entity_id_from_order(order)
                                 
                                 with st.spinner("Issuing materials..."):
                                     result = issue_materials(
                                         order_id=order_id,
                                         user_id=audit_info['user_id'],        # INT for manufacturing tables
                                         keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
-                                        entity_id=entity_id                    # Company ID
                                     )
                                 
                                 # Clear confirm state
@@ -1168,7 +1166,6 @@ def render_material_return():
                 try:
                     # ==================== v6.0 FIX: Get proper audit info ====================
                     audit_info = get_user_audit_info()
-                    entity_id = get_entity_id_from_order(order)
                     
                     result = return_materials(
                         order_id=order_id,
@@ -1176,7 +1173,6 @@ def render_material_return():
                         reason=reason,
                         user_id=audit_info['user_id'],        # INT for manufacturing tables
                         keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
-                        entity_id=entity_id                    # Company ID
                     )
                     
                     UIHelpers.show_message(
@@ -1332,7 +1328,6 @@ def render_production_completion():
             try:
                 # ==================== v6.0 FIX: Get proper audit info ====================
                 audit_info = get_user_audit_info()
-                entity_id = get_entity_id_from_order(order)
                 
                 with st.spinner("Recording production output..."):
                     result = complete_production(
@@ -1343,7 +1338,6 @@ def render_production_completion():
                         quality_status=quality_status,
                         user_id=audit_info['user_id'],        # INT for manufacturing tables
                         keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
-                        entity_id=entity_id,                   # Company ID
                         expiry_date=expired_date,
                         notes=notes
                     )
