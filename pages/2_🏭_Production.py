@@ -166,6 +166,59 @@ def initialize_session_state():
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
+@st.dialog("✅ Confirm Production Order", width="medium")
+def show_confirm_order_dialog(order_id: int, order_no: str):
+    """
+    Dialog to confirm a DRAFT order
+    
+    Args:
+        order_id: Order ID
+        order_no: Order number for display
+    """
+    st.markdown(f"""
+    ### Confirm Order: **{order_no}**
+    
+    Thao tác này sẽ thay đổi trạng thái order từ **DRAFT** sang **CONFIRMED**.
+    
+    ⚠️ **Lưu ý:**
+    - Sau khi confirm, order không thể chuyển lại về DRAFT
+    - Materials có thể được issued sau khi confirm
+    - Kiểm tra kỹ thông tin order trước khi confirm
+    """)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("✅ Confirm Order", type="primary", use_container_width=True):
+            try:
+                # Get user info
+                user_id = st.session_state.get('user_id', 1)
+                
+                # Update order status
+                success = prod_manager.update_order_status(order_id, 'CONFIRMED', user_id)
+                
+                if success:
+                    st.success(f"✅ Order {order_no} confirmed successfully!")
+                    logger.info(f"User {user_id} confirmed order {order_id} ({order_no})")
+                    time.sleep(1.5)
+                    st.cache_resource.clear()
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to confirm order")
+                    logger.warning(f"Failed to confirm order {order_id}")
+                    
+            except ValueError as e:
+                st.error(f"❌ Validation error: {str(e)}")
+                logger.error(f"Validation error confirming order {order_id}: {e}")
+            except Exception as e:
+                st.error(f"❌ System error: {str(e)}")
+                logger.error(f"System error confirming order {order_id}: {e}", exc_info=True)
+    
+    with col2:
+        if st.button("❌ Cancel", use_container_width=True):
+            st.rerun()
+
+
 def set_view(view: str, order_id: Optional[int] = None):
     """Set current view and optionally selected order"""
     st.session_state.current_view = view
@@ -424,7 +477,7 @@ def render_order_list():
 # ==================== Order Details View ====================
 
 def render_order_details():
-    """Render detailed view of a single order"""
+    """Render detailed view of a single order - ENHANCED v6.1 with Confirm button"""
     order_id = st.session_state.get('selected_order')
     
     if not order_id:
@@ -444,8 +497,48 @@ def render_order_details():
             st.rerun()
         return
     
-    # ==================== HEADER ====================
-    st.subheader(f"📋 Order Details: {order['order_no']}")
+    # ==================== ENHANCED: HEADER WITH CONFIRM BUTTON ====================
+    col1, col2, col3 = st.columns([4, 1, 1])
+    
+    with col1:
+        st.subheader(f"📋 Order Details: {order['order_no']}")
+    
+    # NEW: Add Confirm button for DRAFT orders
+    with col2:
+        if order['status'] == 'DRAFT':
+            if st.button("✅ Confirm", type="primary", use_container_width=True,
+                        help="Confirm this order to proceed"):
+                show_confirm_order_dialog(order_id, order['order_no'])
+    
+    with col3:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.cache_resource.clear()
+            st.rerun()
+    
+    # ==================== NEW: STATUS BANNER ====================
+    status_messages = {
+        'DRAFT': '⚠️ The order is currently in DRAFT status. Click "✅ Confirm" to confirm the order.',
+        'CONFIRMED': '✅ The order has been confirmed and is ready for material issuing.',
+        'IN_PROGRESS': '🔄 Materials have been issued. Production is in progress.',
+        'COMPLETED': '✅ Production has been completed.',
+        'CANCELLED': '❌ The order has been cancelled.'
+    }
+
+    
+    status_msg = status_messages.get(order['status'], f"Status: {order['status']}")
+    
+    if order['status'] == 'DRAFT':
+        st.info(status_msg)
+    elif order['status'] == 'CONFIRMED':
+        st.success(status_msg)
+    elif order['status'] == 'IN_PROGRESS':
+        st.info(status_msg)
+    elif order['status'] == 'COMPLETED':
+        st.success(status_msg)
+    elif order['status'] == 'CANCELLED':
+        st.warning(status_msg)
+    
+    st.markdown("---")
     
     # ==================== TABS ====================
     tabs = st.tabs(["📄 Order Info", "📦 Materials", "🏭 Production Output", "📜 History"])
@@ -575,6 +668,7 @@ def render_order_details():
     if st.button("← Back to List", key="back_from_details", use_container_width=True):
         set_view('list')
         st.rerun()
+
 
 # ==================== Create Order View ====================
 
