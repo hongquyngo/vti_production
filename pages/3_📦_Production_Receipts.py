@@ -352,12 +352,12 @@ def render_header():
     
     with col2:
         if st.session_state.current_view == 'details':
-            if st.button("← Back to List", use_container_width=True):
+            if st.button("← Back to List", key="back_receipts_filter", use_container_width=True):
                 set_view('list')
                 st.rerun()
     
     with col3:
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Refresh", key="refresh_receipts", use_container_width=True):
             st.cache_resource.clear()
             st.rerun()
 
@@ -580,7 +580,7 @@ def render_receipt_details():
     """Render detailed receipt information"""
     if not st.session_state.selected_receipt_id:
         st.warning("No receipt selected")
-        if st.button("← Back to List"):
+        if st.button("← Back to List", key="back_no_receipt"):
             set_view('list')
             st.rerun()
         return
@@ -590,7 +590,7 @@ def render_receipt_details():
     
     if not receipt:
         st.error("Receipt not found")
-        if st.button("← Back to List"):
+        if st.button("← Back to List", key="back_receipt_not_found"):
             set_view('list')
             st.rerun()
         return
@@ -603,146 +603,80 @@ def render_receipt_details():
         
         with col1:
             st.markdown(f"**Receipt No:** {receipt['receipt_no']}")
-            st.markdown(f"**Receipt Date:** {receipt['receipt_date'].strftime('%d-%b-%Y %H:%M')}")
+            st.markdown(f"**Receipt Date:** {receipt['receipt_date']}")
+            st.markdown(f"**Batch No:** {receipt['batch_no']}")
             st.markdown(f"**Product:** {receipt['product_name']}")
-            st.markdown(f"**PT Code:** {receipt['pt_code']}")
-            st.markdown(f"**Package Size:** {receipt['package_size'] or 'N/A'}")
-            st.markdown(f"**Quantity:** {format_number(receipt['quantity'], 2)} {receipt['uom']}")
         
         with col2:
-            st.markdown(f"**Batch No:** {receipt['batch_no'] or 'N/A'}")
-            expiry_display = receipt['expired_date'].strftime('%d-%b-%Y') if receipt['expired_date'] else 'N/A'
-            st.markdown(f"**Expiry Date:** {expiry_display}")
+            st.markdown(f"**Quantity:** {format_number(receipt['quantity'], 2)} {receipt['uom']}")
             st.markdown(f"**Warehouse:** {receipt['warehouse_name']}")
-            st.markdown(f"**Location:** {receipt['warehouse_address'] or 'N/A'}")
-            
-            # Quality Status with colored indicator
-            quality_indicator = create_status_indicator(receipt['quality_status'])
-            st.markdown(f"**Quality Status:** {quality_indicator}")
-        
-        if receipt['notes']:
-            st.markdown("**Notes:**")
-            st.info(receipt['notes'])
+            st.markdown(f"**Quality Status:** {create_status_indicator(receipt['quality_status'])}")
+            st.markdown(f"**Created By:** {receipt.get('created_by_name', 'N/A')}")
     
-    # Section 2: Production Order Link
-    with st.expander("🏭 PRODUCTION ORDER INFORMATION", expanded=True):
+    # Section 2: Related Order
+    with st.expander("📋 ORDER INFORMATION", expanded=True):
         col1, col2 = st.columns(2)
         
         with col1:
             st.markdown(f"**Order No:** {receipt['order_no']}")
-            st.markdown(f"**Order Date:** {receipt['order_date'].strftime('%d-%b-%Y')}")
-            st.markdown(f"**BOM:** {receipt['bom_name']}")
-            st.markdown(f"**BOM Type:** {receipt['bom_type']}")
-            st.markdown(f"**Priority:** {create_status_indicator(receipt['priority'])}")
+            st.markdown(f"**Order Date:** {receipt['order_date']}")
+            st.markdown(f"**BOM:** {receipt.get('bom_name', 'N/A')}")
         
         with col2:
             st.markdown(f"**Planned Qty:** {format_number(receipt['planned_qty'], 2)} {receipt['uom']}")
             st.markdown(f"**Produced Qty:** {format_number(receipt['produced_qty'], 2)} {receipt['uom']}")
-            
-            # Yield Rate with indicator
-            yield_rate = receipt['yield_rate']
-            yield_color = "✅" if yield_rate >= 95 else "⚠️" if yield_rate >= 85 else "❌"
-            st.markdown(f"**Yield Rate:** {yield_rate:.1f}% {yield_color}")
-            
-            scrap_qty = receipt['scrap_qty']
-            scrap_pct = calculate_percentage(scrap_qty, receipt['planned_qty'], 1)
-            st.markdown(f"**Scrap/Loss:** {format_number(scrap_qty, 2)} {receipt['uom']} ({scrap_pct}%)")
-            
-            prod_days = receipt['production_days']
-            st.markdown(f"**Production Duration:** {prod_days} day(s)")
+            st.markdown(f"**Order Status:** {create_status_indicator(receipt['order_status'])}")
         
-        # Yield warning
-        if yield_rate < 95:
-            st.warning(f"⚠️ Yield below target: {yield_rate:.1f}% (Target: 95%)")
-        
-        if receipt['order_notes']:
-            st.markdown("**Order Notes:**")
-            st.info(receipt['order_notes'])
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔍 View Full Order Details", use_container_width=True):
-                st.info(f"Navigate to Order: {receipt['order_no']} (Integration pending)")
+        # Production efficiency
+        if receipt['planned_qty'] > 0:
+            efficiency = calculate_percentage(receipt['produced_qty'], receipt['planned_qty'])
+            st.progress(efficiency / 100)
+            st.caption(f"Production Efficiency: {efficiency}%")
     
-    # Section 3: Material Traceability
-    with st.expander("🔍 MATERIAL TRACEABILITY", expanded=True):
-        st.markdown("**Materials Used in Production:**")
-        
-        materials = receipt_mgr.get_receipt_materials(receipt['manufacturing_order_id'])
+    # Section 3: Notes
+    if receipt.get('notes'):
+        with st.expander("📝 NOTES", expanded=False):
+            st.text(receipt['notes'])
+    
+    # Section 4: Material Usage (if available)
+    with st.expander("📦 MATERIAL USAGE", expanded=False):
+        materials = receipt_mgr.get_receipt_materials(receipt_id)
         
         if not materials.empty:
-            # Format materials display
-            display_materials = materials.copy()
-            display_materials['quantity_used'] = display_materials.apply(
-                lambda x: f"{format_number(x['quantity_used'], 4)} {x['uom']}", axis=1
-            )
-            display_materials['issue_date'] = pd.to_datetime(display_materials['issue_date']).dt.strftime('%d-%b-%Y')
-            display_materials['expired_date'] = pd.to_datetime(display_materials['expired_date']).dt.strftime('%d-%b-%Y')
-            
             st.dataframe(
-                display_materials[[
-                    'material_name', 'pt_code', 'batch_no', 
-                    'quantity_used', 'expired_date', 'issue_no', 
-                    'issue_date', 'source_warehouse'
-                ]].rename(columns={
-                    'material_name': 'Material',
-                    'pt_code': 'PT Code',
-                    'batch_no': 'Batch',
-                    'quantity_used': 'Qty Used',
-                    'expired_date': 'Expiry',
-                    'issue_no': 'Issue No',
-                    'issue_date': 'Issue Date',
-                    'source_warehouse': 'From Warehouse'
-                }),
+                materials,
                 use_container_width=True,
                 hide_index=True
             )
         else:
-            st.info("No material issue records found")
+            st.info("No material usage data available")
     
-    # Section 4: Inventory Impact
-    with st.expander("📊 INVENTORY IMPACT", expanded=True):
-        inventory = receipt_mgr.get_inventory_impact(receipt_id)
-        
-        if inventory:
-            st.success("✅ Stock In Successfully Created")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**Stock In Quantity:** {format_number(inventory['stock_in_qty'], 2)} {receipt['uom']}")
-                st.markdown(f"**Current Remaining:** {format_number(inventory['current_remain'], 2)} {receipt['uom']}")
-                st.markdown(f"**Stock In Date:** {inventory['stock_in_date'].strftime('%d-%b-%Y')}")
-            
-            with col2:
-                st.markdown(f"**Warehouse:** {inventory['warehouse_name']}")
-                st.markdown(f"**Location:** {inventory['location']}")
-                st.markdown(f"**Current Stock Level:** {format_number(inventory['current_stock_level'], 2)} {receipt['uom']}")
-            
-            st.info(f"📝 Inventory History ID: {inventory['inventory_history_id']}")
-        else:
-            st.warning("⚠️ No inventory record found for this receipt")
-    
-    # Actions Section
+    # Action Buttons
     st.markdown("---")
-    st.markdown("### ⚡ Actions")
+    st.markdown("### Actions")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        if st.button("✏️ Update Quality", use_container_width=True):
+        if st.button("✏️ Update Quality", key="update_quality_btn", use_container_width=True):
             set_view('update_quality', receipt_id)
             st.rerun()
     
     with col2:
-        if st.button("🖨️ Print Receipt", use_container_width=True):
+        if st.button("🖨️ Print Receipt", key="print_receipt_btn", use_container_width=True):
             st.info("Print functionality (to be implemented)")
     
     with col3:
-        if st.button("📧 Send Email", use_container_width=True):
+        if st.button("📧 Send Email", key="send_email_btn", use_container_width=True):
             st.info("Email functionality (to be implemented)")
     
     with col4:
-        if st.button("📦 View Inventory", use_container_width=True):
+        if st.button("🔍 View Full Order Details", key="view_order_details_btn", use_container_width=True):
+            st.session_state.selected_order = receipt.get('order_id')
+            st.switch_page("pages/2___Production.py")
+    
+    with col5:
+        if st.button("📦 View Inventory", key="view_inventory_btn", use_container_width=True):
             st.info("Navigate to inventory (to be implemented)")
 
 # ==================== Update Quality View ====================
@@ -751,7 +685,7 @@ def render_update_quality():
     """Render quality status update form"""
     if not st.session_state.selected_receipt_id:
         st.warning("No receipt selected")
-        if st.button("← Back to List"):
+        if st.button("← Back to List", key="back_from_update_no_receipt"):
             set_view('list')
             st.rerun()
         return
@@ -761,7 +695,7 @@ def render_update_quality():
     
     if not receipt:
         st.error("Receipt not found")
-        if st.button("← Back to List"):
+        if st.button("← Back to List", key="back_from_update_not_found"):
             set_view('list')
             st.rerun()
         return
@@ -862,14 +796,13 @@ def main():
         st.error(f"An error occurred: {str(e)}")
         logger.error(f"Application error: {e}", exc_info=True)
         
-        if st.button("← Back to List"):
+        if st.button("← Back to List", key="back_from_error"):
             set_view('list')
             st.rerun()
     
     # Footer
     st.markdown("---")
-    st.caption("Production Receipts Module v1.0 - Finished Goods Management")
-
+    st.caption("Production Receipts Management System")
 
 if __name__ == "__main__":
     main()

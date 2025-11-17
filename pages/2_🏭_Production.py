@@ -204,7 +204,7 @@ def render_header():
     with col1:
         st.title("🏭 Production Management")
     with col3:
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Refresh", key="refresh_main", use_container_width=True):
             st.cache_resource.clear()
             st.rerun()
 
@@ -227,6 +227,7 @@ def render_navigation():
             is_active = st.session_state.current_view == view
             if st.button(
                 label,
+                key=f"nav_{view}",  # ADDED KEY
                 use_container_width=True,
                 type="primary" if is_active else "secondary"
             ):
@@ -237,8 +238,9 @@ def render_navigation():
     st.markdown("---")
     col_nav = st.columns([5, 1])
     with col_nav[1]:
-        if st.button("📦 Production Receipts", use_container_width=True):
+        if st.button("📦 Production Receipts", key="nav_receipts", use_container_width=True):
             st.switch_page("pages/3___Production_Receipts.py")
+
 
 # ==================== Utilities ====================
 
@@ -427,7 +429,7 @@ def render_order_details():
     
     if not order_id:
         st.warning("No order selected")
-        if st.button("← Back to List"):
+        if st.button("← Back to List", key="back_no_order"):
             set_view('list')
             st.rerun()
         return
@@ -437,7 +439,7 @@ def render_order_details():
     
     if not order:
         st.error("Order not found")
-        if st.button("← Back to List"):
+        if st.button("← Back to List", key="back_order_not_found"):
             set_view('list')
             st.rerun()
         return
@@ -485,25 +487,25 @@ def render_order_details():
         
         with action_cols[0]:
             if order['status'] in ['DRAFT', 'CONFIRMED']:
-                if st.button("📦 Issue Materials", use_container_width=True):
+                if st.button("📦 Issue Materials", key="detail_issue_materials", use_container_width=True):
                     set_view('issue')
                     st.session_state.selected_order = order_id
                     st.rerun()
         
         with action_cols[1]:
             if order['status'] == 'IN_PROGRESS':
-                if st.button("↩️ Return Materials", use_container_width=True):
+                if st.button("↩️ Return Materials", key="detail_return_materials", use_container_width=True):
                     set_view('return')
                     st.rerun()
         
         with action_cols[2]:
             if order['status'] == 'IN_PROGRESS':
-                if st.button("✅ Complete Order", use_container_width=True):
+                if st.button("✅ Complete Order", key="detail_complete_order", use_container_width=True):
                     set_view('complete')
                     st.rerun()
         
         with action_cols[3]:
-            if st.button("← Back to List", use_container_width=True):
+            if st.button("← Back to List", key="back_from_actions", use_container_width=True):
                 set_view('list')
                 st.rerun()
     
@@ -570,7 +572,7 @@ def render_order_details():
     
     # Actions at bottom
     st.markdown("---")
-    if st.button("← Back to List", use_container_width=True):
+    if st.button("← Back to List", key="back_from_details", use_container_width=True):
         set_view('list')
         st.rerun()
 
@@ -743,7 +745,7 @@ def render_create_order():
     col_btn1, col_btn2 = st.columns(2)
     
     with col_btn1:
-        if st.button("✅ Create Order", type="primary", use_container_width=True):
+        if st.button("✅ Create Order", key="create_order_submit", type="primary", use_container_width=True):
             # Prepare order data
             order_data = {
                 'bom_header_id': selected_bom_id,
@@ -785,7 +787,7 @@ def render_create_order():
                 logger.error(f"Order creation failed: {e}", exc_info=True)
     
     with col_btn2:
-        if st.button("❌ Cancel", use_container_width=True):
+        if st.button("❌ Cancel", key="cancel_create_order", use_container_width=True):
             set_view('list')
             st.rerun()
 
@@ -961,17 +963,17 @@ def render_material_issue():
                 with col1:
                     # Check if we're in confirmation state
                     if not st.session_state.get('confirm_issue', False):
-                        if st.button("🚀 Issue Materials", type="primary", use_container_width=True):
+                        if st.button("🚀 Issue Materials", key="issue_materials_main", type="primary", use_container_width=True):
                             st.session_state['confirm_issue'] = True
                             st.rerun()
                 
                 with col2:
-                    if st.button("🔄 Refresh Stock", use_container_width=True):
+                    if st.button("🔄 Refresh Stock", key="refresh_stock", use_container_width=True):
                         st.cache_resource.clear()
                         st.rerun()
                 
                 with col3:
-                    if st.button("← Back", use_container_width=True):
+                    if st.button("← Back", key="back_from_confirmation", use_container_width=True):
                         set_view('list')
                         st.rerun()
                 
@@ -988,7 +990,7 @@ def render_material_issue():
                     col_confirm, col_cancel = st.columns(2)
                     
                     with col_confirm:
-                        if st.button("✅ Yes, Issue Now", type="primary", use_container_width=True):
+                        if st.button("✅ Yes, Issue Now", key="confirm_issue_yes", type="primary", use_container_width=True):
                             try:
                                 # ==================== v6.0 FIX: Get proper audit info ====================
                                 audit_info = get_user_audit_info()
@@ -1016,16 +1018,16 @@ def render_material_issue():
                                 logger.error(f"Material issue error: {e}", exc_info=True)
                     
                     with col_cancel:
-                        if st.button("❌ Cancel", use_container_width=True):
+                        if st.button("❌ Cancel", key="cancel_issue", use_container_width=True):
                             st.session_state['confirm_issue'] = False
                             st.rerun()
             else:
-                if st.button("← Back to List", use_container_width=True):
+                if st.button("← Back to List", key="back_after_issue", use_container_width=True):
                     set_view('list')
                     st.rerun()
         else:
             st.error("No materials found for this BOM")
-            if st.button("← Back to List", use_container_width=True):
+            if st.button("← Back to List", key="back_no_materials", use_container_width=True):
                 set_view('list')
                 st.rerun()
 
