@@ -292,7 +292,7 @@ def render_navigation():
     col_nav = st.columns([5, 1])
     with col_nav[1]:
         if st.button("📦 Production Receipts", key="nav_receipts", use_container_width=True):
-            st.switch_page("pages/3___Production_Receipts.py")
+            st.switch_page("pages/3_📦_Production_Receipts.py")
 
 
 # ==================== Utilities ====================
