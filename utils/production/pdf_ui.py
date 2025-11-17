@@ -68,7 +68,14 @@ class PDFExportDialog:
     
     @staticmethod
     def _show_generation_form(issue_result: Dict[str, Any], pdf_key: str):
-        """Show simplified PDF generation form"""
+        """Show simplified PDF generation form - FIXED: No rerun after generate"""
+        
+        # Check if PDF already generated
+        if st.session_state.get(pdf_key):
+            # Show download section directly
+            PDFExportDialog._show_download_section(issue_result, pdf_key)
+            return
+        
         with st.form("pdf_generation_form", clear_on_submit=False):
             col1, col2 = st.columns(2)
             
@@ -148,7 +155,7 @@ class PDFExportDialog:
                         
                         logger.info(f"✅ PDF generated for issue {issue_no}")
                         
-                        # Rerun to show download section
+                        # FIXED: Rerun to show download section instead of closing dialog
                         st.rerun()
                         
                 except Exception as e:
@@ -157,8 +164,12 @@ class PDFExportDialog:
             
             if skip_btn:
                 st.info("✅ You can generate the PDF later from the Issue History tab")
-                st.rerun()  # Close dialog after skip
-    
+                # Clear any partial state
+                st.session_state.pop(pdf_key, None)
+                st.session_state.pop(f'{pdf_key}_content', None)
+                st.session_state.pop(f'{pdf_key}_filename', None)
+                st.rerun()  # Close dialog
+
     @staticmethod
     def _show_download_section(issue_result: Dict[str, Any], pdf_key: str):
         """Show download section after PDF generation"""

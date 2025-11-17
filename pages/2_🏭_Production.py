@@ -616,7 +616,7 @@ def render_create_order():
     # ==================== BOM SELECTION ====================
     st.markdown("### Select BOM")
     
-    bom_list = prod_manager.get_bom_list()
+    bom_list = prod_manager.get_active_boms()
     
     if bom_list.empty:
         st.error("No BOMs available")
@@ -637,7 +637,7 @@ def render_create_order():
     selected_bom_id = bom_options[selected_bom]
     
     # Get BOM details
-    selected_bom_details = prod_manager.get_bom_header(selected_bom_id)
+    selected_bom_details = prod_manager.get_bom_info(selected_bom_id)
     
     if not selected_bom_details:
         st.error("BOM details not found")
