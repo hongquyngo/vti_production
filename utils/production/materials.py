@@ -911,7 +911,6 @@ def _validate_return(conn, return_item: Dict):
     if return_item['quantity'] > available:
         raise ValueError(f"Cannot return {return_item['quantity']}, only {available} available")
 
-
 def _process_return_item(conn, return_id: int, return_item: Dict,
                         warehouse_id: int, group_id: str, 
                         user_id: int, keycloak_id: str, entity_id: int) -> Dict:
@@ -953,7 +952,7 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
         detail_query = text("""
             INSERT INTO material_return_details (
                 material_return_id, material_id, original_issue_detail_id,
-                batch_no, quantity, uom, condition, expired_date,
+                batch_no, quantity, uom, `condition`, expired_date,
                 is_alternative, original_material_id
             ) VALUES (
                 :return_id, :material_id, :issue_detail_id,
@@ -979,7 +978,7 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
         detail_query = text("""
             INSERT INTO material_return_details (
                 material_return_id, material_id, original_issue_detail_id,
-                batch_no, quantity, uom, condition, expired_date
+                batch_no, quantity, uom, `condition`, expired_date
             ) VALUES (
                 :return_id, :material_id, :issue_detail_id,
                 :batch_no, :quantity, :uom, :condition, :expired_date
@@ -1010,7 +1009,6 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
         'condition': return_item.get('condition', 'GOOD'),
         'is_alternative': issue_detail['is_alternative']
     }
-
 
 def _update_inventory_for_return(conn, issue_detail: Dict, quantity: float,
                                 warehouse_id: int, group_id: str, 
