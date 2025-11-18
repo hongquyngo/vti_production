@@ -352,7 +352,7 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
     Returns DataFrame with columns:
     - issue_detail_id, material_id, material_name, batch_no,
     - issued_qty, returned_qty, returnable_qty, uom, expired_date,
-    - is_alternative, original_material_id
+    - issue_date, is_alternative, original_material_id
     """
     engine = get_db_engine()
     
@@ -367,6 +367,7 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
             mid.quantity - COALESCE(SUM(mrd.quantity), 0) as returnable_qty,
             mid.uom,
             mid.expired_date,
+            mi.issue_date,
             COALESCE(mid.is_alternative, 0) as is_alternative,
             mid.original_material_id,
             CASE 
@@ -386,7 +387,8 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
             AND mi.status = 'CONFIRMED'
         GROUP BY mid.id, mid.material_id, p.name, mid.batch_no, 
                  mid.quantity, mid.uom, mid.expired_date,
-                 mid.is_alternative, mid.original_material_id, p2.name
+                 mid.is_alternative, mid.original_material_id, p2.name,
+                 mi.issue_date
         HAVING returnable_qty > 0
         ORDER BY p.name, mid.batch_no
     """
@@ -396,7 +398,6 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"❌ Error getting returnable materials: {e}")
         return pd.DataFrame()
-
 
 # ==================== INTERNAL HELPER FUNCTIONS ====================
 
