@@ -1131,6 +1131,41 @@ def render_material_return():
     """Render material return interface"""
     st.subheader("↩️ Return Unused Materials")
     
+    # Check if we just completed a return successfully
+    if st.session_state.get('return_success'):
+        return_info = st.session_state.get('return_info', {})
+        
+        # Show success message
+        st.success(f"""
+        ✅ **Materials Returned Successfully!**
+        
+        • Return No: **{return_info.get('return_no', 'N/A')}**
+        • Items Returned: **{return_info.get('item_count', 0)}**
+        • Total Quantity: **{return_info.get('total_qty', 0)}**
+        """)
+        
+        st.markdown("---")
+        st.markdown("### What would you like to do next?")
+        
+        col1, col2, col3 = st.columns([1, 1, 2])
+        
+        with col1:
+            if st.button("✅ Create Another Return", type="primary", use_container_width=True):
+                # Clear success state and stay on return page
+                st.session_state.pop('return_success', None)
+                st.session_state.pop('return_info', None)
+                st.rerun()
+        
+        with col2:
+            if st.button("📋 Back to Order List", use_container_width=True):
+                # Clear success state and go to order list
+                st.session_state.pop('return_success', None)
+                st.session_state.pop('return_info', None)
+                st.session_state.current_view = 'list'
+                st.rerun()
+        
+        return  # Don't show the form when in success state
+    
     # Get orders in progress
     orders = prod_manager.get_orders(status='IN_PROGRESS')
     
@@ -1144,8 +1179,6 @@ def render_material_return():
     
     selected_order_label = st.selectbox("Select Production Order", list(order_dict.keys()))
     order_id = order_dict[selected_order_label]
-    
-    # Get returnable materials
     
     # Get order details for entity_id
     order = prod_manager.get_order_details(order_id)
@@ -1178,23 +1211,23 @@ def render_material_return():
         for idx, row in returnable.iterrows():
             st.markdown(f"**{row['material_name']}** (Batch: {row['batch_no']})")
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns([2, 1])
             
             with col1:
                 return_qty = st.number_input(
-                    "Return Quantity",
+                    f"Return Qty (max: {format_number(row['returnable_qty'], 2)} {row['uom']})",
                     min_value=0.0,
-                    max_value=float(row['issued_qty']),
+                    max_value=float(row['returnable_qty']),
                     value=0.0,
-                    step=0.1,
-                    key=f"return_qty_{idx}"
+                    step=0.01,
+                    key=f"return_qty_{row['issue_detail_id']}"
                 )
             
             with col2:
                 condition = st.selectbox(
                     "Condition",
-                    ["GOOD", "DAMAGED", "EXPIRED"],
-                    key=f"condition_{idx}"
+                    ["GOOD", "DAMAGED"],
+                    key=f"condition_{row['issue_detail_id']}"
                 )
             
             if return_qty > 0:
@@ -1238,10 +1271,13 @@ def render_material_return():
                         keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
                     )
                     
-                    UIHelpers.show_message(
-                        f"✅ Materials returned! Return No: **{result['return_no']}**",
-                        "success"
-                    )
+                    # Store success state and return info
+                    st.session_state['return_success'] = True
+                    st.session_state['return_info'] = {
+                        'return_no': result['return_no'],
+                        'item_count': len(returns),
+                        'total_qty': sum(r['quantity'] for r in returns)
+                    }
                     
                     st.rerun()
                     
@@ -1250,6 +1286,7 @@ def render_material_return():
                     logger.error(f"Material return failed: {e}", exc_info=True)
         
         if cancel:
+            st.session_state.current_view = 'list'
             st.rerun()
 
 # ==================== Production Completion View ====================
