@@ -537,3 +537,32 @@ class ProductionManager:
                 'uom': mat['uom'],
                 'warehouse_id': order_data['warehouse_id']
             })
+
+
+    def get_active_employees(self) -> pd.DataFrame:
+        """
+        Get list of active employees for dropdown selection
+        
+        Returns:
+            DataFrame with id, full_name, position for employee selection
+        """
+        query = text("""
+            SELECT 
+                e.id,
+                CONCAT(e.first_name, ' ', e.last_name) as full_name,
+                e.email,
+                p.name as position_name,
+                d.name as department_name
+            FROM employees e
+            LEFT JOIN positions p ON e.position_id = p.id
+            LEFT JOIN departments d ON e.department_id = d.id 
+                AND (d.delete_flag = 0 OR d.delete_flag IS NULL)
+            WHERE e.delete_flag = 0
+            AND (e.status = 'ACTIVE' OR e.status IS NULL)
+            ORDER BY e.first_name, e.last_name
+        """)
+        
+        with self.engine.connect() as conn:
+            result = pd.read_sql(query, conn)
+        
+        return result

@@ -887,6 +887,7 @@ def render_create_order():
 
 # ==================== Material Issue View ====================
 
+
 def render_material_issue():
     """Render material issue view with PDF export and enhanced material display"""
     st.subheader("📦 Issue Materials to Production")
@@ -999,7 +1000,6 @@ def render_material_issue():
             # Issue materials section
             st.markdown("---")
             
-            # ==================== REFACTORED v5.0: Improved Issue Flow with @st.dialog Integration ====================
             # Check if all materials are sufficient (including with alternatives)
             can_issue = False
             materials_with_alts = pd.DataFrame()
@@ -1048,8 +1048,6 @@ def render_material_issue():
                 can_issue = True
                 st.success("✅ All materials are sufficient")
             
-            # ==================== REFACTORED v5.0: Simplified Issue Flow with Dialog ====================
-            
             # Issue button with improved confirmation flow
             if can_issue:
                 col1, col2, col3 = st.columns([2, 2, 2])
@@ -1071,7 +1069,7 @@ def render_material_issue():
                         set_view('list')
                         st.rerun()
                 
-                # Handle confirmation (outside button to avoid nested buttons)
+                # Confirmation section with employee dropdowns
                 if st.session_state.get('confirm_issue', False):
                     st.markdown("---")
                     st.warning(f"⚠️ **Confirm Issue Materials**")
@@ -1081,35 +1079,86 @@ def render_material_issue():
                     if not materials_with_alts.empty:
                         st.info(f"📝 **Note:** {len(materials_with_alts)} material(s) will use alternatives automatically")
                     
+                    # GET EMPLOYEES FOR DROPDOWNS
+                    employees = prod_manager.get_active_employees()
+                    
+                    if employees.empty:
+                        st.error("❌ No active employees found. Please check employee data.")
+                        return
+                    
+                    # Create employee options dict
+                    emp_options = {
+                        f"{row['full_name']} ({row['position_name'] or 'N/A'})": row['id']
+                        for _, row in employees.iterrows()
+                    }
+                    emp_options_list = ["-- Select --"] + list(emp_options.keys())
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        issued_by_label = st.selectbox(
+                            "Issued By (Warehouse Staff)",
+                            options=emp_options_list,
+                            key="issue_issued_by",
+                            help="Warehouse staff who issues the materials"
+                        )
+                    
+                    with col2:
+                        received_by_label = st.selectbox(
+                            "Received By (Production Staff)",
+                            options=emp_options_list,
+                            key="issue_received_by",
+                            help="Production staff who receives the materials"
+                        )
+                    
+                    # Notes field
+                    notes = st.text_area(
+                        "Notes (Optional)",
+                        placeholder="Enter any notes about this material issue",
+                        key="issue_notes",
+                        height=80
+                    )
+                    
                     col_confirm, col_cancel = st.columns(2)
                     
                     with col_confirm:
                         if st.button("✅ Yes, Issue Now", key="confirm_issue_yes", type="primary", use_container_width=True):
-                            try:
-                                # ==================== v6.0 FIX: Get proper audit info ====================
-                                audit_info = get_user_audit_info()
-                                
-                                with st.spinner("Issuing materials..."):
-                                    result = issue_materials(
-                                        order_id=order_id,
-                                        user_id=audit_info['user_id'],        # INT for manufacturing tables
-                                        keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
-                                    )
-                                
-                                # Clear confirm state
-                                st.session_state['confirm_issue'] = False
-                                
-                                # FIXED v5.0: Show PDF dialog immediately using @st.dialog
-                                # Dialog will display immediately without needing rerun
-                                PDFExportDialog.show_pdf_export_dialog(result)
-                                
-                            except ValueError as e:
-                                st.error(f"❌ Failed to issue materials: {str(e)}")
-                                st.session_state['confirm_issue'] = False
-                            except Exception as e:
-                                st.error(f"❌ An error occurred: {str(e)}")
-                                st.session_state['confirm_issue'] = False
-                                logger.error(f"Material issue error: {e}", exc_info=True)
+                            # Validate selections
+                            if issued_by_label == "-- Select --":
+                                st.error("❌ Please select warehouse staff (Issued By)")
+                            elif received_by_label == "-- Select --":
+                                st.error("❌ Please select production staff (Received By)")
+                            else:
+                                try:
+                                    audit_info = get_user_audit_info()
+                                    
+                                    # Get employee IDs from selections
+                                    issued_by_id = emp_options[issued_by_label]
+                                    received_by_id = emp_options[received_by_label]
+                                    
+                                    with st.spinner("Issuing materials..."):
+                                        result = issue_materials(
+                                            order_id=order_id,
+                                            user_id=audit_info['user_id'],
+                                            keycloak_id=audit_info['keycloak_id'],
+                                            issued_by=issued_by_id,
+                                            received_by=received_by_id,
+                                            notes=notes.strip() if notes else None
+                                        )
+                                    
+                                    # Clear confirm state
+                                    st.session_state['confirm_issue'] = False
+                                    
+                                    # Show PDF dialog immediately
+                                    PDFExportDialog.show_pdf_export_dialog(result)
+                                    
+                                except ValueError as e:
+                                    st.error(f"❌ Failed to issue materials: {str(e)}")
+                                    st.session_state['confirm_issue'] = False
+                                except Exception as e:
+                                    st.error(f"❌ An error occurred: {str(e)}")
+                                    st.session_state['confirm_issue'] = False
+                                    logger.error(f"Material issue error: {e}", exc_info=True)
                     
                     with col_cancel:
                         if st.button("❌ Cancel", key="cancel_issue", use_container_width=True):
@@ -1135,7 +1184,6 @@ def render_material_return():
     if st.session_state.get('return_success'):
         return_info = st.session_state.get('return_info', {})
         
-        # Show success message
         st.success(f"""
         ✅ **Materials Returned Successfully!**
         
@@ -1151,20 +1199,18 @@ def render_material_return():
         
         with col1:
             if st.button("✅ Create Another Return", type="primary", use_container_width=True):
-                # Clear success state and stay on return page
                 st.session_state.pop('return_success', None)
                 st.session_state.pop('return_info', None)
                 st.rerun()
         
         with col2:
             if st.button("📋 Back to Order List", use_container_width=True):
-                # Clear success state and go to order list
                 st.session_state.pop('return_success', None)
                 st.session_state.pop('return_info', None)
                 st.session_state.current_view = 'list'
                 st.rerun()
         
-        return  # Don't show the form when in success state
+        return
     
     # Get orders in progress
     orders = prod_manager.get_orders(status='IN_PROGRESS')
@@ -1180,7 +1226,7 @@ def render_material_return():
     selected_order_label = st.selectbox("Select Production Order", list(order_dict.keys()))
     order_id = order_dict[selected_order_label]
     
-    # Get order details for entity_id
+    # Get order details
     order = prod_manager.get_order_details(order_id)
     returnable = get_returnable_materials(order_id)
     
@@ -1204,6 +1250,19 @@ def render_material_return():
     
     # Return form
     st.markdown("### ↩️ Return Details")
+    
+    # GET EMPLOYEES FOR DROPDOWNS (outside form)
+    employees = prod_manager.get_active_employees()
+    
+    if employees.empty:
+        st.error("❌ No active employees found. Please check employee data.")
+        return
+    
+    emp_options = {
+        f"{row['full_name']} ({row['position_name'] or 'N/A'})": row['id']
+        for _, row in employees.iterrows()
+    }
+    emp_options_list = ["-- Select --"] + list(emp_options.keys())
     
     with st.form("return_materials_form"):
         returns = []
@@ -1241,10 +1300,36 @@ def render_material_return():
                     'expired_date': row['expired_date']
                 })
         
-        reason = st.selectbox(
-            "Return Reason",
-            ["EXCESS", "DEFECT", "WRONG_MATERIAL", "PLAN_CHANGE", "OTHER"]
-        )
+        st.markdown("---")
+        
+        # Reason and employee selections
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            reason = st.selectbox(
+                "Return Reason",
+                ["EXCESS", "DEFECT", "WRONG_MATERIAL", "PLAN_CHANGE", "OTHER"]
+            )
+        
+        with col2:
+            pass  # Placeholder for layout
+        
+        # Employee dropdowns
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            returned_by_label = st.selectbox(
+                "Returned By (Production Staff)",
+                options=emp_options_list,
+                help="Production staff who returns the materials"
+            )
+        
+        with col2:
+            received_by_label = st.selectbox(
+                "Received By (Warehouse Staff)",
+                options=emp_options_list,
+                help="Warehouse staff who receives the returned materials"
+            )
         
         st.markdown("---")
         col1, col2, col3 = st.columns([3, 1, 1])
@@ -1258,20 +1343,28 @@ def render_material_return():
         if submitted:
             if not returns:
                 UIHelpers.show_message("⚠️ No materials selected for return", "warning")
+            elif returned_by_label == "-- Select --":
+                UIHelpers.show_message("⚠️ Please select production staff (Returned By)", "warning")
+            elif received_by_label == "-- Select --":
+                UIHelpers.show_message("⚠️ Please select warehouse staff (Received By)", "warning")
             else:
                 try:
-                    # ==================== v6.0 FIX: Get proper audit info ====================
                     audit_info = get_user_audit_info()
+                    
+                    # Get employee IDs from selections
+                    returned_by_id = emp_options[returned_by_label]
+                    received_by_id = emp_options[received_by_label]
                     
                     result = return_materials(
                         order_id=order_id,
                         returns=returns,
                         reason=reason,
-                        user_id=audit_info['user_id'],        # INT for manufacturing tables
-                        keycloak_id=audit_info['keycloak_id'],  # VARCHAR for inventory tables
+                        user_id=audit_info['user_id'],
+                        keycloak_id=audit_info['keycloak_id'],
+                        returned_by=returned_by_id,
+                        received_by=received_by_id
                     )
                     
-                    # Store success state and return info
                     st.session_state['return_success'] = True
                     st.session_state['return_info'] = {
                         'return_no': result['return_no'],

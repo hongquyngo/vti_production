@@ -25,15 +25,20 @@ from ..db import get_db_engine
 logger = logging.getLogger(__name__)
 
 
-def issue_materials(order_id: int, user_id: int, keycloak_id: str) -> Dict[str, Any]:
+def issue_materials(order_id: int, user_id: int, keycloak_id: str, 
+                   issued_by: int = None, received_by: int = None,
+                   notes: str = None) -> Dict[str, Any]:
     """
     Issue materials for production using FEFO (First Expiry, First Out)
     with automatic alternative material substitution and tracking
     
     Args:
         order_id: Manufacturing order ID
-        user_id: User ID for manufacturing tables (INT)
+        user_id: User ID for created_by (INT)
         keycloak_id: Keycloak ID for inventory tables (VARCHAR)
+        issued_by: Employee ID of warehouse staff issuing materials
+        received_by: Employee ID of production staff receiving materials
+        notes: Optional notes about the issue
     
     Raises:
         ValueError: If order not found, invalid status, or insufficient stock
@@ -54,16 +59,16 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str) -> Dict[str, 
             issue_no = _generate_issue_number(conn)
             group_id = str(uuid.uuid4())
             
-            # Create issue header - REMOVED entity_id (doesn't exist in DB)
+            # Create issue header - WITH employee IDs and notes
             issue_query = text("""
                 INSERT INTO material_issues (
                     issue_no, manufacturing_order_id, warehouse_id,
-                    issue_date, status, issued_by, created_by, created_date, 
-                    group_id
+                    issue_date, status, issued_by, received_by, notes,
+                    created_by, created_date, group_id
                 ) VALUES (
                     :issue_no, :order_id, :warehouse_id,
-                    NOW(), 'CONFIRMED', :user_id, :user_id, NOW(), 
-                    :group_id
+                    NOW(), 'CONFIRMED', :issued_by, :received_by, :notes,
+                    :user_id, NOW(), :group_id
                 )
             """)
             
@@ -71,6 +76,9 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str) -> Dict[str, 
                 'issue_no': issue_no,
                 'order_id': order_id,
                 'warehouse_id': order['warehouse_id'],
+                'issued_by': issued_by,
+                'received_by': received_by,
+                'notes': notes,
                 'user_id': user_id,
                 'group_id': group_id
             })
@@ -80,19 +88,18 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str) -> Dict[str, 
             # Get materials to issue
             materials = _get_pending_materials(conn, order_id)
             issue_details = []
-            substitutions = []  # Track any substitutions made
+            substitutions = []
             
             # Issue each material using FEFO with alternative substitution
             for _, mat in materials.iterrows():
                 remaining = float(mat['required_qty']) - float(mat['issued_qty'])
                 if remaining > 0:
                     try:
-                        # Try issuing primary material first
                         issued = _issue_material_with_alternatives(
                             conn, issue_id, order_id, mat,
                             remaining, order['warehouse_id'], 
                             group_id, user_id, keycloak_id, 
-                            order.get('entity_id', 1)  # Get from order, fallback to 1
+                            order.get('entity_id', 1)
                         )
                         issue_details.extend(issued['details'])
                         if issued['substitutions']:
@@ -129,9 +136,9 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str) -> Dict[str, 
             logger.error(f"❌ Error issuing materials for order {order_id}: {e}")
             raise
 
-
 def return_materials(order_id: int, returns: List[Dict],
-                    reason: str, user_id: int, keycloak_id: str) -> Dict[str, Any]:
+                    reason: str, user_id: int, keycloak_id: str,
+                    returned_by: int = None, received_by: int = None) -> Dict[str, Any]:
     """
     Return unused materials with validation and proper tracking
     
@@ -139,8 +146,10 @@ def return_materials(order_id: int, returns: List[Dict],
         order_id: Production order ID
         returns: List of return items with issue_detail_id, quantity, etc.
         reason: Return reason code
-        user_id: User ID for manufacturing tables (INT)
+        user_id: User ID for created_by (INT)
         keycloak_id: Keycloak ID for inventory tables (VARCHAR)
+        returned_by: Employee ID of production staff returning materials
+        received_by: Employee ID of warehouse staff receiving materials
         
     Returns:
         Dictionary with return_no and details
@@ -174,18 +183,20 @@ def return_materials(order_id: int, returns: List[Dict],
             for ret in returns:
                 _validate_return(conn, ret)
             
-            # Create return header - REMOVED entity_id and group_id (don't exist in DB)
+            # Create return header - WITH employee IDs
             return_no = _generate_return_number(conn)
-            group_id = str(uuid.uuid4())  # Still use for inventory tracking
+            group_id = str(uuid.uuid4())
             
             return_query = text("""
                 INSERT INTO material_returns (
                     return_no, material_issue_id, manufacturing_order_id,
-                    return_date, warehouse_id, status, returned_by,
+                    return_date, warehouse_id, status, 
+                    returned_by, received_by,
                     reason, created_by, created_date
                 ) VALUES (
                     :return_no, :issue_id, :order_id,
-                    NOW(), :warehouse_id, 'CONFIRMED', :user_id,
+                    NOW(), :warehouse_id, 'CONFIRMED', 
+                    :returned_by, :received_by,
                     :reason, :user_id, NOW()
                 )
             """)
@@ -195,6 +206,8 @@ def return_materials(order_id: int, returns: List[Dict],
                 'issue_id': issue['id'],
                 'order_id': order_id,
                 'warehouse_id': order['warehouse_id'],
+                'returned_by': returned_by,
+                'received_by': received_by,
                 'user_id': user_id,
                 'reason': reason
             })
@@ -208,7 +221,7 @@ def return_materials(order_id: int, returns: List[Dict],
                 detail = _process_return_item(
                     conn, return_id, ret, order['warehouse_id'], 
                     group_id, user_id, keycloak_id, 
-                    order.get('entity_id', 1)  # Get from order, fallback to 1
+                    order.get('entity_id', 1)
                 )
                 return_details.append(detail)
             
@@ -226,7 +239,6 @@ def return_materials(order_id: int, returns: List[Dict],
         except Exception as e:
             logger.error(f"❌ Error processing returns for order {order_id}: {e}")
             raise
-
 
 def complete_production(order_id: int, produced_qty: float,
                        batch_no: str, warehouse_id: int,

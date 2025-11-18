@@ -76,99 +76,108 @@ class PDFExportDialog:
             PDFExportDialog._show_download_section(issue_result, pdf_key)
             return
         
-        with st.form("pdf_generation_form", clear_on_submit=False):
-            col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            language = st.selectbox(
+                "Language / Ngôn ngữ",
+                options=['vi', 'en'],
+                format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
+                index=0,
+                key="pdf_language"
+            )
+        
+        with col2:
+            include_signatures = st.checkbox(
+                "Include signature section",
+                value=True,
+                key="pdf_signatures"
+            )
+        
+        st.markdown("---")
+        
+        # Action buttons (outside form to avoid rerun issues)
+        col1, col2 = st.columns([2, 2])
+        
+        with col1:
+            generate_btn = st.button(
+                "🖨️ Generate PDF",
+                type="primary",
+                use_container_width=True,
+                key="btn_generate_pdf"
+            )
+        
+        with col2:
+            skip_btn = st.button(
+                "⏭️ Skip for Now",
+                use_container_width=True,
+                key="btn_skip_pdf"
+            )
+        
+        if generate_btn:
+            issue_id = issue_result.get('issue_id')
+            issue_no = issue_result.get('issue_no', f'ISSUE_{issue_id}')
             
-            with col1:
-                language = st.selectbox(
-                    "Language / Ngôn ngữ",
-                    options=['vi', 'en'],
-                    format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
-                    index=0,
-                    key="pdf_language"
-                )
+            if not issue_id:
+                st.error("❌ Invalid issue data. Missing issue ID.")
+                return
             
-            with col2:
-                include_signatures = st.checkbox(
-                    "Include signature section",
-                    value=True,
-                    key="pdf_signatures"
-                )
-            
-            st.markdown("---")
-            
-            # Action buttons
-            col1, col2 = st.columns([2, 2])
-            
-            with col1:
-                generate_btn = st.form_submit_button(
-                    "🖨️ Generate PDF",
-                    type="primary",
-                    use_container_width=True
-                )
-            
-            with col2:
-                skip_btn = st.form_submit_button(
-                    "⏭️ Skip for Now",
-                    use_container_width=True
-                )
-            
-            if generate_btn:
-                issue_id = issue_result.get('issue_id')
-                issue_no = issue_result.get('issue_no', f'ISSUE_{issue_id}')
-                
-                if not issue_id:
-                    st.error("❌ Invalid issue data. Missing issue ID.")
+            try:
+                # Validate issue data
+                if not pdf_generator.validate_issue_data(issue_id):
+                    st.error("❌ Issue data not found in database.")
                     return
                 
-                try:
-                    # Validate issue data
-                    if not pdf_generator.validate_issue_data(issue_id):
-                        st.error("❌ Issue data not found in database.")
+                with st.spinner("Generating PDF... Please wait..."):
+                    # Generate PDF with simplified options
+                    pdf_options = {
+                        'language': language,
+                        'include_signatures': include_signatures,
+                    }
+                    
+                    pdf_content = pdf_generator.generate_pdf_with_options(
+                        issue_id,
+                        pdf_options
+                    )
+                    
+                    if not pdf_content:
+                        st.error("❌ PDF generation failed - empty content returned")
                         return
                     
-                    with st.spinner("Generating PDF... Please wait..."):
-                        # Generate PDF with simplified options
-                        pdf_options = {
-                            'language': language,
-                            'include_signatures': include_signatures,
-                        }
-                        
-                        pdf_content = pdf_generator.generate_pdf_with_options(
-                            issue_id,
-                            pdf_options
+                    # Generate filename with language indicator
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    lang_suffix = 'EN' if language == 'en' else 'VI'
+                    filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{timestamp}.pdf"
+                    
+                    logger.info(f"✅ PDF generated for issue {issue_no}")
+                    
+                    # Show download directly without rerun
+                    st.success("✅ PDF Generated Successfully!")
+                    
+                    col_dl, col_done = st.columns([3, 1])
+                    
+                    with col_dl:
+                        st.download_button(
+                            label="💾 Download PDF",
+                            data=pdf_content,
+                            file_name=filename,
+                            mime="application/pdf",
+                            use_container_width=True,
+                            type="primary",
+                            key=f"download_{issue_id}_direct"
                         )
-                        
-                        if not pdf_content:
-                            st.error("❌ PDF generation failed - empty content returned")
-                            return
-                        
-                        # Generate filename with language indicator
-                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        lang_suffix = 'EN' if language == 'en' else 'VI'
-                        filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{timestamp}.pdf"
-                        
-                        # Store in session state with unique key
-                        st.session_state[pdf_key] = True
-                        st.session_state[f'{pdf_key}_content'] = pdf_content
-                        st.session_state[f'{pdf_key}_filename'] = filename
-                        
-                        logger.info(f"✅ PDF generated for issue {issue_no}")
-                        
-                        # FIXED: Rerun to show download section instead of closing dialog
-                        st.rerun()
-                        
-                except Exception as e:
-                    st.error(f"❌ Error generating PDF: {str(e)}")
-                    logger.error(f"PDF generation error for issue {issue_id}: {e}", exc_info=True)
-            
-            if skip_btn:
-                st.info("✅ You can generate the PDF later from the Issue History tab")
-                # Clear any partial state
-                st.session_state.pop(pdf_key, None)
-                st.session_state.pop(f'{pdf_key}_content', None)
-                st.session_state.pop(f'{pdf_key}_filename', None)
-                st.rerun()  # Close dialog
+                    
+                    with col_done:
+                        if st.button("✅ Done", use_container_width=True, key=f"done_{issue_id}_direct"):
+                            st.rerun()
+                    
+            except Exception as e:
+                st.error(f"❌ Error generating PDF: {str(e)}")
+                logger.error(f"PDF generation error for issue {issue_id}: {e}", exc_info=True)
+        
+        if skip_btn:
+            st.info("✅ You can generate the PDF later from the Issue History tab")
+            st.rerun()  # Close dialog
 
     @staticmethod
     def _show_download_section(issue_result: Dict[str, Any], pdf_key: str):
