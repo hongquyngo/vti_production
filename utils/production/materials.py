@@ -63,16 +63,16 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
             issue_no = _generate_issue_number(conn)
             group_id = str(uuid.uuid4())
             
-            # Create issue header - WITH employee IDs and notes
+            # Create issue header - WITHOUT group_id (column doesn't exist in material_issues)
             issue_query = text("""
                 INSERT INTO material_issues (
                     issue_no, manufacturing_order_id, warehouse_id,
                     issue_date, status, issued_by, received_by, notes,
-                    created_by, created_date, group_id
+                    created_by, created_date
                 ) VALUES (
                     :issue_no, :order_id, :warehouse_id,
                     NOW(), 'CONFIRMED', :issued_by, :received_by, :notes,
-                    :user_id, NOW(), :group_id
+                    :user_id, NOW()
                 )
             """)
             
@@ -83,8 +83,7 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
                 'issued_by': issued_by,
                 'received_by': received_by,
                 'notes': notes,
-                'user_id': user_id,
-                'group_id': group_id
+                'user_id': user_id
             })
             
             issue_id = issue_result.lastrowid
@@ -139,7 +138,6 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
         except Exception as e:
             logger.error(f"❌ Error issuing materials for order {order_id}: {e}")
             raise
-
 
 def return_materials(order_id: int, returns: List[Dict],
                     reason: str, user_id: int, keycloak_id: str,
