@@ -63,16 +63,16 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
             issue_no = _generate_issue_number(conn)
             group_id = str(uuid.uuid4())
             
-            # Create issue header - WITHOUT group_id (column doesn't exist in material_issues)
+            # Create issue header - WITH employee IDs and notes
             issue_query = text("""
                 INSERT INTO material_issues (
                     issue_no, manufacturing_order_id, warehouse_id,
                     issue_date, status, issued_by, received_by, notes,
-                    created_by, created_date
+                    created_by, created_date, group_id
                 ) VALUES (
                     :issue_no, :order_id, :warehouse_id,
                     NOW(), 'CONFIRMED', :issued_by, :received_by, :notes,
-                    :user_id, NOW()
+                    :user_id, NOW(), :group_id
                 )
             """)
             
@@ -83,7 +83,8 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
                 'issued_by': issued_by,
                 'received_by': received_by,
                 'notes': notes,
-                'user_id': user_id
+                'user_id': user_id,
+                'group_id': group_id
             })
             
             issue_id = issue_result.lastrowid
