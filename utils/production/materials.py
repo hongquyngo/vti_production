@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def issue_materials(order_id: int, user_id: int, keycloak_id: str, 
-                   issued_by: int = None, received_by: int = None,
+                   issued_by: int, received_by: int = None,
                    notes: str = None) -> Dict[str, Any]:
     """
     Issue materials for production using FEFO (First Expiry, First Out)
@@ -36,14 +36,18 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
         order_id: Manufacturing order ID
         user_id: User ID for created_by (INT)
         keycloak_id: Keycloak ID for inventory tables (VARCHAR)
-        issued_by: Employee ID of warehouse staff issuing materials
+        issued_by: Employee ID of warehouse staff issuing materials (REQUIRED)
         received_by: Employee ID of production staff receiving materials
         notes: Optional notes about the issue
     
     Raises:
-        ValueError: If order not found, invalid status, or insufficient stock
+        ValueError: If order not found, invalid status, insufficient stock, or missing issued_by
     """
     engine = get_db_engine()
+    
+    # Validate required issued_by
+    if issued_by is None:
+        raise ValueError("issued_by is required - must specify warehouse staff employee ID")
     
     with engine.begin() as conn:
         try:
@@ -135,6 +139,7 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
         except Exception as e:
             logger.error(f"❌ Error issuing materials for order {order_id}: {e}")
             raise
+
 
 def return_materials(order_id: int, returns: List[Dict],
                     reason: str, user_id: int, keycloak_id: str,
@@ -1191,48 +1196,64 @@ def _add_production_to_inventory(conn, order: Dict, quantity: float,
 
 
 def _generate_issue_number(conn) -> str:
-    """Generate unique issue number"""
-    prefix = f"ISS{datetime.now().strftime('%Y%m%d')}"
+    """Generate unique issue number matching DB schema format MI-YYYYMMDD-XXX"""
+    timestamp = datetime.now().strftime('%Y%m%d')
+    prefix = f"MI-{timestamp}-"
     
     query = text("""
-        SELECT COUNT(*) + 1 as seq
+        SELECT COALESCE(
+            MAX(CAST(SUBSTRING_INDEX(issue_no, '-', -1) AS UNSIGNED)), 0
+        ) + 1 as next_num
         FROM material_issues
-        WHERE issue_no LIKE :prefix
+        WHERE issue_no LIKE :pattern
+        FOR UPDATE
     """)
     
-    result = conn.execute(query, {'prefix': f'{prefix}%'})
-    seq = result.fetchone()[0]
+    result = conn.execute(query, {'pattern': f'{prefix}%'})
+    row = result.fetchone()
+    next_num = int(row[0]) if row and row[0] else 1
     
-    return f"{prefix}{str(seq).zfill(4)}"
+    return f"{prefix}{next_num:03d}"
+
 
 
 def _generate_return_number(conn) -> str:
-    """Generate unique return number"""
-    prefix = f"RET{datetime.now().strftime('%Y%m%d')}"
+    """Generate unique return number matching DB schema format MR-YYYYMMDD-XXX"""
+    timestamp = datetime.now().strftime('%Y%m%d')
+    prefix = f"MR-{timestamp}-"
     
     query = text("""
-        SELECT COUNT(*) + 1 as seq
+        SELECT COALESCE(
+            MAX(CAST(SUBSTRING_INDEX(return_no, '-', -1) AS UNSIGNED)), 0
+        ) + 1 as next_num
         FROM material_returns
-        WHERE return_no LIKE :prefix
+        WHERE return_no LIKE :pattern
+        FOR UPDATE
     """)
     
-    result = conn.execute(query, {'prefix': f'{prefix}%'})
-    seq = result.fetchone()[0]
+    result = conn.execute(query, {'pattern': f'{prefix}%'})
+    row = result.fetchone()
+    next_num = int(row[0]) if row and row[0] else 1
     
-    return f"{prefix}{str(seq).zfill(4)}"
+    return f"{prefix}{next_num:03d}"
 
 
 def _generate_receipt_number(conn) -> str:
-    """Generate unique receipt number"""
-    prefix = f"RCP{datetime.now().strftime('%Y%m%d')}"
+    """Generate unique receipt number matching DB schema format PR-YYYYMMDD-XXX"""
+    timestamp = datetime.now().strftime('%Y%m%d')
+    prefix = f"PR-{timestamp}-"
     
     query = text("""
-        SELECT COUNT(*) + 1 as seq
+        SELECT COALESCE(
+            MAX(CAST(SUBSTRING_INDEX(receipt_no, '-', -1) AS UNSIGNED)), 0
+        ) + 1 as next_num
         FROM production_receipts
-        WHERE receipt_no LIKE :prefix
+        WHERE receipt_no LIKE :pattern
+        FOR UPDATE
     """)
     
-    result = conn.execute(query, {'prefix': f'{prefix}%'})
-    seq = result.fetchone()[0]
+    result = conn.execute(query, {'pattern': f'{prefix}%'})
+    row = result.fetchone()
+    next_num = int(row[0]) if row and row[0] else 1
     
-    return f"{prefix}{str(seq).zfill(4)}"
+    return f"{prefix}{next_num:03d}"
