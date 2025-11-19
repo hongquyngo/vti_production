@@ -68,15 +68,14 @@ class PDFExportDialog:
     
     @staticmethod
     def _show_generation_form(issue_result: Dict[str, Any], pdf_key: str):
-        """Show simplified PDF generation form - FIXED: No rerun after generate"""
+        """Show simplified PDF generation form with layout option"""
         
         # Check if PDF already generated
         if st.session_state.get(pdf_key):
-            # Show download section directly
             PDFExportDialog._show_download_section(issue_result, pdf_key)
             return
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             language = st.selectbox(
@@ -88,6 +87,15 @@ class PDFExportDialog:
             )
         
         with col2:
+            layout = st.selectbox(
+                "Page Layout",
+                options=['landscape', 'portrait'],
+                format_func=lambda x: "📐 Landscape" if x == 'landscape' else "📄 Portrait",
+                index=0,  # Default landscape
+                key="pdf_layout"
+            )
+        
+        with col3:
             include_signatures = st.checkbox(
                 "Include signature section",
                 value=True,
@@ -96,7 +104,7 @@ class PDFExportDialog:
         
         st.markdown("---")
         
-        # Action buttons (outside form to avoid rerun issues)
+        # Action buttons
         col1, col2 = st.columns([2, 2])
         
         with col1:
@@ -123,15 +131,14 @@ class PDFExportDialog:
                 return
             
             try:
-                # Validate issue data
                 if not pdf_generator.validate_issue_data(issue_id):
                     st.error("❌ Issue data not found in database.")
                     return
                 
                 with st.spinner("Generating PDF... Please wait..."):
-                    # Generate PDF with simplified options
                     pdf_options = {
                         'language': language,
+                        'layout': layout,
                         'include_signatures': include_signatures,
                     }
                     
@@ -144,14 +151,15 @@ class PDFExportDialog:
                         st.error("❌ PDF generation failed - empty content returned")
                         return
                     
-                    # Generate filename with language indicator
+                    # Generate filename with language and layout indicator
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                     lang_suffix = 'EN' if language == 'en' else 'VI'
-                    filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{timestamp}.pdf"
+                    layout_suffix = 'LS' if layout == 'landscape' else 'PT'
+                    filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{layout_suffix}_{timestamp}.pdf"
                     
-                    logger.info(f"✅ PDF generated for issue {issue_no}")
+                    logger.info(f"✅ PDF generated for issue {issue_no} ({layout})")
                     
-                    # Show download directly without rerun
+                    # Show download directly
                     st.success("✅ PDF Generated Successfully!")
                     
                     col_dl, col_done = st.columns([3, 1])
@@ -177,7 +185,8 @@ class PDFExportDialog:
         
         if skip_btn:
             st.info("✅ You can generate the PDF later from the Issue History tab")
-            st.rerun()  # Close dialog
+            st.rerun()
+
 
     @staticmethod
     def _show_download_section(issue_result: Dict[str, Any], pdf_key: str):
@@ -240,9 +249,10 @@ class QuickPDFButton:
         else:
             QuickPDFButton._show_quick_download_section(issue_id, issue_no, quick_key)
     
+
     @staticmethod
     def _show_quick_generation_form(issue_id: int, issue_no: str, quick_key: str):
-        """Show quick generation form"""
+        """Show quick generation form with layout option"""
         col1, col2 = st.columns(2)
         
         with col1:
@@ -254,6 +264,18 @@ class QuickPDFButton:
             )
         
         with col2:
+            layout = st.selectbox(
+                "Page Layout",
+                options=['landscape', 'portrait'],
+                format_func=lambda x: "📐 Landscape" if x == 'landscape' else "📄 Portrait",
+                index=0,  # Default landscape
+                key=f"quick_layout_{issue_id}"
+            )
+        
+        # Second row
+        col1, col2 = st.columns(2)
+        
+        with col1:
             include_signatures = st.checkbox(
                 "Include signatures",
                 value=True,
@@ -288,6 +310,7 @@ class QuickPDFButton:
                 with st.spinner("Generating PDF..."):
                     pdf_options = {
                         'language': language,
+                        'layout': layout,
                         'include_signatures': include_signatures,
                     }
                     
@@ -302,14 +325,15 @@ class QuickPDFButton:
                     
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                     lang_suffix = 'EN' if language == 'en' else 'VI'
-                    filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{timestamp}.pdf"
+                    layout_suffix = 'LS' if layout == 'landscape' else 'PT'
+                    filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{layout_suffix}_{timestamp}.pdf"
                     
                     # Store in session state
                     st.session_state[quick_key] = True
                     st.session_state[f'{quick_key}_content'] = pdf_content
                     st.session_state[f'{quick_key}_filename'] = filename
                     
-                    logger.info(f"Quick PDF generated for issue {issue_no}")
+                    logger.info(f"Quick PDF generated for issue {issue_no} ({layout})")
                     
                     # Show download immediately
                     st.success("✅ PDF Generated Successfully!")
@@ -331,12 +355,12 @@ class QuickPDFButton:
                 logger.error(f"Quick PDF error for issue {issue_id}: {e}", exc_info=True)
         
         if cancel:
-            # Clear any stored state for this issue
             st.session_state.pop(quick_key, None)
             st.session_state.pop(f'{quick_key}_content', None)
             st.session_state.pop(f'{quick_key}_filename', None)
             st.rerun()
-    
+
+
     @staticmethod
     def _show_quick_download_section(issue_id: int, issue_no: str, quick_key: str):
         """Show quick download section"""
@@ -393,13 +417,7 @@ class PDFBulkExport:
     @staticmethod
     @st.dialog("📦 Bulk PDF Export", width="large")
     def show_bulk_export_dialog(issue_ids: list, issue_data: list):
-        """
-        Show bulk export dialog
-        
-        Args:
-            issue_ids: List of issue IDs to export
-            issue_data: List of dicts with issue info (id, issue_no, etc.)
-        """
+        """Show bulk export dialog with layout option"""
         if not issue_ids:
             st.warning("No issues selected for export")
             return
@@ -415,12 +433,24 @@ class PDFBulkExport:
         
         # Bulk export options
         with st.form("bulk_export_form"):
-            language = st.selectbox(
-                "Language for all PDFs",
-                options=['vi', 'en'],
-                format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
-                key="bulk_language"
-            )
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                language = st.selectbox(
+                    "Language for all PDFs",
+                    options=['vi', 'en'],
+                    format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
+                    key="bulk_language"
+                )
+            
+            with col2:
+                layout = st.selectbox(
+                    "Page Layout",
+                    options=['landscape', 'portrait'],
+                    format_func=lambda x: "📐 Landscape" if x == 'landscape' else "📄 Portrait",
+                    index=0,  # Default landscape
+                    key="bulk_layout"
+                )
             
             st.markdown("---")
             
@@ -440,13 +470,14 @@ class PDFBulkExport:
                 )
             
             if start_export:
-                PDFBulkExport._process_bulk_export(issue_ids, language)
+                PDFBulkExport._process_bulk_export(issue_ids, language, layout)
             
             if cancel:
                 st.rerun()
-    
+
+
     @staticmethod
-    def _process_bulk_export(issue_ids: list, language: str):
+    def _process_bulk_export(issue_ids: list, language: str, layout: str = 'landscape'):
         """Process bulk PDF generation with progress tracking"""
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -459,7 +490,7 @@ class PDFBulkExport:
             status_text.text(f"Processing {idx + 1} of {len(issue_ids)}...")
             
             try:
-                pdf_content = pdf_generator.generate_pdf(issue_id, language)
+                pdf_content = pdf_generator.generate_pdf(issue_id, language, layout)
                 if pdf_content:
                     success_count += 1
                 else:
@@ -480,7 +511,8 @@ class PDFBulkExport:
                 st.error(f"Failed IDs: {', '.join(map(str, failed_ids))}")
         
         st.info("💡 Note: PDFs are generated but not automatically downloaded in bulk mode. Use individual download for each issue.")
-    
+
+
     @staticmethod
     def render_bulk_export_button(issue_ids: list, issue_data: list):
         """
