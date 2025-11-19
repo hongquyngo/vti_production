@@ -218,6 +218,150 @@ def show_confirm_order_dialog(order_id: int, order_no: str):
         if st.button("❌ Cancel", use_container_width=True):
             st.rerun()
 
+@st.dialog("Edit Production Order", width="large")
+def show_edit_order_dialog(order_id: int, order: dict):
+    """
+    Dialog to edit a DRAFT or CONFIRMED order
+    """
+    st.markdown(f"### Edit Order: **{order['order_no']}**")
+    
+    # Use global managers (already initialized at module level)
+    # prod_manager and inv_manager are available globally
+    
+    # Get warehouses
+    warehouses = inv_manager.get_warehouses()
+    if warehouses.empty:
+        st.error("No warehouses available")
+        return
+    
+    warehouse_options = {row['name']: row['id'] for _, row in warehouses.iterrows()}
+    warehouse_id_to_name = {row['id']: row['name'] for _, row in warehouses.iterrows()}
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Planned Quantity
+        new_planned_qty = st.number_input(
+            "Planned Quantity",
+            min_value=0.01,
+            value=float(order['planned_qty']),
+            step=1.0,
+            format="%.2f",
+            help="Quantity to produce"
+        )
+        
+        # Scheduled Date
+        current_date = order['scheduled_date']
+        if isinstance(current_date, str):
+            from datetime import datetime
+            current_date = datetime.strptime(current_date, '%Y-%m-%d').date()
+        
+        new_scheduled_date = st.date_input(
+            "Scheduled Date",
+            value=current_date,
+            help="Planned production date"
+        )
+        
+        # Priority
+        priority_options = ["LOW", "NORMAL", "HIGH", "URGENT"]
+        current_priority_idx = priority_options.index(order['priority']) if order['priority'] in priority_options else 1
+        
+        new_priority = st.selectbox(
+            "Priority",
+            priority_options,
+            index=current_priority_idx,
+            help="Production priority"
+        )
+    
+    with col2:
+        # Source Warehouse
+        current_source = warehouse_id_to_name.get(order['warehouse_id'], list(warehouse_options.keys())[0])
+        new_source_warehouse = st.selectbox(
+            "Source Warehouse",
+            options=list(warehouse_options.keys()),
+            index=list(warehouse_options.keys()).index(current_source) if current_source in warehouse_options else 0,
+            help="Warehouse to issue materials from"
+        )
+        new_source_warehouse_id = warehouse_options[new_source_warehouse]
+        
+        # Target Warehouse
+        current_target = warehouse_id_to_name.get(order['target_warehouse_id'], list(warehouse_options.keys())[0])
+        new_target_warehouse = st.selectbox(
+            "Target Warehouse",
+            options=list(warehouse_options.keys()),
+            index=list(warehouse_options.keys()).index(current_target) if current_target in warehouse_options else 0,
+            help="Warehouse to receive finished goods"
+        )
+        new_target_warehouse_id = warehouse_options[new_target_warehouse]
+        
+        # Notes
+        new_notes = st.text_area(
+            "Notes",
+            value=order.get('notes', '') or '',
+            height=100,
+            help="Additional notes or instructions"
+        )
+    
+    # Show warning if quantity changed
+    if new_planned_qty != float(order['planned_qty']):
+        st.warning("⚠️ Changing planned quantity will recalculate all required materials.")
+    
+    st.markdown("---")
+    
+    # Action buttons
+    col_cancel, col_save = st.columns(2)
+    
+    with col_cancel:
+        if st.button("❌ Cancel", use_container_width=True):
+            st.rerun()
+    
+    with col_save:
+        if st.button("💾 Save Changes", type="primary", use_container_width=True):
+            try:
+                # Build update data
+                update_data = {}
+                
+                if new_planned_qty != float(order['planned_qty']):
+                    update_data['planned_qty'] = new_planned_qty
+                
+                if new_scheduled_date != current_date:
+                    update_data['scheduled_date'] = new_scheduled_date
+                
+                if new_priority != order['priority']:
+                    update_data['priority'] = new_priority
+                
+                if new_source_warehouse_id != order['warehouse_id']:
+                    update_data['warehouse_id'] = new_source_warehouse_id
+                
+                if new_target_warehouse_id != order['target_warehouse_id']:
+                    update_data['target_warehouse_id'] = new_target_warehouse_id
+                
+                if new_notes != (order.get('notes', '') or ''):
+                    update_data['notes'] = new_notes
+                
+                if not update_data:
+                    st.info("No changes detected")
+                    return
+                
+                # Get user info
+                audit_info = get_user_audit_info()
+                user_id = audit_info.get('user_id')
+                
+                # Update order
+                success = prod_manager.update_order(order_id, update_data, user_id)
+                
+                if success:
+                    st.success(f"✅ Order {order['order_no']} updated successfully!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("Failed to update order")
+                    
+            except ValueError as e:
+                st.error(f"❌ {str(e)}")
+            except Exception as e:
+                logger.error(f"Error updating order: {e}")
+                st.error(f"❌ Error updating order: {str(e)}")
 
 def set_view(view: str, order_id: Optional[int] = None):
     """Set current view and optionally selected order"""
@@ -576,28 +720,34 @@ def render_order_details():
         st.markdown("---")
         st.markdown("### Quick Actions")
         
-        action_cols = st.columns(4)
+        action_cols = st.columns(5)  # Changed from 4 to 5 columns
         
         with action_cols[0]:
+            # NEW: Edit button for DRAFT/CONFIRMED orders
+            if order['status'] in ['DRAFT', 'CONFIRMED']:
+                if st.button("✏️ Edit Order", key="detail_edit_order", use_container_width=True):
+                    show_edit_order_dialog(order_id, order)
+        
+        with action_cols[1]:
             if order['status'] in ['DRAFT', 'CONFIRMED']:
                 if st.button("📦 Issue Materials", key="detail_issue_materials", use_container_width=True):
                     set_view('issue')
                     st.session_state.selected_order = order_id
                     st.rerun()
         
-        with action_cols[1]:
+        with action_cols[2]:
             if order['status'] == 'IN_PROGRESS':
                 if st.button("↩️ Return Materials", key="detail_return_materials", use_container_width=True):
                     set_view('return')
                     st.rerun()
         
-        with action_cols[2]:
+        with action_cols[3]:
             if order['status'] == 'IN_PROGRESS':
                 if st.button("✅ Complete Order", key="detail_complete_order", use_container_width=True):
                     set_view('complete')
                     st.rerun()
         
-        with action_cols[3]:
+        with action_cols[4]:
             if st.button("← Back to List", key="back_from_actions", use_container_width=True):
                 set_view('list')
                 st.rerun()

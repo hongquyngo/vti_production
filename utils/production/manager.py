@@ -464,6 +464,146 @@ class ProductionManager:
                 logger.error(f"Error updating order status: {e}")
                 raise
     
+    def update_order(self, order_id: int, update_data: dict, user_id: Optional[int] = None) -> bool:
+        """
+        Update production order details (only for DRAFT/CONFIRMED status)
+        
+        Args:
+            order_id: Order ID to update
+            update_data: Dictionary with fields to update
+                - planned_qty (optional)
+                - scheduled_date (optional)
+                - priority (optional)
+                - notes (optional)
+                - warehouse_id (optional)
+                - target_warehouse_id (optional)
+            user_id: User making the update
+        
+        Returns:
+            True if successful
+        """
+        with self.engine.begin() as conn:
+            try:
+                # Check current status
+                check_query = text("""
+                    SELECT status, bom_header_id FROM manufacturing_orders
+                    WHERE id = :order_id AND delete_flag = 0
+                """)
+                result = conn.execute(check_query, {'order_id': order_id})
+                order = result.fetchone()
+                
+                if not order:
+                    raise ValueError(f"Order {order_id} not found")
+                
+                if order[0] not in ['DRAFT', 'CONFIRMED']:
+                    raise ValueError(f"Cannot edit order with status {order[0]}. Only DRAFT or CONFIRMED orders can be edited.")
+                
+                # Build dynamic update query
+                update_fields = []
+                params = {'order_id': order_id, 'user_id': user_id}
+                
+                if 'planned_qty' in update_data:
+                    update_fields.append("planned_qty = :planned_qty")
+                    params['planned_qty'] = update_data['planned_qty']
+                
+                if 'scheduled_date' in update_data:
+                    update_fields.append("scheduled_date = :scheduled_date")
+                    params['scheduled_date'] = update_data['scheduled_date']
+                
+                if 'priority' in update_data:
+                    update_fields.append("priority = :priority")
+                    params['priority'] = update_data['priority']
+                
+                if 'notes' in update_data:
+                    update_fields.append("notes = :notes")
+                    params['notes'] = update_data['notes']
+                
+                if 'warehouse_id' in update_data:
+                    update_fields.append("warehouse_id = :warehouse_id")
+                    params['warehouse_id'] = update_data['warehouse_id']
+                
+                if 'target_warehouse_id' in update_data:
+                    update_fields.append("target_warehouse_id = :target_warehouse_id")
+                    params['target_warehouse_id'] = update_data['target_warehouse_id']
+                
+                if not update_fields:
+                    return True  # Nothing to update
+                
+                # Add audit fields
+                update_fields.extend([
+                    "updated_by = :user_id",
+                    "updated_date = NOW()"
+                ])
+                
+                query = text(f"""
+                    UPDATE manufacturing_orders
+                    SET {', '.join(update_fields)}
+                    WHERE id = :order_id AND delete_flag = 0
+                """)
+                
+                result = conn.execute(query, params)
+                
+                # If planned_qty changed, update order materials
+                if 'planned_qty' in update_data:
+                    self._recalculate_order_materials(conn, order_id, order[1], update_data['planned_qty'])
+                
+                success = result.rowcount > 0
+                if success:
+                    logger.info(f"Updated order {order_id}: {list(update_data.keys())}")
+                
+                return success
+                
+            except Exception as e:
+                logger.error(f"Error updating order {order_id}: {e}")
+                raise
+
+    def _recalculate_order_materials(self, conn, order_id: int, bom_header_id: int, new_qty: float):
+        """Recalculate order materials based on new planned quantity"""
+        try:
+            # Get BOM details
+            bom_query = text("""
+                SELECT bd.material_id, bd.quantity, bd.scrap_rate
+                FROM bom_details bd
+                WHERE bd.bom_header_id = :bom_id AND bd.delete_flag = 0
+            """)
+            bom_details = conn.execute(bom_query, {'bom_id': bom_header_id}).fetchall()
+            
+            # Get BOM output qty
+            output_query = text("""
+                SELECT output_qty FROM bom_headers WHERE id = :bom_id
+            """)
+            output_result = conn.execute(output_query, {'bom_id': bom_header_id}).fetchone()
+            output_qty = output_result[0] if output_result else 1
+            
+            # Calculate multiplier
+            multiplier = new_qty / float(output_qty)
+            
+            # Update each material
+            for detail in bom_details:
+                material_id = detail[0]
+                base_qty = float(detail[1])
+                scrap_rate = float(detail[2] or 0)
+                
+                required_qty = base_qty * multiplier * (1 + scrap_rate / 100)
+                
+                update_query = text("""
+                    UPDATE manufacturing_order_materials
+                    SET required_qty = :required_qty
+                    WHERE order_id = :order_id AND material_id = :material_id
+                """)
+                
+                conn.execute(update_query, {
+                    'required_qty': required_qty,
+                    'order_id': order_id,
+                    'material_id': material_id
+                })
+            
+            logger.info(f"Recalculated materials for order {order_id} with new qty {new_qty}")
+            
+        except Exception as e:
+            logger.error(f"Error recalculating materials: {e}")
+            raise
+
     def _generate_order_number(self, conn) -> str:
         """Generate unique order number"""
         timestamp = datetime.now().strftime('%Y%m%d')
