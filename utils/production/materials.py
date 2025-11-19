@@ -1,16 +1,17 @@
 # utils/production/materials.py
 """
-Material Issue, Return, and Production Completion Logic - REFACTORED v6.1 BACKWARD COMPATIBLE
-FEFO-based material issuing with automatic alternative substitution and tracking
+Material Issue, Return, and Production Completion Logic - REFACTORED v7.0
+FEFO-based material issuing with automatic alternative substitution and conversion ratio tracking
 
-MAJOR CHANGES v6.1 (Backward Compatible Fix):
-✅ FIXED: Removed entity_id from material_issues INSERT (column doesn't exist in DB)
-✅ FIXED: Removed entity_id and group_id from material_returns INSERT (columns don't exist)
-✅ FIXED: Removed entity_id from production_receipts INSERT (column doesn't exist)
-✅ FIXED: Updated function signatures to remove entity_id parameter
-✅ MAINTAINED: All inventory_histories logic with fallback (checks if columns exist)
-✅ MAINTAINED: Full alternative material tracking and substitution logic
+MAJOR CHANGES v7.0:
+✅ NEW: issued_qty trong manufacturing_order_materials = tổng EQUIVALENT (quy đổi về primary)
+✅ NEW: material_issue_details ghi ACTUAL quantity xuất ra
+✅ NEW: Hỗ trợ nhiều alternatives với conversion ratios khác nhau
+✅ NEW: Return logic convert ngược về equivalent
+✅ NEW: Helper functions: _get_bom_detail_info, _get_alternatives_for_material, _get_conversion_ratio
+✅ MAINTAINED: All inventory_histories logic with fallback
 ✅ MAINTAINED: FEFO logic and batch tracking
+✅ MAINTAINED: Full alternative material tracking
 """
 
 import logging
@@ -24,6 +25,8 @@ from ..db import get_db_engine
 
 logger = logging.getLogger(__name__)
 
+
+# ==================== MAIN PUBLIC FUNCTIONS ====================
 
 def issue_materials(order_id: int, user_id: int, keycloak_id: str, 
                    issued_by: int, received_by: int = None,
@@ -39,6 +42,9 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
         issued_by: Employee ID of warehouse staff issuing materials (REQUIRED)
         received_by: Employee ID of production staff receiving materials
         notes: Optional notes about the issue
+    
+    Returns:
+        Dictionary with issue_no, issue_id, details, substitutions
     
     Raises:
         ValueError: If order not found, invalid status, insufficient stock, or missing issued_by
@@ -63,7 +69,7 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
             issue_no = _generate_issue_number(conn)
             group_id = str(uuid.uuid4())
             
-            # Create issue header - WITH employee IDs and notes
+            # Create issue header
             issue_query = text("""
                 INSERT INTO material_issues (
                     issue_no, manufacturing_order_id, warehouse_id,
@@ -140,6 +146,7 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
             logger.error(f"❌ Error issuing materials for order {order_id}: {e}")
             raise
 
+
 def return_materials(order_id: int, returns: List[Dict],
                     reason: str, user_id: int, keycloak_id: str,
                     returned_by: int = None, received_by: int = None) -> Dict[str, Any]:
@@ -187,7 +194,7 @@ def return_materials(order_id: int, returns: List[Dict],
             for ret in returns:
                 _validate_return(conn, ret)
             
-            # Create return header - WITH employee IDs
+            # Create return header
             return_no = _generate_return_number(conn)
             group_id = str(uuid.uuid4())
             
@@ -229,8 +236,8 @@ def return_materials(order_id: int, returns: List[Dict],
                 )
                 return_details.append(detail)
             
-            # Update manufacturing_order_materials issued quantities
-            _update_order_materials_for_return(conn, return_details)
+            # Update manufacturing_order_materials issued quantities with conversion
+            _update_order_materials_for_return(conn, return_details, order_id)
             
             logger.info(f"✅ Created return {return_no} for order {order_id}")
             
@@ -243,6 +250,7 @@ def return_materials(order_id: int, returns: List[Dict],
         except Exception as e:
             logger.error(f"❌ Error processing returns for order {order_id}: {e}")
             raise
+
 
 def complete_production(order_id: int, produced_qty: float,
                        batch_no: str, warehouse_id: int,
@@ -282,7 +290,7 @@ def complete_production(order_id: int, produced_qty: float,
             receipt_no = _generate_receipt_number(conn)
             group_id = str(uuid.uuid4())
             
-            # Create production receipt - REMOVED entity_id (doesn't exist in DB)
+            # Create production receipt
             receipt_query = text("""
                 INSERT INTO production_receipts (
                     receipt_no, manufacturing_order_id, receipt_date,
@@ -319,7 +327,7 @@ def complete_production(order_id: int, produced_qty: float,
                     conn, order, produced_qty, batch_no,
                     warehouse_id, expiry_date, 
                     group_id, keycloak_id, 
-                    order.get('entity_id', 1),  # Get from order, fallback to 1
+                    order.get('entity_id', 1),
                     receipt_id
                 )
             
@@ -346,6 +354,16 @@ def complete_production(order_id: int, produced_qty: float,
                 'user_id': user_id
             })
             
+            # Check if order is completed
+            check_query = text("""
+                SELECT 
+                    COALESCE(produced_qty, 0) >= planned_qty as is_completed
+                FROM manufacturing_orders
+                WHERE id = :order_id
+            """)
+            check_result = conn.execute(check_query, {'order_id': order_id})
+            order_completed = bool(check_result.fetchone()[0])
+            
             logger.info(f"✅ Completed production receipt {receipt_no} for order {order_id}")
             
             return {
@@ -353,7 +371,8 @@ def complete_production(order_id: int, produced_qty: float,
                 'receipt_id': receipt_id,
                 'quantity': produced_qty,
                 'batch_no': batch_no,
-                'quality_status': quality_status
+                'quality_status': quality_status,
+                'order_completed': order_completed
             }
             
         except Exception as e:
@@ -415,7 +434,330 @@ def get_returnable_materials(order_id: int) -> pd.DataFrame:
         logger.error(f"❌ Error getting returnable materials: {e}")
         return pd.DataFrame()
 
-# ==================== INTERNAL HELPER FUNCTIONS ====================
+
+# ==================== CORE ISSUE LOGIC ====================
+
+def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
+                                     material: pd.Series, required_qty: float,
+                                     warehouse_id: int, group_id: str,
+                                     user_id: int, keycloak_id: str,
+                                     entity_id: int) -> Dict[str, Any]:
+    """
+    Issue material using FEFO, automatically substituting alternatives if needed
+    
+    Key: Track cả actual quantity và equivalent quantity
+    - actual: số lượng thực xuất (ghi vào material_issue_details)
+    - equivalent: quy đổi về primary (cộng vào issued_qty)
+    
+    Returns:
+        Dictionary with issued details and substitution info
+    """
+    issued_details = []
+    substitutions = []
+    remaining_equivalent = float(required_qty)  # Remaining tính theo equivalent
+    
+    # Get BOM detail info for this material (cần cho conversion ratio)
+    bom_info = _get_bom_detail_info(conn, material['order_material_id'])
+    primary_bom_qty = float(bom_info['quantity']) if bom_info else 1.0
+    
+    # === TRY PRIMARY MATERIAL FIRST ===
+    primary_equivalent_issued = 0.0
+    try:
+        primary_details = _issue_single_material_fefo(
+            conn, issue_id, order_id, material, 
+            remaining_equivalent,  # Primary: equivalent = actual
+            warehouse_id, group_id, user_id, keycloak_id, entity_id,
+            is_alternative=False, 
+            original_material_id=None,
+            conversion_ratio=1.0  # Primary ratio = 1
+        )
+        issued_details.extend(primary_details)
+        
+        # Primary: actual = equivalent
+        for detail in primary_details:
+            primary_equivalent_issued += float(detail['quantity'])
+        
+        remaining_equivalent -= primary_equivalent_issued
+        
+    except ValueError as e:
+        # Insufficient stock for primary - log but continue with alternatives
+        logger.warning(f"⚠️ Insufficient primary material {material['material_name']}: {e}")
+    
+    # === TRY ALTERNATIVES IF NEEDED ===
+    if remaining_equivalent > 0 and bom_info:
+        # Get alternatives ordered by priority
+        alternatives = _get_alternatives_for_material(conn, bom_info['bom_detail_id'])
+        
+        # Try each alternative in priority order
+        for alt in alternatives:
+            if remaining_equivalent <= 0:
+                break
+            
+            try:
+                # Calculate conversion ratio
+                conversion_ratio = float(alt['quantity']) / primary_bom_qty
+                
+                # Calculate actual quantity needed for alternative
+                alt_actual_qty = remaining_equivalent * conversion_ratio
+                
+                # Create temporary material data for alternative
+                alt_material = pd.Series({
+                    'order_material_id': material['order_material_id'],
+                    'material_id': alt['alternative_material_id'],
+                    'material_name': alt['alternative_material_name'],
+                    'uom': alt['uom']
+                })
+                
+                # Try issuing alternative with tracking
+                alt_details = _issue_single_material_fefo(
+                    conn, issue_id, order_id, alt_material, 
+                    alt_actual_qty,  # Actual quantity
+                    warehouse_id, group_id, user_id, keycloak_id, entity_id,
+                    is_alternative=True, 
+                    original_material_id=material['material_id'],
+                    conversion_ratio=conversion_ratio
+                )
+                
+                # Calculate equivalent issued from this alternative
+                alt_actual_issued = sum(float(d['quantity']) for d in alt_details)
+                alt_equivalent_issued = alt_actual_issued / conversion_ratio
+                
+                if alt_actual_issued > 0:
+                    issued_details.extend(alt_details)
+                    
+                    # Record substitution with both actual and equivalent
+                    substitutions.append({
+                        'original_material': material['material_name'],
+                        'original_material_id': material['material_id'],
+                        'substitute_material': alt['alternative_material_name'],
+                        'substitute_material_id': alt['alternative_material_id'],
+                        'actual_quantity': alt_actual_issued,
+                        'equivalent_quantity': alt_equivalent_issued,
+                        'conversion_ratio': conversion_ratio,
+                        'uom': alt['uom'],
+                        'priority': alt['priority']
+                    })
+                    
+                    remaining_equivalent -= alt_equivalent_issued
+                    logger.info(
+                        f"🔄 Substituted {alt_actual_issued} {alt['uom']} of "
+                        f"{alt['alternative_material_name']} "
+                        f"(equivalent: {alt_equivalent_issued:.4f}) "
+                        f"for {material['material_name']}"
+                    )
+                
+            except ValueError as e:
+                logger.warning(f"⚠️ Alternative {alt['alternative_material_name']} also insufficient: {e}")
+                continue
+        
+        # Check if we fulfilled the requirement
+        if remaining_equivalent > 0:
+            total_equivalent = float(required_qty) - float(remaining_equivalent)
+            if total_equivalent == 0:
+                raise ValueError(f"No materials available (primary or alternatives) for {material['material_name']}")
+            else:
+                logger.warning(
+                    f"⚠️ Only partial issue possible for {material['material_name']}: "
+                    f"{total_equivalent}/{required_qty} (equivalent)"
+                )
+    
+    return {
+        'details': issued_details,
+        'substitutions': substitutions
+    }
+
+
+def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
+                               material: pd.Series, required_qty: float,
+                               warehouse_id: int, group_id: str, 
+                               user_id: int, keycloak_id: str, entity_id: int,
+                               is_alternative: bool = False,
+                               original_material_id: Optional[int] = None,
+                               conversion_ratio: float = 1.0) -> List[Dict]:
+    """
+    Issue single material using FEFO with alternative tracking
+    
+    Args:
+        issue_id: Material issue ID
+        order_id: Manufacturing order ID
+        material: Material series with material_id, name, etc.
+        required_qty: ACTUAL quantity to issue (not equivalent)
+        warehouse_id: Source warehouse
+        group_id: Transaction group ID
+        user_id: User ID for manufacturing tables (INT)
+        keycloak_id: Keycloak ID for inventory tables (VARCHAR)
+        entity_id: Company/Entity ID
+        is_alternative: Whether this is an alternative material
+        original_material_id: ID of original material if this is alternative
+        conversion_ratio: Ratio to convert actual -> equivalent (alt_qty / primary_qty)
+    
+    Returns:
+        List of issued details with actual quantities
+    """
+    # Get available batches using FEFO
+    batch_query = text("""
+        SELECT 
+            id as inventory_history_id,
+            batch_no,
+            expired_date,
+            remain as available_qty
+        FROM inventory_histories
+        WHERE product_id = :material_id
+            AND warehouse_id = :warehouse_id
+            AND remain > 0
+            AND delete_flag = 0
+        ORDER BY 
+            COALESCE(expired_date, '2099-12-31') ASC,  -- FEFO
+            created_date ASC                           -- FIFO as secondary
+        FOR UPDATE
+    """)
+    
+    batch_result = conn.execute(batch_query, {
+        'material_id': material['material_id'],
+        'warehouse_id': warehouse_id
+    })
+    
+    batches = []
+    for row in batch_result:
+        batches.append(dict(zip(batch_result.keys(), row)))
+    
+    if not batches:
+        raise ValueError(f"No stock available for material {material['material_name']}")
+    
+    # Issue from batches
+    issued_details = []
+    total_actual_issued = 0.0
+    total_equivalent_issued = 0.0
+    
+    for batch in batches:
+        if total_actual_issued >= required_qty:
+            break
+        
+        # Calculate quantity to issue from this batch
+        batch_available = float(batch['available_qty'])
+        required_remaining = float(required_qty) - float(total_actual_issued)
+        issue_qty = min(batch_available, required_remaining)
+        
+        # Insert issue detail with alternative tracking (actual quantity)
+        detail_id = _insert_issue_detail(
+            conn, issue_id, material['order_material_id'],
+            material['material_id'], batch, issue_qty, material['uom'],
+            is_alternative, original_material_id
+        )
+        
+        # Update inventory with proper operation tracking
+        _update_inventory_for_issue(
+            conn, batch['inventory_history_id'], material['material_id'],
+            warehouse_id, issue_qty, group_id, keycloak_id, 
+            entity_id, issue_id
+        )
+        
+        issued_details.append({
+            'detail_id': detail_id,
+            'material_id': material['material_id'],
+            'material_name': material['material_name'],
+            'batch_no': batch['batch_no'],
+            'quantity': issue_qty,  # Actual quantity
+            'uom': material['uom'],
+            'expired_date': batch['expired_date'],
+            'is_alternative': is_alternative,
+            'original_material_id': original_material_id,
+            'conversion_ratio': conversion_ratio
+        })
+        
+        total_actual_issued += issue_qty
+        total_equivalent_issued += issue_qty / conversion_ratio
+    
+    if total_actual_issued < required_qty:
+        raise ValueError(f"Insufficient stock: required {required_qty}, available {total_actual_issued}")
+    
+    # Update manufacturing_order_materials với EQUIVALENT quantity
+    update_query = text("""
+        UPDATE manufacturing_order_materials
+        SET issued_qty = COALESCE(issued_qty, 0) + :equivalent_issued,
+            status = CASE 
+                WHEN COALESCE(issued_qty, 0) + :equivalent_issued >= required_qty THEN 'ISSUED'
+                WHEN COALESCE(issued_qty, 0) + :equivalent_issued > 0 THEN 'PARTIAL'
+                ELSE 'PENDING'
+            END
+        WHERE id = :order_material_id
+    """)
+    
+    conn.execute(update_query, {
+        'equivalent_issued': total_equivalent_issued,
+        'order_material_id': material['order_material_id']
+    })
+    
+    return issued_details
+
+
+# ==================== RETURN LOGIC ====================
+
+def _update_order_materials_for_return(conn, return_details: List[Dict], order_id: int):
+    """
+    Update manufacturing_order_materials after return
+    
+    Key: Convert return quantity về equivalent trước khi trừ issued_qty
+    """
+    for detail in return_details:
+        # Get original issue detail để lấy conversion info
+        issue_detail_query = text("""
+            SELECT 
+                mid.material_id,
+                mid.is_alternative,
+                mid.original_material_id,
+                mid.manufacturing_order_material_id,
+                mom.material_id as primary_material_id
+            FROM material_issue_details mid
+            JOIN manufacturing_order_materials mom 
+                ON mid.manufacturing_order_material_id = mom.id
+            WHERE mid.id = :issue_detail_id
+        """)
+        
+        result = conn.execute(issue_detail_query, {
+            'issue_detail_id': detail['original_issue_detail_id']
+        })
+        issue_info = dict(zip(result.keys(), result.fetchone()))
+        
+        return_qty = float(detail['quantity'])
+        
+        # Calculate equivalent quantity
+        if issue_info['is_alternative']:
+            # Get conversion ratio for this alternative
+            conversion_ratio = _get_conversion_ratio(
+                conn, 
+                issue_info['manufacturing_order_material_id'],
+                issue_info['material_id']
+            )
+            equivalent_returned = return_qty / conversion_ratio
+        else:
+            # Primary material: equivalent = actual
+            equivalent_returned = return_qty
+        
+        # Update issued_qty với equivalent
+        update_query = text("""
+            UPDATE manufacturing_order_materials
+            SET issued_qty = GREATEST(0, COALESCE(issued_qty, 0) - :equivalent_qty),
+                status = CASE 
+                    WHEN COALESCE(issued_qty, 0) - :equivalent_qty <= 0 THEN 'PENDING'
+                    WHEN COALESCE(issued_qty, 0) - :equivalent_qty < required_qty THEN 'PARTIAL'
+                    ELSE 'ISSUED'
+                END
+            WHERE id = :order_material_id
+        """)
+        
+        conn.execute(update_query, {
+            'equivalent_qty': equivalent_returned,
+            'order_material_id': issue_info['manufacturing_order_material_id']
+        })
+        
+        logger.info(
+            f"📦 Returned {return_qty} (equivalent: {equivalent_returned:.4f}) "
+            f"for material_id {issue_info['material_id']}"
+        )
+
+
+# ==================== HELPER FUNCTIONS ====================
 
 def _get_order_info(conn, order_id: int) -> Optional[Dict]:
     """Get order information with necessary fields"""
@@ -472,271 +814,109 @@ def _get_pending_materials(conn, order_id: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _issue_material_with_alternatives(conn, issue_id: int, order_id: int,
-                                     material: pd.Series, required_qty: float,
-                                     warehouse_id: int, group_id: str,
-                                     user_id: int, keycloak_id: str,
-                                     entity_id: int) -> Dict[str, Any]:
-    """
-    Issue material using FEFO, automatically substituting alternatives if needed
-    
-    Returns:
-        Dictionary with issued details and substitution info
-    """
-    issued_details = []
-    substitutions = []
-    remaining = float(required_qty)
-    
-    # Try primary material first
-    primary_issued = 0.0
-    try:
-        primary_details = _issue_single_material_fefo(
-            conn, issue_id, order_id, material, remaining,
-            warehouse_id, group_id, user_id, keycloak_id, entity_id,
-            is_alternative=False, original_material_id=None
-        )
-        issued_details.extend(primary_details)
-        
-        # Calculate how much was issued from primary
-        for detail in primary_details:
-            primary_issued += float(detail['quantity'])
-        
-        remaining -= primary_issued
-        
-    except ValueError as e:
-        # Insufficient stock for primary - log but continue with alternatives
-        logger.warning(f"⚠️ Insufficient primary material {material['material_name']}: {e}")
-    
-    # If still need more, try alternatives
-    if remaining > 0:
-        # Get BOM detail ID for this material
-        bom_detail_query = text("""
-            SELECT bd.id as bom_detail_id
-            FROM manufacturing_order_materials mom
-            JOIN manufacturing_orders mo ON mom.manufacturing_order_id = mo.id
-            JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
-                AND bd.material_id = mom.material_id
-            WHERE mom.id = :order_material_id
-        """)
-        
-        result = conn.execute(bom_detail_query, {
-            'order_material_id': material['order_material_id']
-        })
-        bom_detail_row = result.fetchone()
-        
-        if not bom_detail_row:
-            if primary_issued == 0:
-                raise ValueError(f"No materials available for {material['material_name']}")
-            else:
-                # Partial issue from primary only
-                logger.warning(f"⚠️ Only partial issue possible for {material['material_name']}: {primary_issued}/{required_qty}")
-                return {'details': issued_details, 'substitutions': []}
-        
-        bom_detail = dict(zip(result.keys(), bom_detail_row))
-        
-        # Get alternatives ordered by priority
-        alternatives_query = text("""
-            SELECT 
-                alt.id as alternative_id,
-                alt.alternative_material_id,
-                p.name as alternative_material_name,
-                alt.quantity,
-                alt.uom,
-                alt.scrap_rate,
-                alt.priority
-            FROM bom_material_alternatives alt
-            JOIN products p ON alt.alternative_material_id = p.id
-            WHERE alt.bom_detail_id = :bom_detail_id
-                AND alt.is_active = 1
-            ORDER BY alt.priority ASC
-        """)
-        
-        alternatives_result = conn.execute(alternatives_query, {
-            'bom_detail_id': bom_detail['bom_detail_id']
-        })
-        
-        # Convert alternatives to list of dicts
-        alternatives_list = []
-        for row in alternatives_result:
-            alternatives_list.append(dict(zip(alternatives_result.keys(), row)))
-        
-        # Try each alternative in priority order
-        for alt in alternatives_list:
-            if remaining <= 0:
-                break
-                
-            try:
-                # Create temporary material data for alternative
-                alt_material = pd.Series({
-                    'order_material_id': material['order_material_id'],
-                    'material_id': alt['alternative_material_id'],
-                    'material_name': alt['alternative_material_name'],
-                    'uom': alt['uom']
-                })
-                
-                # Try issuing alternative with tracking
-                alt_details = _issue_single_material_fefo(
-                    conn, issue_id, order_id, alt_material, remaining,
-                    warehouse_id, group_id, user_id, keycloak_id, entity_id,
-                    is_alternative=True, 
-                    original_material_id=material['material_id']
-                )
-                
-                # Calculate how much was issued from this alternative
-                alt_issued = sum(float(d['quantity']) for d in alt_details)
-                
-                if alt_issued > 0:
-                    issued_details.extend(alt_details)
-                    
-                    # Record substitution
-                    substitutions.append({
-                        'original_material': material['material_name'],
-                        'original_material_id': material['material_id'],
-                        'substitute_material': alt['alternative_material_name'],
-                        'substitute_material_id': alt['alternative_material_id'],
-                        'quantity': alt_issued,
-                        'uom': alt['uom'],
-                        'priority': alt['priority']
-                    })
-                    
-                    remaining -= alt_issued
-                    logger.info(f"🔄 Substituted {alt_issued} {alt['uom']} of {alt['alternative_material_name']} for {material['material_name']}")
-                
-            except ValueError as e:
-                logger.warning(f"⚠️ Alternative {alt['alternative_material_name']} also insufficient: {e}")
-                continue
-        
-        # Check if we fulfilled the requirement
-        if remaining > 0:
-            total_issued = float(required_qty) - float(remaining)
-            if total_issued == 0:
-                raise ValueError(f"No materials available (primary or alternatives) for {material['material_name']}")
-            else:
-                logger.warning(f"⚠️ Only partial issue possible for {material['material_name']}: {total_issued}/{required_qty}")
-    
-    return {
-        'details': issued_details,
-        'substitutions': substitutions
-    }
-
-
-def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
-                               material: pd.Series, required_qty: float,
-                               warehouse_id: int, group_id: str, 
-                               user_id: int, keycloak_id: str, entity_id: int,
-                               is_alternative: bool = False,
-                               original_material_id: Optional[int] = None) -> List[Dict]:
-    """
-    Issue single material using FEFO with alternative tracking
-    
-    Args:
-        issue_id: Material issue ID
-        order_id: Manufacturing order ID
-        material: Material series with material_id, name, etc.
-        required_qty: Quantity required
-        warehouse_id: Source warehouse
-        group_id: Transaction group ID
-        user_id: User ID for manufacturing tables (INT)
-        keycloak_id: Keycloak ID for inventory tables (VARCHAR)
-        entity_id: Company/Entity ID (for inventory tracking if columns exist)
-        is_alternative: Whether this is an alternative material
-        original_material_id: ID of original material if this is alternative
-    
-    Returns:
-        List of issued details
-    """
-    # Get available batches using FEFO
-    batch_query = text("""
+def _get_bom_detail_info(conn, order_material_id: int) -> Optional[Dict]:
+    """Get BOM detail info for a manufacturing order material"""
+    query = text("""
         SELECT 
-            id as inventory_history_id,
-            batch_no,
-            expired_date,
-            remain as available_qty
-        FROM inventory_histories
-        WHERE product_id = :material_id
-            AND warehouse_id = :warehouse_id
-            AND remain > 0
-            AND delete_flag = 0
-        ORDER BY 
-            COALESCE(expired_date, '2099-12-31') ASC,  -- FEFO
-            created_date ASC                           -- FIFO as secondary
-        FOR UPDATE
+            bd.id as bom_detail_id,
+            bd.quantity,
+            bd.uom
+        FROM manufacturing_order_materials mom
+        JOIN manufacturing_orders mo ON mom.manufacturing_order_id = mo.id
+        JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
+            AND bd.material_id = mom.material_id
+        WHERE mom.id = :order_material_id
     """)
     
-    batch_result = conn.execute(batch_query, {
-        'material_id': material['material_id'],
-        'warehouse_id': warehouse_id
-    })
+    result = conn.execute(query, {'order_material_id': order_material_id})
+    row = result.fetchone()
     
-    batches = []
-    for row in batch_result:
-        batches.append(dict(zip(batch_result.keys(), row)))
-    
-    if not batches:
-        raise ValueError(f"No stock available for material {material['material_name']}")
-    
-    # Issue from batches
-    issued_details = []
-    total_issued = 0.0
-    
-    for batch in batches:
-        if total_issued >= required_qty:
-            break
-        
-        # Calculate quantity to issue from this batch
-        batch_available = float(batch['available_qty'])
-        required_remaining = float(required_qty) - float(total_issued)
-        issue_qty = min(batch_available, required_remaining)
-        
-        # Insert issue detail with alternative tracking
-        detail_id = _insert_issue_detail(
-            conn, issue_id, material['order_material_id'],
-            material['material_id'], batch, issue_qty, material['uom'],
-            is_alternative, original_material_id
-        )
-        
-        # Update inventory with proper operation tracking
-        _update_inventory_for_issue(
-            conn, batch['inventory_history_id'], material['material_id'],
-            warehouse_id, issue_qty, group_id, keycloak_id, 
-            entity_id, issue_id
-        )
-        
-        issued_details.append({
-            'detail_id': detail_id,
-            'material_id': material['material_id'],
-            'material_name': material['material_name'],
-            'batch_no': batch['batch_no'],
-            'quantity': issue_qty,
-            'uom': material['uom'],
-            'expired_date': batch['expired_date'],
-            'is_alternative': is_alternative,
-            'original_material_id': original_material_id
-        })
-        
-        total_issued += issue_qty
-    
-    if total_issued < required_qty:
-        raise ValueError(f"Insufficient stock: required {required_qty}, available {total_issued}")
-    
-    # Update manufacturing_order_materials issued quantity
-    update_query = text("""
-        UPDATE manufacturing_order_materials
-        SET issued_qty = COALESCE(issued_qty, 0) + :issued_qty,
-            status = CASE 
-                WHEN COALESCE(issued_qty, 0) + :issued_qty >= required_qty THEN 'ISSUED'
-                WHEN COALESCE(issued_qty, 0) + :issued_qty > 0 THEN 'PARTIAL'
-                ELSE 'PENDING'
-            END
-        WHERE id = :order_material_id
+    return dict(zip(result.keys(), row)) if row else None
+
+
+def _get_alternatives_for_material(conn, bom_detail_id: int) -> List[Dict]:
+    """Get active alternatives ordered by priority"""
+    query = text("""
+        SELECT 
+            alt.id as alternative_id,
+            alt.alternative_material_id,
+            p.name as alternative_material_name,
+            alt.quantity,
+            alt.uom,
+            alt.scrap_rate,
+            alt.priority
+        FROM bom_material_alternatives alt
+        JOIN products p ON alt.alternative_material_id = p.id
+        WHERE alt.bom_detail_id = :bom_detail_id
+            AND alt.is_active = 1
+        ORDER BY alt.priority ASC
     """)
     
-    conn.execute(update_query, {
-        'issued_qty': total_issued,
-        'order_material_id': material['order_material_id']
+    result = conn.execute(query, {'bom_detail_id': bom_detail_id})
+    return [dict(zip(result.keys(), row)) for row in result]
+
+
+def _get_conversion_ratio(conn, order_material_id: int, 
+                         alternative_material_id: int) -> float:
+    """
+    Get conversion ratio for alternative material
+    
+    Returns: alternative_qty / primary_qty
+    """
+    query = text("""
+        SELECT 
+            bd.quantity as primary_qty,
+            alt.quantity as alt_qty
+        FROM manufacturing_order_materials mom
+        JOIN manufacturing_orders mo ON mom.manufacturing_order_id = mo.id
+        JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
+            AND bd.material_id = mom.material_id
+        JOIN bom_material_alternatives alt ON alt.bom_detail_id = bd.id
+            AND alt.alternative_material_id = :alt_material_id
+        WHERE mom.id = :order_material_id
+    """)
+    
+    result = conn.execute(query, {
+        'order_material_id': order_material_id,
+        'alt_material_id': alternative_material_id
     })
     
-    return issued_details
+    row = result.fetchone()
+    if not row:
+        logger.warning(
+            f"Conversion ratio not found for order_material {order_material_id}, "
+            f"alternative {alternative_material_id}. Using 1.0"
+        )
+        return 1.0
+    
+    row_dict = dict(zip(result.keys(), row))
+    return float(row_dict['alt_qty']) / float(row_dict['primary_qty'])
+
+
+def _validate_return(conn, return_item: Dict):
+    """Validate return item"""
+    query = text("""
+        SELECT 
+            mid.quantity as issued_qty,
+            COALESCE(SUM(mrd.quantity), 0) as returned_qty
+        FROM material_issue_details mid
+        LEFT JOIN material_return_details mrd 
+            ON mrd.original_issue_detail_id = mid.id
+        WHERE mid.id = :issue_detail_id
+        GROUP BY mid.quantity
+    """)
+    
+    result = conn.execute(query, {'issue_detail_id': return_item['issue_detail_id']})
+    row = result.fetchone()
+    
+    if not row:
+        raise ValueError(f"Issue detail {return_item['issue_detail_id']} not found")
+    
+    data = dict(zip(result.keys(), row))
+    available = data['issued_qty'] - data['returned_qty']
+    
+    if return_item['quantity'] > available:
+        raise ValueError(f"Cannot return {return_item['quantity']}, only {available} available")
 
 
 def _insert_issue_detail(conn, issue_id: int, order_material_id: int,
@@ -879,7 +1059,7 @@ def _update_inventory_for_issue(conn, inv_history_id: int, material_id: int,
             'group_id': group_id,
             'issue_id': issue_id,
             'entity_id': entity_id,
-            'created_by': keycloak_id  # CRITICAL: Use keycloak_id, not user_id
+            'created_by': keycloak_id
         })
     else:
         # Fallback to basic tracking
@@ -898,34 +1078,9 @@ def _update_inventory_for_issue(conn, inv_history_id: int, material_id: int,
             'warehouse_id': warehouse_id,
             'quantity': quantity,
             'group_id': group_id,
-            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
+            'created_by': keycloak_id
         })
 
-
-def _validate_return(conn, return_item: Dict):
-    """Validate return item"""
-    query = text("""
-        SELECT 
-            mid.quantity as issued_qty,
-            COALESCE(SUM(mrd.quantity), 0) as returned_qty
-        FROM material_issue_details mid
-        LEFT JOIN material_return_details mrd 
-            ON mrd.original_issue_detail_id = mid.id
-        WHERE mid.id = :issue_detail_id
-        GROUP BY mid.quantity
-    """)
-    
-    result = conn.execute(query, {'issue_detail_id': return_item['issue_detail_id']})
-    row = result.fetchone()
-    
-    if not row:
-        raise ValueError(f"Issue detail {return_item['issue_detail_id']} not found")
-    
-    data = dict(zip(result.keys(), row))
-    available = data['issued_qty'] - data['returned_qty']
-    
-    if return_item['quantity'] > available:
-        raise ValueError(f"Cannot return {return_item['quantity']}, only {available} available")
 
 def _process_return_item(conn, return_id: int, return_item: Dict,
                         warehouse_id: int, group_id: str, 
@@ -941,6 +1096,7 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
             mid.material_id, 
             mid.batch_no, 
             mid.expired_date,
+            mid.uom,
             COALESCE(mid.is_alternative, 0) as is_alternative,
             mid.original_material_id
         FROM material_issue_details mid
@@ -983,7 +1139,7 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
             'issue_detail_id': return_item['issue_detail_id'],
             'batch_no': issue_detail['batch_no'],
             'quantity': return_item['quantity'],
-            'uom': return_item['uom'],
+            'uom': issue_detail['uom'],
             'condition': return_item.get('condition', 'GOOD'),
             'expired_date': issue_detail['expired_date'],
             'is_alternative': issue_detail['is_alternative'],
@@ -1007,7 +1163,7 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
             'issue_detail_id': return_item['issue_detail_id'],
             'batch_no': issue_detail['batch_no'],
             'quantity': return_item['quantity'],
-            'uom': return_item['uom'],
+            'uom': issue_detail['uom'],
             'condition': return_item.get('condition', 'GOOD'),
             'expired_date': issue_detail['expired_date']
         })
@@ -1023,8 +1179,10 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
         'material_id': issue_detail['material_id'],
         'quantity': return_item['quantity'],
         'condition': return_item.get('condition', 'GOOD'),
-        'is_alternative': issue_detail['is_alternative']
+        'is_alternative': issue_detail['is_alternative'],
+        'original_issue_detail_id': return_item['issue_detail_id']
     }
+
 
 def _update_inventory_for_return(conn, issue_detail: Dict, quantity: float,
                                 warehouse_id: int, group_id: str, 
@@ -1071,7 +1229,7 @@ def _update_inventory_for_return(conn, issue_detail: Dict, quantity: float,
             'group_id': group_id,
             'return_id': return_id,
             'entity_id': entity_id,
-            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
+            'created_by': keycloak_id
         })
     else:
         # Fallback to basic tracking
@@ -1092,33 +1250,7 @@ def _update_inventory_for_return(conn, issue_detail: Dict, quantity: float,
             'batch_no': issue_detail['batch_no'],
             'expired_date': issue_detail['expired_date'],
             'group_id': group_id,
-            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
-        })
-
-
-def _update_order_materials_for_return(conn, return_details: List[Dict]):
-    """Update manufacturing order materials after return"""
-    for detail in return_details:
-        query = text("""
-            UPDATE manufacturing_order_materials mom
-            JOIN material_issue_details mid ON mid.manufacturing_order_material_id = mom.id
-            SET mom.issued_qty = GREATEST(0, mom.issued_qty - :quantity),
-                mom.status = CASE 
-                    WHEN mom.issued_qty - :quantity <= 0 THEN 'PENDING'
-                    WHEN mom.issued_qty - :quantity < mom.required_qty THEN 'PARTIAL'
-                    ELSE 'ISSUED'
-                END
-            WHERE mid.material_id = :material_id
-                AND mid.id IN (
-                    SELECT original_issue_detail_id 
-                    FROM material_return_details 
-                    WHERE material_id = :material_id
-                )
-        """)
-        
-        conn.execute(query, {
-            'material_id': detail['material_id'],
-            'quantity': detail['quantity']
+            'created_by': keycloak_id
         })
 
 
@@ -1169,7 +1301,7 @@ def _add_production_to_inventory(conn, order: Dict, quantity: float,
             'group_id': group_id,
             'receipt_id': receipt_id,
             'entity_id': entity_id,
-            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
+            'created_by': keycloak_id
         })
     else:
         # Fallback to basic tracking
@@ -1190,9 +1322,11 @@ def _add_production_to_inventory(conn, order: Dict, quantity: float,
             'batch_no': batch_no,
             'expired_date': expiry_date,
             'group_id': group_id,
-            'created_by': keycloak_id  # CRITICAL: Use keycloak_id
+            'created_by': keycloak_id
         })
 
+
+# ==================== NUMBER GENERATORS ====================
 
 def _generate_issue_number(conn) -> str:
     """Generate unique issue number matching DB schema format MI-YYYYMMDD-XXX"""
@@ -1213,7 +1347,6 @@ def _generate_issue_number(conn) -> str:
     next_num = int(row[0]) if row and row[0] else 1
     
     return f"{prefix}{next_num:03d}"
-
 
 
 def _generate_return_number(conn) -> str:
