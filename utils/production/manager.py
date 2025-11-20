@@ -73,13 +73,12 @@ class ProductionManager:
             }
 
 
-    
     def get_orders(self, status: Optional[str] = None,
-                  order_type: Optional[str] = None,
-                  from_date: Optional[date] = None,
-                  to_date: Optional[date] = None,
-                  priority: Optional[str] = None,
-                  page: int = 1, page_size: int = 100) -> pd.DataFrame:
+                order_type: Optional[str] = None,
+                from_date: Optional[date] = None,
+                to_date: Optional[date] = None,
+                priority: Optional[str] = None,
+                page: int = 1, page_size: int = 100) -> pd.DataFrame:
         """Get production orders with filters"""
         query = """
             SELECT 
@@ -94,7 +93,9 @@ class ProductionManager:
                 o.produced_qty,
                 o.uom,
                 o.product_id,
+                p.pt_code,
                 p.name as product_name,
+                p.package_size,
                 b.bom_type,
                 b.bom_name,
                 o.warehouse_id,
@@ -142,7 +143,8 @@ class ProductionManager:
         except Exception as e:
             logger.error(f"Error getting orders: {e}")
             return pd.DataFrame()
-    
+
+
     def create_order(self, order_data: Dict[str, Any]) -> str:
         """Create new production order with validation"""
         # Validate required fields

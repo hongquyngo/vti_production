@@ -499,7 +499,7 @@ def render_order_list():
             )
         
         with col4:
-            # st.markdown("**Date Range**")
+            st.markdown("**Date Range**")
             date_col1, date_col2 = st.columns(2)
             with date_col1:
                 from_date = st.date_input(
@@ -561,117 +561,85 @@ def render_order_list():
     
     # ==================== ORDERS TABLE ====================
     
-    # Format display columns
-    display_orders = orders.copy()
+    # Prepare display dataframe
+    display_df = orders.copy()
     
-    # Add status indicators
-    display_orders['status_display'] = display_orders['status'].apply(create_status_indicator)
-    display_orders['priority_display'] = display_orders['priority'].apply(create_status_indicator)
-    
-    # Format quantities
-    display_orders['planned_qty_fmt'] = display_orders.apply(
-        lambda x: f"{format_number(x['planned_qty'], 2)} {x['uom']}", axis=1
-    )
-    display_orders['produced_qty_fmt'] = display_orders.apply(
-        lambda x: f"{format_number(x['produced_qty'], 2)} {x['uom']}", axis=1
+    # Format columns
+    display_df['status'] = display_df['status'].apply(create_status_indicator)
+    display_df['priority'] = display_df['priority'].apply(create_status_indicator)
+    display_df['progress'] = display_df.apply(
+        lambda x: f"{format_number(x['produced_qty'], 1)}/{format_number(x['planned_qty'], 1)} {x['uom']}", 
+        axis=1
     )
     
-    # Calculate progress
-    display_orders['progress'] = display_orders.apply(
-        lambda x: calculate_percentage(x['produced_qty'], x['planned_qty']), axis=1
+    # Format Product column: pt_code | name | package_size
+    display_df['product_display'] = display_df.apply(
+        lambda x: f"{x['pt_code']} | {x['product_name']} | {x['package_size'] or ''}", 
+        axis=1
     )
-    display_orders['progress_fmt'] = display_orders['progress'].apply(lambda x: f"{x}%")
     
     # Select and rename columns for display
     display_columns = {
         'order_no': 'Order No',
-        'order_date': 'Order Date',
-        'product_name': 'Product',
-        'bom_type': 'Type',
-        'status_display': 'Status',
-        'priority_display': 'Priority',
-        'planned_qty_fmt': 'Planned',
-        'produced_qty_fmt': 'Produced',
-        'progress_fmt': 'Progress',
+        'product_display': 'Product',
+        'progress': 'Progress',
+        'status': 'Status',
+        'priority': 'Priority',
         'scheduled_date': 'Scheduled',
-        'warehouse_name': 'Source WH'
+        'warehouse_name': 'Source',
+        'target_warehouse_name': 'Target'
     }
     
-    display_df = display_orders[list(display_columns.keys())].rename(columns=display_columns)
-    
-    # Display table
     st.dataframe(
-        display_df,
+        display_df[list(display_columns.keys())].rename(columns=display_columns),
         use_container_width=True,
-        hide_index=True,
-        height=400
+        hide_index=True
     )
     
-    # ==================== ORDER SELECTION ====================
-    st.markdown("---")
+    # ==================== ROW ACTIONS ====================
     
-    # Create order selection dropdown
-    order_options = {
-        f"{row['order_no']} - {row['product_name']} ({row['status']})": row['id']
+    st.markdown("### Actions")
+    
+    # Order selection for actions
+    # Format: MO number (status) | pt_code | name | package size
+    order_dict = {
+        f"{row['order_no']} ({row['status']}) | {row['pt_code']} | {row['product_name']} | {row['package_size'] or ''}": row['id'] 
         for _, row in orders.iterrows()
     }
     
-    selected_order = st.selectbox(
-        "Select Order to View Details",
-        options=list(order_options.keys()),
-        key="order_selector"
-    )
+    col1, col2 = st.columns([3, 1])
     
-    if selected_order:
-        order_id = order_options[selected_order]
-        
-        col1, col2, col3 = st.columns([1, 1, 2])
-        
-        with col1:
-            if st.button("📋 View Details", type="primary", use_container_width=True):
-                st.session_state.selected_order = order_id
-                st.session_state.current_view = 'detail'
+    with col1:
+        selected_order = st.selectbox(
+            "Select Order for Action",
+            options=list(order_dict.keys()),
+            key="order_action_select"
+        )
+    
+    with col2:
+        if selected_order:
+            if st.button("👁️ View Details", use_container_width=True):
+                set_view('details', order_dict[selected_order])
                 st.rerun()
-        
-        with col2:
-            # Get order status for conditional buttons
-            order_status = orders[orders['id'] == order_id]['status'].iloc[0]
-            
-            if order_status == 'DRAFT':
-                if st.button("✅ Confirm Order", use_container_width=True):
-                    order_no = orders[orders['id'] == order_id]['order_no'].iloc[0]
-                    show_confirm_order_dialog(order_id, order_no)
     
     # ==================== PAGINATION ====================
+    
     st.markdown("---")
     
     col1, col2, col3 = st.columns([1, 2, 1])
     
     with col1:
-        if st.button("◀ Previous", disabled=(page <= 1)):
-            st.session_state.page_number = page - 1
+        if st.button("⬅️ Previous", disabled=page <= 1):
+            st.session_state.page_number = max(1, page - 1)
             st.rerun()
     
     with col2:
-        st.markdown(f"<center>Page {page}</center>", unsafe_allow_html=True)
+        st.write(f"Page {page}")
     
     with col3:
-        if st.button("Next ▶", disabled=(len(orders) < page_size)):
+        if st.button("Next ➡️", disabled=len(orders) < page_size):
             st.session_state.page_number = page + 1
             st.rerun()
-    
-    # ==================== EXPORT ====================
-    with st.expander("📥 Export Options"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            excel_data = export_to_excel(orders)
-            st.download_button(
-                label="📥 Download Excel",
-                data=excel_data,
-                file_name=f"production_orders_{date.today().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
 
 
 # ==================== Order Details View ====================
