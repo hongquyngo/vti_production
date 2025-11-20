@@ -3,6 +3,7 @@
 Centralized State Management for BOM Module - ENHANCED VERSION
 Manages all UI state, dialog states, and user interactions
 Added support for Clone dialog and optimized state handling
+FIXED: clear_cache now properly clears all_boms and filtered_boms
 """
 
 import logging
@@ -216,16 +217,21 @@ class StateManager:
             dialog_name: Name of dialog
             updates: Fields to update
         """
-        current = self.get_dialog_state(dialog_name)
-        current.update(updates)
-        self.set_dialog_state(dialog_name, current)
+        if self.DIALOG_DATA not in st.session_state:
+            st.session_state[self.DIALOG_DATA] = {}
+        
+        if dialog_name not in st.session_state[self.DIALOG_DATA]:
+            st.session_state[self.DIALOG_DATA][dialog_name] = {}
+        
+        st.session_state[self.DIALOG_DATA][dialog_name].update(updates)
+        logger.debug(f"Dialog state updated: {dialog_name} with {updates}")
     
     def clear_dialog_state(self, dialog_name: str):
         """
-        Clear state for specific dialog (reset to defaults)
+        Reset dialog state to defaults
         
         Args:
-            dialog_name: Name of dialog to clear
+            dialog_name: Name of dialog
         """
         defaults = {
             self.DIALOG_CREATE: {
@@ -295,12 +301,6 @@ class StateManager:
         if 0 <= index < len(materials):
             materials.pop(index)
             self.update_dialog_state(self.DIALOG_CREATE, {'materials': materials})
-    
-    def set_dialog_state(self, dialog_name: str, data: Dict[str, Any]):
-        """Set complete state for a dialog"""
-        if self.DIALOG_DATA not in st.session_state:
-            st.session_state[self.DIALOG_DATA] = {}
-        st.session_state[self.DIALOG_DATA][dialog_name] = data
     
     # ==================== Clone Dialog State (NEW) ====================
     
@@ -452,7 +452,7 @@ class StateManager:
         """Get last action info"""
         return st.session_state.get(self.LAST_ACTION, {})
     
-    # ==================== Cache Management (NEW) ====================
+    # ==================== Cache Management (FIXED) ====================
     
     def get_cached_products(self):
         """Get cached products list"""
@@ -477,10 +477,30 @@ class StateManager:
         st.session_state['bom_cache']['products_timestamp'] = datetime.now()
     
     def clear_cache(self):
-        """Clear all cached data"""
+        """Clear all cached data including BOM lists - FIXED VERSION"""
+        # Clear products cache
         if 'bom_cache' in st.session_state:
             st.session_state['bom_cache'] = {
                 'products': None,
                 'products_timestamp': None,
                 'cache_ttl': 300
             }
+        
+        # FIXED: Also clear BOM list caches
+        if 'all_boms' in st.session_state:
+            del st.session_state['all_boms']
+        
+        if 'filtered_boms' in st.session_state:
+            del st.session_state['filtered_boms']
+        
+        logger.info("All caches cleared (products, all_boms, filtered_boms)")
+    
+    def clear_bom_list_cache(self):
+        """Clear only BOM list cache (for use after CRUD operations)"""
+        if 'all_boms' in st.session_state:
+            del st.session_state['all_boms']
+        
+        if 'filtered_boms' in st.session_state:
+            del st.session_state['filtered_boms']
+        
+        logger.debug("BOM list cache cleared")

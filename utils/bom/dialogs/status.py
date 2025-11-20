@@ -211,6 +211,8 @@ def _handle_status_update(bom_id: int, new_status: str, bom_info: dict,
             f"✅ BOM {bom_info['bom_code']} status updated to {new_status}"
         )
         
+        state.clear_bom_list_cache() # Clear cache to reflect status change
+
         state.close_dialog()
         
         st.rerun()
