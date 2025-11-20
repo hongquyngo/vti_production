@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 def issue_materials(order_id: int, user_id: int, keycloak_id: str, 
                    issued_by: int, received_by: int = None,
-                   notes: str = None) -> Dict[str, Any]:
+                   notes: str = None,
+                   custom_quantities: Dict[int, float] = None) -> Dict[str, Any]:
     """
     Issue materials for production using FEFO (First Expiry, First Out)
     with automatic alternative material substitution and tracking
@@ -42,6 +43,7 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
         issued_by: Employee ID of warehouse staff issuing materials (REQUIRED)
         received_by: Employee ID of production staff receiving materials
         notes: Optional notes about the issue
+        custom_quantities: Optional dict {material_id: quantity} for user-specified issue amounts
     
     Returns:
         Dictionary with issue_no, issue_id, details, substitutions
@@ -102,12 +104,29 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
             
             # Issue each material using FEFO with alternative substitution
             for _, mat in materials.iterrows():
-                remaining = float(mat['required_qty']) - float(mat['issued_qty'])
-                if remaining > 0:
+                material_id = int(mat['material_id'])
+                
+                # Determine quantity to issue
+                if custom_quantities and material_id in custom_quantities:
+                    # User specified custom quantity
+                    qty_to_issue = float(custom_quantities[material_id])
+                else:
+                    # Default: remaining required quantity
+                    qty_to_issue = float(mat['required_qty']) - float(mat['issued_qty'])
+                
+                if qty_to_issue > 0:
+                    # Validate against available stock
+                    available = _get_available_stock(conn, material_id, order['warehouse_id'])
+                    if qty_to_issue > available:
+                        raise ValueError(
+                            f"Cannot issue {qty_to_issue} of {mat['material_name']} - "
+                            f"only {available} available in stock"
+                        )
+                    
                     try:
                         issued = _issue_material_with_alternatives(
                             conn, issue_id, order_id, mat,
-                            remaining, order['warehouse_id'], 
+                            qty_to_issue, order['warehouse_id'], 
                             group_id, user_id, keycloak_id, 
                             order.get('entity_id', 1)
                         )
@@ -784,6 +803,36 @@ def _get_order_info(conn, order_id: int) -> Optional[Dict]:
         return None
     
     return dict(zip(result.keys(), row))
+
+
+def _get_available_stock(conn, material_id: int, warehouse_id: int) -> float:
+    """
+    Get available stock for a material in warehouse
+    
+    Args:
+        conn: Database connection
+        material_id: Product/Material ID
+        warehouse_id: Warehouse ID
+        
+    Returns:
+        Total available quantity in stock
+    """
+    query = text("""
+        SELECT COALESCE(SUM(remain), 0) as available
+        FROM inventory_histories
+        WHERE product_id = :material_id
+            AND warehouse_id = :warehouse_id
+            AND remain > 0
+            AND delete_flag = 0
+    """)
+    
+    result = conn.execute(query, {
+        'material_id': material_id,
+        'warehouse_id': warehouse_id
+    })
+    
+    row = result.fetchone()
+    return float(row[0]) if row else 0.0
 
 
 def _get_pending_materials(conn, order_id: int) -> pd.DataFrame:

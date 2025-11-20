@@ -706,11 +706,11 @@ class ProductionManager:
             materials_list.append(dict(zip(materials_result.keys(), row)))
         
         for mat in materials_list:
-            # Calculate required quantity with scrap
+            # Calculate required quantity with scrap - EXACT value, no rounding
             production_cycles = float(mat['planned_qty']) / float(mat['output_qty'])
             base_material = production_cycles * float(mat['quantity'])
             with_scrap = base_material * (1 + float(mat['scrap_rate']) / 100)
-            required_qty = math.ceil(with_scrap)
+            required_qty = round(with_scrap, 4)  # Keep 4 decimal places for precision
             
             insert_query = text("""
                 INSERT INTO manufacturing_order_materials (

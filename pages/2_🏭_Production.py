@@ -820,7 +820,7 @@ def render_create_order():
 # ==================== Material Issue Form ====================
 
 def render_material_issue_form():
-    """Render material issue form"""
+    """Render material issue form with adjustable quantities - REFACTORED v8.0"""
     st.subheader("📦 Issue Materials to Production")
     
     orders = prod_manager.get_orders(status='CONFIRMED')
@@ -862,7 +862,8 @@ def render_material_issue_form():
             st.write(f"**Priority:** {create_status_indicator(order['priority'])}")
         
         st.markdown("---")
-        st.markdown("### 📊 Material Availability Check")
+        st.markdown("### 📊 Material Requirements & Issue Quantities")
+        st.caption("💡 System calculates suggested quantities. You can adjust issue amounts (usually issue more to ensure sufficient materials).")
         
         with st.spinner("Checking material availability..."):
             availability = inv_manager.check_material_availability(
@@ -885,58 +886,112 @@ def render_material_issue_form():
             with col4:
                 st.metric("❌ Insufficient", insufficient)
             
-            display_df = availability.copy()
-            display_df['material_info'] = display_df.apply(format_material_display_with_details, axis=1)
-            display_df['required_display'] = display_df['required_qty'].apply(lambda x: f"{x:.2f}")
-            display_df['available_display'] = display_df['available_qty'].apply(lambda x: f"{x:.2f}")
-            display_df['status_display'] = display_df['availability_status'].apply(
-                lambda x: '✅ SUFFICIENT' if x == 'SUFFICIENT' else '⚠️ PARTIAL' if x == 'PARTIAL' else '❌ INSUFFICIENT'
-            )
-            
-            st.dataframe(
-                display_df[['material_info', 'required_display', 'available_display', 'status_display', 'uom']].rename(columns={
-                    'material_info': 'Material Info', 'required_display': 'Required',
-                    'available_display': 'Available', 'status_display': 'Status', 'uom': 'UOM'
-                }),
-                use_container_width=True, hide_index=True
-            )
+            # Initialize session state for issue quantities if not exists
+            if 'issue_quantities' not in st.session_state or st.session_state.get('issue_order_id') != order_id:
+                st.session_state['issue_quantities'] = {}
+                st.session_state['issue_order_id'] = order_id
+                for _, row in availability.iterrows():
+                    material_id = row['material_id']
+                    # Default to required_qty, but capped at available_qty
+                    suggested = min(float(row['required_qty']), float(row['available_qty']))
+                    st.session_state['issue_quantities'][material_id] = suggested
             
             st.markdown("---")
+            st.markdown("### 📝 Adjust Issue Quantities")
             
-            can_issue = False
-            materials_with_alts = pd.DataFrame()
+            # Create editable form for each material
+            issue_valid = True
+            warnings = []
+            errors = []
             
-            if partial > 0 or insufficient > 0:
-                if 'has_alternatives' in availability.columns:
-                    materials_with_alts = availability[
-                        (availability['availability_status'] != 'SUFFICIENT') & 
-                        (availability.get('has_alternatives', False) == True)
-                    ]
-                    
-                    materials_needing_alts = availability[availability['availability_status'] != 'SUFFICIENT']
-                    can_fulfill_with_alts = all(
-                        row.get('alternatives_sufficient', False) for _, row in materials_needing_alts.iterrows()
-                    )
-                    
-                    if can_fulfill_with_alts and not materials_needing_alts.empty:
-                        can_issue = True
-                        st.success(f"✅ All materials can be issued using {len(materials_with_alts)} alternative material(s)")
-                    else:
-                        total_problems = partial + insufficient
-                        st.error(f"❌ Cannot issue materials: {total_problems} material(s) have insufficient stock")
-                    
-                    if not materials_with_alts.empty:
-                        has_real_alternatives = any(mat.get('alternative_total_qty', 0) > 0 for _, mat in materials_with_alts.iterrows())
-                        if has_real_alternatives:
-                            UIHelpers.show_alternative_materials(availability)
+            for idx, row in availability.iterrows():
+                material_id = row['material_id']
+                material_name = row['material_name']
+                pt_code = row.get('pt_code', 'N/A')
+                required_qty = float(row['required_qty'])
+                available_qty = float(row['available_qty'])
+                uom = row['uom']
+                status = row['availability_status']
+                
+                # Status indicator
+                if status == 'SUFFICIENT':
+                    status_icon = "✅"
+                elif status == 'PARTIAL':
+                    status_icon = "⚠️"
                 else:
-                    total_problems = partial + insufficient
-                    st.error(f"❌ Cannot issue materials: {total_problems} material(s) have insufficient stock")
-            else:
-                can_issue = True
-                st.success("✅ All materials are sufficient")
+                    status_icon = "❌"
+                
+                col1, col2, col3, col4, col5 = st.columns([3, 1.5, 1.5, 2, 1])
+                
+                with col1:
+                    st.write(f"**{material_name}**")
+                    st.caption(f"PT Code: {pt_code}")
+                
+                with col2:
+                    st.write(f"Required: **{format_number(required_qty, 4)}**")
+                    st.caption(uom)
+                
+                with col3:
+                    st.write(f"Available: **{format_number(available_qty, 4)}**")
+                    st.caption(f"{status_icon} {status}")
+                
+                with col4:
+                    # Editable input for issue quantity
+                    issue_qty = st.number_input(
+                        f"Issue Qty",
+                        min_value=0.0,
+                        max_value=float(available_qty),  # Cannot exceed available
+                        value=float(st.session_state['issue_quantities'].get(material_id, min(required_qty, available_qty))),
+                        step=0.0001,
+                        format="%.4f",
+                        key=f"issue_qty_{material_id}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state['issue_quantities'][material_id] = issue_qty
+                
+                with col5:
+                    # Validation feedback
+                    if issue_qty < required_qty:
+                        st.warning("⚠️ Less")
+                        warnings.append(f"{material_name}: issuing {format_number(issue_qty, 4)} < required {format_number(required_qty, 4)}")
+                    elif issue_qty > required_qty:
+                        st.info("📈 More")
+                    else:
+                        st.success("✅ Exact")
+                    
+                    if issue_qty > available_qty:
+                        st.error("❌ Over")
+                        errors.append(f"{material_name}: cannot issue {format_number(issue_qty, 4)} > available {format_number(available_qty, 4)}")
+                        issue_valid = False
+                
+                # Check for alternatives if current material is insufficient
+                if status != 'SUFFICIENT' and row.get('has_alternatives', False):
+                    with st.expander(f"🔄 Alternatives for {material_name}", expanded=False):
+                        if 'alternative_details' in row and row['alternative_details']:
+                            for alt in row['alternative_details']:
+                                st.write(
+                                    f"• **{alt['name']}** (Priority {alt['priority']}): "
+                                    f"{format_number(alt['available'], 4)} {alt['uom']} available"
+                                )
+                        else:
+                            st.info("No alternatives available")
+                
+                st.markdown("---")
             
-            if can_issue:
+            # Summary and validation messages
+            if errors:
+                st.error("❌ **Errors - Cannot proceed:**")
+                for err in errors:
+                    st.write(f"• {err}")
+            
+            if warnings:
+                st.warning("⚠️ **Warnings - Issue quantity less than required:**")
+                for warn in warnings:
+                    st.write(f"• {warn}")
+                st.info("💡 Materials can be issued again later if needed. Consider issuing more to ensure sufficient production.")
+            
+            # Action buttons
+            if issue_valid:
                 col1, col2 = st.columns([1, 1])
                 
                 with col1:
@@ -946,8 +1001,9 @@ def render_material_issue_form():
                             st.rerun()
                 
                 with col2:
-                    if st.button("🔄 Refresh Stock", key="refresh_stock", use_container_width=True):
-                        st.cache_resource.clear()
+                    if st.button("🔄 Reset to Suggested", key="reset_quantities", use_container_width=True):
+                        st.session_state.pop('issue_quantities', None)
+                        st.session_state.pop('issue_order_id', None)
                         st.rerun()
                 
                 if st.session_state.get('confirm_issue', False):
@@ -955,8 +1011,13 @@ def render_material_issue_form():
                     st.warning(f"⚠️ **Confirm Issue Materials**")
                     st.info(f"Order: **{order['order_no']}** - {order['product_name']}")
                     
-                    if not materials_with_alts.empty:
-                        st.info(f"📝 **Note:** {len(materials_with_alts)} material(s) will use alternatives automatically")
+                    # Summary of what will be issued
+                    st.markdown("**Materials to issue:**")
+                    for _, row in availability.iterrows():
+                        material_id = row['material_id']
+                        issue_qty = st.session_state['issue_quantities'].get(material_id, 0)
+                        if issue_qty > 0:
+                            st.write(f"• {row['material_name']}: **{format_number(issue_qty, 4)}** {row['uom']}")
                     
                     employees = prod_manager.get_active_employees()
                     
@@ -992,6 +1053,9 @@ def render_material_issue_form():
                                     issued_by_id = emp_options[issued_by_label]
                                     received_by_id = emp_options[received_by_label]
                                     
+                                    # Prepare custom quantities for issue
+                                    custom_quantities = st.session_state.get('issue_quantities', {})
+                                    
                                     with st.spinner("Issuing materials..."):
                                         result = issue_materials(
                                             order_id=order_id,
@@ -999,10 +1063,15 @@ def render_material_issue_form():
                                             keycloak_id=audit_info['keycloak_id'],
                                             issued_by=issued_by_id,
                                             received_by=received_by_id,
-                                            notes=notes.strip() if notes else None
+                                            notes=notes.strip() if notes else None,
+                                            custom_quantities=custom_quantities  # NEW: Pass custom quantities
                                         )
                                     
+                                    # Clear session state
                                     st.session_state['confirm_issue'] = False
+                                    st.session_state.pop('issue_quantities', None)
+                                    st.session_state.pop('issue_order_id', None)
+                                    
                                     PDFExportDialog.show_pdf_export_dialog(result)
                                     
                                 except Exception as e:
@@ -1014,6 +1083,8 @@ def render_material_issue_form():
                         if st.button("❌ Cancel", key="cancel_issue", use_container_width=True):
                             st.session_state['confirm_issue'] = False
                             st.rerun()
+            else:
+                st.error("❌ Cannot issue materials. Please fix the errors above.")
         else:
             st.error("No materials found for this BOM")
 
