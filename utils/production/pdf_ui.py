@@ -49,7 +49,7 @@ class PDFExportDialog:
         if issue_result.get('substitutions'):
             st.warning(f"⚠️ **Note:** {len(issue_result['substitutions'])} material substitutions were made:")
             for sub in issue_result['substitutions']:
-                st.write(f"• {sub['original_material']} → **{sub['substitute_material']}** ({sub['quantity']} {sub['uom']})")
+                st.write(f"• {sub['original_material']} → **{sub['substitute_material']}** ({sub['actual_quantity']} {sub['uom']})")
         
         st.markdown("---")
         
