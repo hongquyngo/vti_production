@@ -24,6 +24,56 @@ class ProductionManager:
         self.engine = get_db_engine()
         self._bom_cache = {}
     
+    def get_filter_options(self) -> Dict[str, List[str]]:
+        """
+        Get dynamic filter options from database
+        
+        Returns:
+            Dict with keys: 'statuses', 'order_types', 'priorities'
+        """
+        status_query = """
+            SELECT DISTINCT status 
+            FROM manufacturing_orders 
+            WHERE delete_flag = 0 
+            ORDER BY FIELD(status, 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED')
+        """
+        
+        type_query = """
+            SELECT DISTINCT bh.bom_type 
+            FROM manufacturing_orders mo
+            JOIN bom_headers bh ON mo.bom_header_id = bh.id
+            WHERE mo.delete_flag = 0
+            ORDER BY bh.bom_type
+        """
+        
+        priority_query = """
+            SELECT DISTINCT priority 
+            FROM manufacturing_orders 
+            WHERE delete_flag = 0 
+            ORDER BY FIELD(priority, 'LOW', 'NORMAL', 'HIGH', 'URGENT')
+        """
+        
+        try:
+            statuses = pd.read_sql(status_query, self.engine)['status'].tolist()
+            types = pd.read_sql(type_query, self.engine)['bom_type'].tolist()
+            priorities = pd.read_sql(priority_query, self.engine)['priority'].tolist()
+            
+            return {
+                'statuses': ['All'] + statuses,
+                'order_types': ['All'] + types,
+                'priorities': ['All'] + priorities
+            }
+        except Exception as e:
+            logger.error(f"Error getting filter options: {e}")
+            # Fallback to defaults if query fails
+            return {
+                'statuses': ['All', 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'],
+                'order_types': ['All', 'CUTTING', 'REPACKING', 'KITTING'],
+                'priorities': ['All', 'LOW', 'NORMAL', 'HIGH', 'URGENT']
+            }
+
+
+    
     def get_orders(self, status: Optional[str] = None,
                   order_type: Optional[str] = None,
                   from_date: Optional[date] = None,

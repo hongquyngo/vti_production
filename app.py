@@ -111,7 +111,7 @@ else:
         st.markdown("#### 📋 Production")
         st.markdown("Create and manage production orders for kitting, cutting, and repacking")
         if st.button("Go to Production →", key="btn_production"):
-            st.switch_page("pages/1_🏭_Production.py")
+            st.switch_page("pages/2_🏭_Production.py")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
@@ -119,7 +119,7 @@ else:
         st.markdown("#### 📑 BOM Management")
         st.markdown("Define and maintain Bill of Materials for your products")
         if st.button("Manage BOMs →", key="btn_bom"):
-            st.switch_page("pages/2_📋_BOM.py")
+            st.switch_page("pages/1_📋_BOM.py")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col3:
@@ -127,7 +127,7 @@ else:
         st.markdown("#### 📊 Reports")
         st.markdown("View production analytics and inventory reports")
         if st.button("View Reports →", key="btn_reports"):
-            st.switch_page("pages/3_📊_Reports.py")
+            st.switch_page("pages/4_📊_Reports.py")
         st.markdown('</div>', unsafe_allow_html=True)
     
 
