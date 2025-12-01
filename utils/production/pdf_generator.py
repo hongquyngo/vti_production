@@ -1,7 +1,12 @@
 # utils/production/pdf_generator.py
 """
-PDF Generator for Material Issues with Multi-language Support - REFACTORED v5.2
+PDF Generator for Material Issues with Multi-language Support - REFACTORED v5.3
 FIXED: Font loading from project fonts/ directory for Streamlit Cloud deployment
+
+CHANGES v5.3:
+- ✅ NEW: Consolidated material info column (Name, Code, Batch, Size in one column)
+- ✅ NEW: Added Return Quantity column (SL Trả) before Note
+- ✅ ADJUSTED: Column widths for better layout
 
 CHANGES v5.2:
 - ✅ NEW: Display package_size under material name in table
@@ -623,21 +628,33 @@ class MaterialIssuePDFGenerator:
 
 
     def create_materials_table(self, story: list, data: Dict, styles: Any, language: str = 'vi', layout: str = 'landscape'):
-        """Create materials table with proper text wrapping"""
+        """Create materials table with consolidated material info column"""
         details = data['details']
         
         # Use DejaVu fonts
         header_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
         
-        # Vietnamese vs English table headers
+        # Vietnamese vs English table headers (consolidated layout)
         if language == 'vi':
-            headers = ['STT', 'Mã VT', 'Tên vật tư', 'Batch/Lot', 'SL', 'ĐVT', 'HSD', 'Ghi chú']
+            headers = ['STT', 'Thông tin vật tư', 'SL', 'ĐVT', 'HSD', 'SL Trả', 'Ghi chú']
         else:
-            headers = ['No.', 'Code', 'Material Name', 'Batch/Lot', 'Qty', 'UOM', 'Expiry', 'Note']
+            headers = ['No.', 'Material Info', 'Qty', 'UOM', 'Expiry', 'Return', 'Note']
         
         # Create header row with Paragraphs
         header_row = [Paragraph(f"<b>{h}</b>", styles['TableHeader']) for h in headers]
         table_data = [header_row]
+        
+        # Labels for material info
+        if language == 'vi':
+            lbl_name = "Tên VT"
+            lbl_code = "Mã VT"
+            lbl_batch = "Batch"
+            lbl_size = "Size"
+        else:
+            lbl_name = "Name"
+            lbl_code = "Code"
+            lbl_batch = "Batch"
+            lbl_size = "Size"
         
         # Add detail rows
         for idx, detail in enumerate(details, 1):
@@ -649,17 +666,26 @@ class MaterialIssuePDFGenerator:
                 else:
                     exp_date = detail['expired_date'].strftime('%d/%m/%Y')
             
-            # Material name with package size and alternative indicator
+            # Build consolidated material info
             mat_name = detail['material_name']
+            pt_code = detail.get('pt_code', '')
+            batch_no = detail.get('batch_no', '')
             package_size = detail.get('package_size', '')
             
-            # Add package size on new line if available
-            if package_size:
-                mat_name = f"{mat_name}<br/>({package_size})"
-            
-            # Add alternative indicator at the beginning
+            # Add alternative indicator
             if detail.get('is_alternative'):
                 mat_name = f"(*) {mat_name}"
+            
+            # Build multi-line material info
+            mat_info_lines = [f"<b>{lbl_name}:</b> {mat_name}"]
+            if pt_code:
+                mat_info_lines.append(f"<b>{lbl_code}:</b> {pt_code}")
+            if batch_no:
+                mat_info_lines.append(f"<b>{lbl_batch}:</b> {batch_no}")
+            if package_size:
+                mat_info_lines.append(f"<b>{lbl_size}:</b> {package_size}")
+            
+            mat_info = "<br/>".join(mat_info_lines)
             
             # Format quantity
             qty = detail['quantity']
@@ -670,40 +696,37 @@ class MaterialIssuePDFGenerator:
             
             row = [
                 Paragraph(str(idx), styles['TableCellCenter']),
-                Paragraph(str(detail.get('pt_code', '')), styles['TableCell']),
-                Paragraph(mat_name, styles['TableCell']),
-                Paragraph(str(detail.get('batch_no', '')), styles['TableCell']),
+                Paragraph(mat_info, styles['TableCell']),
                 Paragraph(qty_str, styles['TableCellCenter']),
                 Paragraph(str(detail['uom']), styles['TableCellCenter']),
                 Paragraph(exp_date, styles['TableCellCenter']),
+                Paragraph('', styles['TableCellCenter']),  # Return Qty - empty for manual entry
                 Paragraph('', styles['TableCell'])  # Note column for manual entry
             ]
             table_data.append(row)
         
         # Set column widths based on layout
         if layout == 'landscape':
-            # Landscape: wider columns
+            # Landscape: wider material info column
             col_widths = [
                 12*mm,   # No.
-                28*mm,   # Code
-                80*mm,   # Name (wider)
-                30*mm,   # Batch
+                130*mm,  # Material Info (consolidated - wider)
                 22*mm,   # Qty
                 15*mm,   # UOM
                 25*mm,   # Expiry
-                55*mm    # Note (wider)
+                25*mm,   # Return Qty
+                38*mm    # Note
             ]
         else:
             # Portrait: narrower columns
             col_widths = [
                 10*mm,   # No.
-                22*mm,   # Code
-                52*mm,   # Name
-                22*mm,   # Batch
+                85*mm,   # Material Info (consolidated)
                 18*mm,   # Qty
                 12*mm,   # UOM
                 20*mm,   # Expiry
-                34*mm    # Note
+                20*mm,   # Return Qty
+                25*mm    # Note
             ]
         
         materials_table = Table(table_data, colWidths=col_widths)
@@ -713,8 +736,8 @@ class MaterialIssuePDFGenerator:
             ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('ALIGN', (2, 1), (2, -1), 'LEFT'),  # Material name left aligned
-            ('ALIGN', (7, 1), (7, -1), 'LEFT'),  # Note left aligned
+            ('ALIGN', (1, 1), (1, -1), 'LEFT'),  # Material info left aligned
+            ('ALIGN', (6, 1), (6, -1), 'LEFT'),  # Note left aligned
             ('FONTNAME', (0, 0), (-1, 0), header_font),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f0f0')]),
