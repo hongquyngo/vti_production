@@ -1,9 +1,12 @@
 # utils/production/materials.py
 """
-Material Issue, Return, and Production Completion Logic - REFACTORED v8.0
+Material Issue, Return, and Production Completion Logic - REFACTORED v8.1
 FEFO-based material issuing with automatic alternative substitution and conversion ratio tracking
 
-MAJOR CHANGES v8.0:
+MAJOR CHANGES v8.1:
+✅ NEW: Vietnam timezone (Asia/Ho_Chi_Minh) for document number generation
+
+CHANGES v8.0:
 ✅ FIX: inventory_histories.type sử dụng đúng operation values:
    - 'stockOutProduction' cho xuất NVL
    - 'stockInProductionReturn' cho trả NVL
@@ -24,6 +27,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from ..db import get_db_engine
+from .common import get_vietnam_now
 
 logger = logging.getLogger(__name__)
 
@@ -1242,8 +1246,8 @@ def _add_production_to_inventory(conn, order: Dict, quantity: float,
 # ==================== NUMBER GENERATORS ====================
 
 def _generate_issue_number(conn) -> str:
-    """Generate unique issue number matching DB schema format MI-YYYYMMDD-XXX"""
-    timestamp = datetime.now().strftime('%Y%m%d')
+    """Generate unique issue number matching DB schema format MI-YYYYMMDD-XXX (Vietnam timezone)"""
+    timestamp = get_vietnam_now().strftime('%Y%m%d')
     prefix = f"MI-{timestamp}-"
     
     query = text("""
@@ -1263,8 +1267,8 @@ def _generate_issue_number(conn) -> str:
 
 
 def _generate_return_number(conn) -> str:
-    """Generate unique return number matching DB schema format MR-YYYYMMDD-XXX"""
-    timestamp = datetime.now().strftime('%Y%m%d')
+    """Generate unique return number matching DB schema format MR-YYYYMMDD-XXX (Vietnam timezone)"""
+    timestamp = get_vietnam_now().strftime('%Y%m%d')
     prefix = f"MR-{timestamp}-"
     
     query = text("""
@@ -1284,8 +1288,8 @@ def _generate_return_number(conn) -> str:
 
 
 def _generate_receipt_number(conn) -> str:
-    """Generate unique receipt number matching DB schema format PR-YYYYMMDD-XXX"""
-    timestamp = datetime.now().strftime('%Y%m%d')
+    """Generate unique receipt number matching DB schema format PR-YYYYMMDD-XXX (Vietnam timezone)"""
+    timestamp = get_vietnam_now().strftime('%Y%m%d')
     prefix = f"PR-{timestamp}-"
     
     query = text("""

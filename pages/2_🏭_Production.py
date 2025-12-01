@@ -48,6 +48,8 @@ from utils.production.common import (
     calculate_percentage,
     UIHelpers,
     SystemConstants,
+    get_vietnam_today,
+    get_vietnam_now,
     validate_positive_number,
     validate_required_fields
 )
@@ -413,7 +415,7 @@ def render_order_list():
     st.subheader("📋 Production Orders")
     
     filter_options = prod_manager.get_filter_options()
-    default_to = date.today()
+    default_to = get_vietnam_today()
     default_from = (default_to.replace(day=1) - timedelta(days=1)).replace(day=1)
     
     with st.expander("🔍 Filters", expanded=False):
@@ -712,7 +714,7 @@ def render_create_order():
             value=float(selected_bom_details.get('output_qty', 1)), step=1.0, format="%.2f"
         )
         scheduled_date = st.date_input(
-            "Scheduled Date", value=date.today()
+            "Scheduled Date", value=get_vietnam_today()
         )
         priority = st.selectbox("Priority", ["LOW", "NORMAL", "HIGH", "URGENT"], index=1)
     
@@ -1096,9 +1098,9 @@ def render_issue_history():
     
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
-        from_date = st.date_input("From Date", value=date.today() - timedelta(days=30), key="issue_history_from")
+        from_date = st.date_input("From Date", value=get_vietnam_today() - timedelta(days=30), key="issue_history_from")
     with col2:
-        to_date = st.date_input("To Date", value=date.today(), key="issue_history_to")
+        to_date = st.date_input("To Date", value=get_vietnam_today(), key="issue_history_to")
     with col3:
         status_filter = st.selectbox("Status", ["All", "CONFIRMED", "CANCELLED"], key="issue_history_status")
     
@@ -1278,9 +1280,9 @@ def render_return_history():
     
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
-        from_date = st.date_input("From Date", value=date.today() - timedelta(days=30), key="return_history_from")
+        from_date = st.date_input("From Date", value=get_vietnam_today() - timedelta(days=30), key="return_history_from")
     with col2:
-        to_date = st.date_input("To Date", value=date.today(), key="return_history_to")
+        to_date = st.date_input("To Date", value=get_vietnam_today(), key="return_history_to")
     with col3:
         status_filter = st.selectbox("Status", ["All", "CONFIRMED", "CANCELLED"], key="return_history_status")
     
@@ -1400,11 +1402,11 @@ def render_production_completion_form():
                 max_value=float(order['planned_qty'] - order.get('produced_qty', 0)),
                 value=float(order['planned_qty'] - order.get('produced_qty', 0)), step=0.1
             )
-            batch_no = st.text_input("Batch Number", value=f"BATCH-{datetime.now().strftime('%Y%m%d-%H%M')}")
+            batch_no = st.text_input("Batch Number", value=f"BATCH-{get_vietnam_now().strftime('%Y%m%d-%H%M')}")
             quality_status = st.selectbox("Quality Status", ["PASSED", "PENDING", "FAILED"])
         
         with col2:
-            expired_date = st.date_input("Expiry Date", value=date.today() + timedelta(days=365), min_value=date.today())
+            expired_date = st.date_input("Expiry Date", value=get_vietnam_today() + timedelta(days=365))
             notes = st.text_area("Production Notes", height=100)
         
         st.markdown("---")
@@ -1580,7 +1582,7 @@ def render_receipts_list():
         excel_data = export_to_excel(receipts)
         st.download_button(
             label="Download Excel", data=excel_data,
-            file_name=f"production_receipts_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            file_name=f"production_receipts_{get_vietnam_now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 

@@ -1,7 +1,12 @@
 # utils/production/common.py
 """
-Common utilities for Production module - REFACTORED v2.0
+Common utilities for Production module - REFACTORED v2.1
 Formatting, validation, UI helpers, and date utilities
+
+CHANGES v2.1:
+- Added Vietnam timezone support (Asia/Ho_Chi_Minh)
+- Added get_vietnam_now(), get_vietnam_today() helpers
+- All date/time functions now use Vietnam timezone
 
 CHANGES v2.0:
 - Removed old confirm_action that causes page refresh issues
@@ -20,7 +25,71 @@ import time
 import pandas as pd
 import streamlit as st
 
+# Timezone support - try zoneinfo (Python 3.9+) first, fallback to pytz
+try:
+    from zoneinfo import ZoneInfo
+    VN_TIMEZONE = ZoneInfo('Asia/Ho_Chi_Minh')
+except ImportError:
+    try:
+        import pytz
+        VN_TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')
+    except ImportError:
+        VN_TIMEZONE = None
+        logging.warning("No timezone library available. Using system timezone.")
+
 logger = logging.getLogger(__name__)
+
+
+# ==================== Timezone Helpers ====================
+
+def get_vietnam_now() -> datetime:
+    """
+    Get current datetime in Vietnam timezone (Asia/Ho_Chi_Minh)
+    
+    Returns:
+        datetime: Current datetime in Vietnam timezone (UTC+7)
+    """
+    if VN_TIMEZONE:
+        return datetime.now(VN_TIMEZONE)
+    return datetime.now()
+
+
+def get_vietnam_today() -> date:
+    """
+    Get current date in Vietnam timezone (Asia/Ho_Chi_Minh)
+    
+    Returns:
+        date: Current date in Vietnam timezone (UTC+7)
+    """
+    if VN_TIMEZONE:
+        return datetime.now(VN_TIMEZONE).date()
+    return date.today()
+
+
+def format_vietnam_datetime(dt: datetime, fmt: str = '%Y-%m-%d %H:%M:%S') -> str:
+    """
+    Format datetime to string in Vietnam timezone
+    
+    Args:
+        dt: datetime object (can be naive or aware)
+        fmt: strftime format string
+        
+    Returns:
+        Formatted datetime string
+    """
+    if dt is None:
+        return ''
+    
+    # If naive datetime and we have VN timezone, localize it
+    if VN_TIMEZONE and dt.tzinfo is None:
+        if hasattr(VN_TIMEZONE, 'localize'):
+            # pytz style
+            dt = VN_TIMEZONE.localize(dt)
+        else:
+            # zoneinfo style
+            dt = dt.replace(tzinfo=VN_TIMEZONE)
+    
+    return dt.strftime(fmt)
 
 
 # ==================== Constants ====================
@@ -96,8 +165,8 @@ def calculate_percentage(numerator: Union[int, float],
 # ==================== Date Functions ====================
 
 def get_date_filter_presets() -> Dict[str, Tuple[date, date]]:
-    """Get common date filter presets"""
-    today = date.today()
+    """Get common date filter presets using Vietnam timezone"""
+    today = get_vietnam_today()
     first_of_month = today.replace(day=1)
     last_month_end = first_of_month - timedelta(days=1)
     first_of_last_month = last_month_end.replace(day=1)

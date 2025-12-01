@@ -1,8 +1,11 @@
 # utils/production/manager.py
 """
-Production Order Management
+Production Order Management - v1.1
 Core production order CRUD and status management with BOM alternatives support
 BACKWARD COMPATIBLE - Does not require is_primary column
+
+CHANGES v1.1:
+- Vietnam timezone (Asia/Ho_Chi_Minh) for order number generation
 """
 
 import logging
@@ -13,6 +16,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from ..db import get_db_engine
+from .common import get_vietnam_now
 
 logger = logging.getLogger(__name__)
 
@@ -657,8 +661,8 @@ class ProductionManager:
             raise
 
     def _generate_order_number(self, conn) -> str:
-        """Generate unique order number"""
-        timestamp = datetime.now().strftime('%Y%m%d')
+        """Generate unique order number (Vietnam timezone)"""
+        timestamp = get_vietnam_now().strftime('%Y%m%d')
         
         query = text("""
             SELECT COALESCE(

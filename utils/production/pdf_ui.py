@@ -1,7 +1,10 @@
 # utils/production/pdf_ui.py
 """
-PDF Export UI Components for Production Module - REFACTORED v2.4
+PDF Export UI Components for Production Module - REFACTORED v2.5
 SIMPLIFIED: Removed Document Type option, streamlined UI
+
+CHANGES v2.5:
+- ✅ Vietnam timezone (Asia/Ho_Chi_Minh) for PDF filename timestamps
 
 CHANGES v2.4:
 - ✅ REMOVED: Document Type selector (không cần thiết)
@@ -16,7 +19,7 @@ from typing import Dict, Any, Optional
 import logging
 
 from .pdf_generator import pdf_generator
-from ..production.common import UIHelpers
+from ..production.common import UIHelpers, get_vietnam_now
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +155,7 @@ class PDFExportDialog:
                         return
                     
                     # Generate filename with language and layout indicator
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    timestamp = get_vietnam_now().strftime('%Y%m%d_%H%M%S')
                     lang_suffix = 'EN' if language == 'en' else 'VI'
                     layout_suffix = 'LS' if layout == 'landscape' else 'PT'
                     filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{layout_suffix}_{timestamp}.pdf"
@@ -323,7 +326,7 @@ class QuickPDFButton:
                         st.error("❌ PDF generation failed - empty content")
                         return
                     
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    timestamp = get_vietnam_now().strftime('%Y%m%d_%H%M%S')
                     lang_suffix = 'EN' if language == 'en' else 'VI'
                     layout_suffix = 'LS' if layout == 'landscape' else 'PT'
                     filename = f"MaterialIssue_{issue_no}_{lang_suffix}_{layout_suffix}_{timestamp}.pdf"
