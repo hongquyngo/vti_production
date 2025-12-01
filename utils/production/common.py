@@ -342,18 +342,6 @@ class FormValidator:
         if order_data['planned_qty'] <= 0:
             return False, "Planned quantity must be positive"
         
-        # Validate dates
-        if isinstance(order_data['scheduled_date'], str):
-            try:
-                scheduled = datetime.strptime(order_data['scheduled_date'], '%Y-%m-%d').date()
-            except:
-                return False, "Invalid scheduled date format"
-        else:
-            scheduled = order_data['scheduled_date']
-        
-        if scheduled < date.today():
-            return False, "Scheduled date cannot be in the past"
-        
         # Validate warehouses
         if order_data['warehouse_id'] == order_data['target_warehouse_id']:
             logger.warning("Source and target warehouse are the same")

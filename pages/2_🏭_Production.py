@@ -712,7 +712,7 @@ def render_create_order():
             value=float(selected_bom_details.get('output_qty', 1)), step=1.0, format="%.2f"
         )
         scheduled_date = st.date_input(
-            "Scheduled Date", value=date.today() + timedelta(days=1), min_value=date.today()
+            "Scheduled Date", value=date.today()
         )
         priority = st.selectbox("Priority", ["LOW", "NORMAL", "HIGH", "URGENT"], index=1)
     
