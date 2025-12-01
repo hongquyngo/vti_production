@@ -1,7 +1,11 @@
 # utils/production/pdf_generator.py
 """
-PDF Generator for Material Issues with Multi-language Support - REFACTORED v5.1
+PDF Generator for Material Issues with Multi-language Support - REFACTORED v5.2
 FIXED: Font loading from project fonts/ directory for Streamlit Cloud deployment
+
+CHANGES v5.2:
+- ✅ NEW: Display package_size under material name in table
+- ✅ Format: Material Name<br/>(package_size)
 
 CHANGES v5.1:
 - ✅ CRITICAL FIX: Load DejaVu fonts from project fonts/ directory
@@ -645,8 +649,15 @@ class MaterialIssuePDFGenerator:
                 else:
                     exp_date = detail['expired_date'].strftime('%d/%m/%Y')
             
-            # Material name with alternative indicator
+            # Material name with package size and alternative indicator
             mat_name = detail['material_name']
+            package_size = detail.get('package_size', '')
+            
+            # Add package size on new line if available
+            if package_size:
+                mat_name = f"{mat_name}<br/>({package_size})"
+            
+            # Add alternative indicator at the beginning
             if detail.get('is_alternative'):
                 mat_name = f"(*) {mat_name}"
             
