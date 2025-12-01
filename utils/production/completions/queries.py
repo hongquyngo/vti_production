@@ -1,0 +1,470 @@
+# utils/production/completions/queries.py
+"""
+Database queries for Completions domain
+All SQL queries are centralized here for easy maintenance
+
+Version: 1.0.0
+"""
+
+import logging
+from datetime import date
+from typing import Dict, List, Optional, Any
+
+import pandas as pd
+from sqlalchemy import text
+
+from utils.db import get_db_engine
+
+logger = logging.getLogger(__name__)
+
+
+class CompletionQueries:
+    """Database queries for Production Completion management"""
+    
+    def __init__(self):
+        self.engine = get_db_engine()
+    
+    # ==================== Receipt Queries ====================
+    
+    def get_receipts(self,
+                    from_date: Optional[date] = None,
+                    to_date: Optional[date] = None,
+                    quality_status: Optional[str] = None,
+                    product_id: Optional[int] = None,
+                    warehouse_id: Optional[int] = None,
+                    order_no: Optional[str] = None,
+                    batch_no: Optional[str] = None,
+                    page: int = 1,
+                    page_size: int = 20) -> pd.DataFrame:
+        """
+        Get production receipts with filters and pagination
+        
+        Returns:
+            DataFrame with receipt list
+        """
+        query = """
+            SELECT 
+                pr.id,
+                pr.receipt_no,
+                pr.receipt_date,
+                pr.quantity,
+                pr.uom,
+                pr.batch_no,
+                pr.expired_date,
+                pr.quality_status,
+                pr.notes,
+                pr.created_date,
+                mo.order_no,
+                mo.id as order_id,
+                mo.planned_qty,
+                mo.produced_qty,
+                p.id as product_id,
+                p.name as product_name,
+                p.pt_code,
+                w.id as warehouse_id,
+                w.name as warehouse_name,
+                CASE 
+                    WHEN mo.planned_qty > 0 
+                    THEN ROUND((mo.produced_qty / mo.planned_qty) * 100, 1)
+                    ELSE 0
+                END as yield_rate
+            FROM production_receipts pr
+            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            JOIN products p ON pr.product_id = p.id
+            JOIN warehouses w ON pr.warehouse_id = w.id
+            WHERE 1=1
+        """
+        
+        params = []
+        
+        if from_date:
+            query += " AND DATE(pr.receipt_date) >= %s"
+            params.append(from_date)
+        
+        if to_date:
+            query += " AND DATE(pr.receipt_date) <= %s"
+            params.append(to_date)
+        
+        if quality_status:
+            query += " AND pr.quality_status = %s"
+            params.append(quality_status)
+        
+        if product_id:
+            query += " AND pr.product_id = %s"
+            params.append(product_id)
+        
+        if warehouse_id:
+            query += " AND pr.warehouse_id = %s"
+            params.append(warehouse_id)
+        
+        if order_no:
+            query += " AND mo.order_no LIKE %s"
+            params.append(f"%{order_no}%")
+        
+        if batch_no:
+            query += " AND pr.batch_no LIKE %s"
+            params.append(f"%{batch_no}%")
+        
+        query += " ORDER BY pr.created_date DESC"
+        
+        # Pagination
+        offset = (page - 1) * page_size
+        query += " LIMIT %s OFFSET %s"
+        params.extend([page_size, offset])
+        
+        try:
+            return pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+        except Exception as e:
+            logger.error(f"Error getting receipts: {e}")
+            return pd.DataFrame()
+    
+    def get_receipts_count(self,
+                          from_date: Optional[date] = None,
+                          to_date: Optional[date] = None,
+                          quality_status: Optional[str] = None,
+                          product_id: Optional[int] = None,
+                          warehouse_id: Optional[int] = None,
+                          order_no: Optional[str] = None,
+                          batch_no: Optional[str] = None) -> int:
+        """Get total count of receipts matching filters"""
+        query = """
+            SELECT COUNT(*) as total
+            FROM production_receipts pr
+            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            WHERE 1=1
+        """
+        
+        params = []
+        
+        if from_date:
+            query += " AND DATE(pr.receipt_date) >= %s"
+            params.append(from_date)
+        
+        if to_date:
+            query += " AND DATE(pr.receipt_date) <= %s"
+            params.append(to_date)
+        
+        if quality_status:
+            query += " AND pr.quality_status = %s"
+            params.append(quality_status)
+        
+        if product_id:
+            query += " AND pr.product_id = %s"
+            params.append(product_id)
+        
+        if warehouse_id:
+            query += " AND pr.warehouse_id = %s"
+            params.append(warehouse_id)
+        
+        if order_no:
+            query += " AND mo.order_no LIKE %s"
+            params.append(f"%{order_no}%")
+        
+        if batch_no:
+            query += " AND pr.batch_no LIKE %s"
+            params.append(f"%{batch_no}%")
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            return int(result['total'].iloc[0])
+        except Exception as e:
+            logger.error(f"Error getting receipts count: {e}")
+            return 0
+    
+    def get_receipt_details(self, receipt_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed information for a single receipt"""
+        query = """
+            SELECT 
+                pr.id,
+                pr.receipt_no,
+                pr.receipt_date,
+                pr.quantity,
+                pr.uom,
+                pr.batch_no,
+                pr.expired_date,
+                pr.quality_status,
+                pr.notes,
+                pr.created_date,
+                pr.warehouse_id,
+                mo.id as manufacturing_order_id,
+                mo.order_no,
+                mo.planned_qty,
+                mo.produced_qty,
+                mo.status as order_status,
+                p.id as product_id,
+                p.name as product_name,
+                p.pt_code,
+                p.package_size,
+                w.name as warehouse_name,
+                bh.bom_name as bom_name,
+                pr.created_by as created_by_id,
+                CONCAT(e.first_name, ' ', e.last_name) as created_by_name
+            FROM production_receipts pr
+            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            JOIN products p ON pr.product_id = p.id
+            JOIN warehouses w ON pr.warehouse_id = w.id
+            LEFT JOIN bom_headers bh ON mo.bom_header_id = bh.id
+            LEFT JOIN users u ON pr.created_by = u.id
+            LEFT JOIN employees e ON u.employee_id = e.id
+            WHERE pr.id = %s
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=(receipt_id,))
+            return result.iloc[0].to_dict() if not result.empty else None
+        except Exception as e:
+            logger.error(f"Error getting receipt details for {receipt_id}: {e}")
+            return None
+    
+    def get_receipt_materials(self, order_id: int) -> pd.DataFrame:
+        """Get materials used for an order (for receipt detail view)"""
+        query = """
+            SELECT 
+                p.name as material_name,
+                p.pt_code,
+                mom.required_qty,
+                mom.issued_qty,
+                mom.uom,
+                mom.status
+            FROM manufacturing_order_materials mom
+            JOIN products p ON mom.material_id = p.id
+            WHERE mom.manufacturing_order_id = %s
+            ORDER BY p.name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine, params=(order_id,))
+        except Exception as e:
+            logger.error(f"Error getting receipt materials for order {order_id}: {e}")
+            return pd.DataFrame()
+    
+    # ==================== Completable Orders Queries ====================
+    
+    def get_completable_orders(self) -> pd.DataFrame:
+        """Get orders that can have production completed (IN_PROGRESS status)"""
+        query = """
+            SELECT 
+                mo.id,
+                mo.order_no,
+                mo.order_date,
+                mo.status,
+                mo.planned_qty,
+                COALESCE(mo.produced_qty, 0) as produced_qty,
+                mo.planned_qty - COALESCE(mo.produced_qty, 0) as remaining_qty,
+                mo.uom,
+                p.id as product_id,
+                p.name as product_name,
+                p.pt_code,
+                w.id as warehouse_id,
+                w.name as warehouse_name,
+                tw.id as target_warehouse_id,
+                tw.name as target_warehouse_name,
+                bh.bom_name as bom_name
+            FROM manufacturing_orders mo
+            JOIN products p ON mo.product_id = p.id
+            JOIN warehouses w ON mo.warehouse_id = w.id
+            JOIN warehouses tw ON mo.target_warehouse_id = tw.id
+            LEFT JOIN bom_headers bh ON mo.bom_header_id = bh.id
+            WHERE mo.delete_flag = 0
+                AND mo.status = 'IN_PROGRESS'
+            ORDER BY mo.order_no DESC
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine)
+        except Exception as e:
+            logger.error(f"Error getting completable orders: {e}")
+            return pd.DataFrame()
+    
+    def get_order_output_summary(self, order_id: int) -> Optional[Dict[str, Any]]:
+        """Get production output summary for an order"""
+        query = """
+            SELECT 
+                mo.planned_qty,
+                COALESCE(mo.produced_qty, 0) as produced_qty,
+                mo.uom,
+                COUNT(pr.id) as receipt_count,
+                COALESCE(SUM(pr.quantity), 0) as total_receipts,
+                COALESCE(SUM(CASE WHEN pr.quality_status = 'PASSED' THEN pr.quantity ELSE 0 END), 0) as passed_qty,
+                COALESCE(SUM(CASE WHEN pr.quality_status = 'PENDING' THEN pr.quantity ELSE 0 END), 0) as pending_qty,
+                COALESCE(SUM(CASE WHEN pr.quality_status = 'FAILED' THEN pr.quantity ELSE 0 END), 0) as failed_qty,
+                CASE 
+                    WHEN mo.planned_qty > 0 
+                    THEN ROUND((COALESCE(mo.produced_qty, 0) / mo.planned_qty) * 100, 1)
+                    ELSE 0
+                END as yield_rate,
+                mo.planned_qty - COALESCE(mo.produced_qty, 0) as shortfall
+            FROM manufacturing_orders mo
+            LEFT JOIN production_receipts pr ON mo.id = pr.manufacturing_order_id
+            WHERE mo.id = %s
+            GROUP BY mo.id, mo.planned_qty, mo.produced_qty, mo.uom
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=(order_id,))
+            return result.iloc[0].to_dict() if not result.empty else None
+        except Exception as e:
+            logger.error(f"Error getting order output summary for {order_id}: {e}")
+            return None
+    
+    def get_order_receipts(self, order_id: int) -> pd.DataFrame:
+        """Get all receipts for an order"""
+        query = """
+            SELECT 
+                pr.id,
+                pr.receipt_no,
+                pr.receipt_date,
+                pr.quantity,
+                pr.uom,
+                pr.batch_no,
+                pr.quality_status
+            FROM production_receipts pr
+            WHERE pr.manufacturing_order_id = %s
+            ORDER BY pr.receipt_date DESC
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine, params=(order_id,))
+        except Exception as e:
+            logger.error(f"Error getting order receipts for {order_id}: {e}")
+            return pd.DataFrame()
+    
+    # ==================== Lookup Queries ====================
+    
+    def get_products(self) -> pd.DataFrame:
+        """Get products for filter dropdown"""
+        query = """
+            SELECT DISTINCT p.id, p.name, p.pt_code
+            FROM products p
+            JOIN production_receipts pr ON p.id = pr.product_id
+            ORDER BY p.name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine)
+        except Exception as e:
+            logger.error(f"Error getting products: {e}")
+            return pd.DataFrame()
+    
+    def get_warehouses(self) -> pd.DataFrame:
+        """Get warehouses for filter dropdown"""
+        query = """
+            SELECT DISTINCT w.id, w.name
+            FROM warehouses w
+            JOIN production_receipts pr ON w.id = pr.warehouse_id
+            ORDER BY w.name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine)
+        except Exception as e:
+            logger.error(f"Error getting warehouses: {e}")
+            return pd.DataFrame()
+    
+    # ==================== Dashboard Metrics ====================
+    
+    def get_completion_metrics(self, from_date: Optional[date] = None,
+                              to_date: Optional[date] = None) -> Dict[str, Any]:
+        """Get completion metrics for dashboard"""
+        from .common import get_vietnam_today
+        
+        today = get_vietnam_today()
+        
+        base_query = """
+            SELECT 
+                COUNT(*) as total_receipts,
+                SUM(CASE WHEN DATE(receipt_date) = %s THEN 1 ELSE 0 END) as today_receipts,
+                COALESCE(SUM(quantity), 0) as total_quantity,
+                COALESCE(SUM(CASE WHEN quality_status = 'PASSED' THEN quantity ELSE 0 END), 0) as passed_qty,
+                COALESCE(SUM(CASE WHEN quality_status = 'PENDING' THEN quantity ELSE 0 END), 0) as pending_qty,
+                COALESCE(SUM(CASE WHEN quality_status = 'FAILED' THEN quantity ELSE 0 END), 0) as failed_qty
+            FROM production_receipts
+            WHERE 1=1
+        """
+        
+        params = [today]
+        
+        if from_date:
+            base_query += " AND DATE(receipt_date) >= %s"
+            params.append(from_date)
+        
+        if to_date:
+            base_query += " AND DATE(receipt_date) <= %s"
+            params.append(to_date)
+        
+        # In-progress orders count
+        orders_query = """
+            SELECT COUNT(*) as in_progress_orders
+            FROM manufacturing_orders
+            WHERE delete_flag = 0
+                AND status = 'IN_PROGRESS'
+        """
+        
+        # Quality breakdown
+        quality_query = """
+            SELECT 
+                quality_status,
+                COUNT(*) as count,
+                COALESCE(SUM(quantity), 0) as quantity
+            FROM production_receipts
+            WHERE 1=1
+        """
+        
+        if from_date:
+            quality_query += " AND DATE(receipt_date) >= %s"
+        if to_date:
+            quality_query += " AND DATE(receipt_date) <= %s"
+        
+        quality_query += " GROUP BY quality_status"
+        
+        try:
+            result = pd.read_sql(base_query, self.engine, params=tuple(params))
+            orders = pd.read_sql(orders_query, self.engine)
+            
+            quality_params = []
+            if from_date:
+                quality_params.append(from_date)
+            if to_date:
+                quality_params.append(to_date)
+            quality = pd.read_sql(quality_query, self.engine,
+                                 params=tuple(quality_params) if quality_params else None)
+            
+            row = result.iloc[0]
+            
+            total_qty = float(row['total_quantity'])
+            passed_qty = float(row['passed_qty'])
+            pass_rate = round((passed_qty / total_qty * 100) if total_qty > 0 else 0, 1)
+            
+            quality_breakdown = {}
+            if not quality.empty:
+                for _, qrow in quality.iterrows():
+                    quality_breakdown[qrow['quality_status']] = {
+                        'count': int(qrow['count']),
+                        'quantity': float(qrow['quantity'])
+                    }
+            
+            return {
+                'total_receipts': int(row['total_receipts']),
+                'today_receipts': int(row['today_receipts']),
+                'total_quantity': total_qty,
+                'passed_qty': passed_qty,
+                'pending_qty': float(row['pending_qty']),
+                'failed_qty': float(row['failed_qty']),
+                'pass_rate': pass_rate,
+                'in_progress_orders': int(orders.iloc[0]['in_progress_orders']),
+                'quality_breakdown': quality_breakdown
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting completion metrics: {e}")
+            return {
+                'total_receipts': 0,
+                'today_receipts': 0,
+                'total_quantity': 0,
+                'passed_qty': 0,
+                'pending_qty': 0,
+                'failed_qty': 0,
+                'pass_rate': 0,
+                'in_progress_orders': 0,
+                'quality_breakdown': {}
+            }

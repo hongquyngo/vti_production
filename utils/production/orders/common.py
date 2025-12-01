@@ -1,0 +1,322 @@
+# utils/production/orders/common.py
+"""
+Common utilities for Orders domain
+Formatting, validation, UI helpers, and date utilities
+
+Version: 1.0.0
+"""
+
+import logging
+from datetime import date, timedelta, datetime
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Dict, Tuple, Union, Optional, List, Any
+from io import BytesIO
+
+import pandas as pd
+import streamlit as st
+
+# Timezone support
+try:
+    from zoneinfo import ZoneInfo
+    VN_TIMEZONE = ZoneInfo('Asia/Ho_Chi_Minh')
+except ImportError:
+    try:
+        import pytz
+        VN_TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')
+    except ImportError:
+        VN_TIMEZONE = None
+        logging.warning("No timezone library available. Using system timezone.")
+
+logger = logging.getLogger(__name__)
+
+
+# ==================== Constants ====================
+
+class OrderConstants:
+    """Order-specific constants"""
+    DEFAULT_PAGE_SIZE = 20
+    MAX_PAGE_SIZE = 100
+    QUANTITY_DECIMALS = 4
+    CURRENCY_DECIMALS = 0  # VND
+    
+    # Order statuses
+    STATUS_DRAFT = 'DRAFT'
+    STATUS_CONFIRMED = 'CONFIRMED'
+    STATUS_IN_PROGRESS = 'IN_PROGRESS'
+    STATUS_COMPLETED = 'COMPLETED'
+    STATUS_CANCELLED = 'CANCELLED'
+    
+    # Priorities
+    PRIORITY_LOW = 'LOW'
+    PRIORITY_NORMAL = 'NORMAL'
+    PRIORITY_HIGH = 'HIGH'
+    PRIORITY_URGENT = 'URGENT'
+    
+    # Editable statuses
+    EDITABLE_STATUSES = [STATUS_DRAFT, STATUS_CONFIRMED]
+    CONFIRMABLE_STATUSES = [STATUS_DRAFT]
+    CANCELLABLE_STATUSES = [STATUS_DRAFT, STATUS_CONFIRMED]
+
+
+# ==================== Timezone Helpers ====================
+
+def get_vietnam_now() -> datetime:
+    """Get current datetime in Vietnam timezone (UTC+7)"""
+    if VN_TIMEZONE:
+        return datetime.now(VN_TIMEZONE)
+    return datetime.now()
+
+
+def get_vietnam_today() -> date:
+    """Get current date in Vietnam timezone (UTC+7)"""
+    if VN_TIMEZONE:
+        return datetime.now(VN_TIMEZONE).date()
+    return date.today()
+
+
+# ==================== Number Formatting ====================
+
+def format_number(value: Union[int, float, Decimal, None],
+                 decimal_places: int = 2,
+                 use_thousands_separator: bool = True) -> str:
+    """Format number with precision and separators"""
+    if pd.isna(value) or value is None:
+        return "0"
+    
+    try:
+        if not isinstance(value, Decimal):
+            value = Decimal(str(value))
+        
+        quantize_str = '0.' + '0' * decimal_places if decimal_places > 0 else '0'
+        value = value.quantize(Decimal(quantize_str), rounding=ROUND_HALF_UP)
+        
+        if use_thousands_separator:
+            return f"{value:,}"
+        else:
+            return str(value)
+    
+    except Exception as e:
+        logger.error(f"Error formatting number {value}: {e}")
+        return str(value)
+
+
+def format_currency(value: Union[int, float, Decimal, None],
+                   currency: str = "VND") -> str:
+    """Format currency value"""
+    if pd.isna(value) or value is None:
+        value = 0
+    
+    decimal_places = 0 if currency == "VND" else 2
+    formatted = format_number(value, decimal_places)
+    
+    if currency == "VND":
+        return f"{formatted} ₫"
+    elif currency == "USD":
+        return f"${formatted}"
+    else:
+        return f"{formatted} {currency}"
+
+
+def calculate_percentage(numerator: Union[int, float],
+                        denominator: Union[int, float],
+                        decimal_places: int = 1) -> float:
+    """Calculate percentage safely"""
+    if denominator == 0 or pd.isna(denominator) or pd.isna(numerator):
+        return 0.0
+    
+    try:
+        percentage = (float(numerator) / float(denominator)) * 100
+        return round(percentage, decimal_places)
+    except Exception as e:
+        logger.error(f"Error calculating percentage: {e}")
+        return 0.0
+
+
+# ==================== Status Indicators ====================
+
+def create_status_indicator(status: str) -> str:
+    """Create status indicator with emoji"""
+    status_icons = {
+        'DRAFT': '📝 Draft',
+        'CONFIRMED': '✅ Confirmed',
+        'IN_PROGRESS': '🔄 In Progress',
+        'COMPLETED': '✔️ Completed',
+        'CANCELLED': '❌ Cancelled',
+        'LOW': '🔵 Low',
+        'NORMAL': '🟡 Normal',
+        'HIGH': '🟠 High',
+        'URGENT': '🔴 Urgent',
+        'SUFFICIENT': '✅ Sufficient',
+        'PARTIAL': '⚠️ Partial',
+        'INSUFFICIENT': '❌ Insufficient',
+        'PENDING': '⏳ Pending',
+        'ISSUED': '✅ Issued',
+    }
+    
+    return status_icons.get(status.upper(), f"⚪ {status}")
+
+
+def get_status_color(status: str) -> str:
+    """Get color for status badge"""
+    colors = {
+        'DRAFT': 'gray',
+        'CONFIRMED': 'blue',
+        'IN_PROGRESS': 'orange',
+        'COMPLETED': 'green',
+        'CANCELLED': 'red',
+        'LOW': 'blue',
+        'NORMAL': 'yellow',
+        'HIGH': 'orange',
+        'URGENT': 'red',
+    }
+    return colors.get(status.upper(), 'gray')
+
+
+# ==================== Date Helpers ====================
+
+def get_date_filter_presets() -> Dict[str, Tuple[date, date]]:
+    """Get common date filter presets"""
+    today = get_vietnam_today()
+    first_of_month = today.replace(day=1)
+    last_month_end = first_of_month - timedelta(days=1)
+    first_of_last_month = last_month_end.replace(day=1)
+    
+    return {
+        "Today": (today, today),
+        "Yesterday": (today - timedelta(days=1), today - timedelta(days=1)),
+        "This Week": (today - timedelta(days=today.weekday()), today),
+        "Last Week": (today - timedelta(days=today.weekday() + 7), 
+                     today - timedelta(days=today.weekday() + 1)),
+        "This Month": (first_of_month, today),
+        "Last Month": (first_of_last_month, last_month_end),
+        "Last 7 Days": (today - timedelta(days=6), today),
+        "Last 30 Days": (today - timedelta(days=29), today),
+    }
+
+
+def format_date(dt: Union[date, datetime, str, None], 
+               fmt: str = '%d/%m/%Y') -> str:
+    """Format date to string"""
+    if dt is None:
+        return ''
+    
+    if isinstance(dt, str):
+        try:
+            dt = datetime.strptime(dt, '%Y-%m-%d').date()
+        except ValueError:
+            return dt
+    
+    if isinstance(dt, datetime):
+        dt = dt.date()
+    
+    return dt.strftime(fmt)
+
+
+# ==================== Excel Export ====================
+
+def export_to_excel(dataframes: Union[pd.DataFrame, Dict[str, pd.DataFrame]],
+                   include_index: bool = False) -> bytes:
+    """Export DataFrame(s) to Excel"""
+    output = BytesIO()
+    
+    if isinstance(dataframes, pd.DataFrame):
+        dataframes = {"Sheet1": dataframes}
+    
+    try:
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            for sheet_name, df in dataframes.items():
+                safe_name = sheet_name[:31].replace('[', '').replace(']', '')
+                df.to_excel(writer, sheet_name=safe_name, index=include_index)
+        
+        return output.getvalue()
+    
+    except Exception as e:
+        logger.error(f"Error exporting to Excel: {e}")
+        raise
+
+
+# ==================== Validation Helpers ====================
+
+class OrderValidator:
+    """Order form validation helpers"""
+    
+    @staticmethod
+    def validate_create_order(order_data: Dict) -> Tuple[bool, Optional[str]]:
+        """
+        Validate create order form data
+        
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        required_fields = [
+            'bom_header_id', 'product_id', 'planned_qty',
+            'warehouse_id', 'target_warehouse_id', 'scheduled_date'
+        ]
+        
+        for field in required_fields:
+            if field not in order_data or order_data[field] is None:
+                return False, f"Missing required field: {field}"
+        
+        if order_data['planned_qty'] <= 0:
+            return False, "Planned quantity must be positive"
+        
+        if order_data['warehouse_id'] == order_data['target_warehouse_id']:
+            logger.warning("Source and target warehouse are the same")
+        
+        return True, None
+    
+    @staticmethod
+    def validate_update_order(order_data: Dict, current_status: str) -> Tuple[bool, Optional[str]]:
+        """Validate update order form data"""
+        if current_status not in OrderConstants.EDITABLE_STATUSES:
+            return False, f"Cannot edit order with status: {current_status}"
+        
+        if 'planned_qty' in order_data and order_data['planned_qty'] <= 0:
+            return False, "Planned quantity must be positive"
+        
+        return True, None
+    
+    @staticmethod
+    def can_confirm(status: str) -> bool:
+        """Check if order can be confirmed"""
+        return status in OrderConstants.CONFIRMABLE_STATUSES
+    
+    @staticmethod
+    def can_cancel(status: str) -> bool:
+        """Check if order can be cancelled"""
+        return status in OrderConstants.CANCELLABLE_STATUSES
+    
+    @staticmethod
+    def can_edit(status: str) -> bool:
+        """Check if order can be edited"""
+        return status in OrderConstants.EDITABLE_STATUSES
+
+
+# ==================== UI Helpers ====================
+
+def show_message(message: str, type: str = "info"):
+    """Show message in Streamlit"""
+    message_functions = {
+        "success": st.success,
+        "error": st.error,
+        "warning": st.warning,
+        "info": st.info
+    }
+    
+    show_func = message_functions.get(type, st.info)
+    show_func(message)
+
+
+def format_material_display(row) -> str:
+    """Format material display with PT code and package size"""
+    name = row.get('material_name', 'Unknown')
+    pt_code = row.get('pt_code', '')
+    package_size = row.get('package_size', '')
+    
+    display = f"**{name}**"
+    if pt_code:
+        display += f" | {pt_code}"
+    if package_size:
+        display += f" | {package_size}"
+    
+    return display

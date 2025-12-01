@@ -1,0 +1,530 @@
+# utils/production/orders/queries.py
+"""
+Database queries for Orders domain
+All SQL queries are centralized here for easy maintenance
+
+Version: 1.0.0
+"""
+
+import logging
+from datetime import date
+from typing import Dict, List, Optional, Any
+
+import pandas as pd
+from sqlalchemy import text
+
+from utils.db import get_db_engine
+
+logger = logging.getLogger(__name__)
+
+
+class OrderQueries:
+    """Database queries for Order management"""
+    
+    def __init__(self):
+        self.engine = get_db_engine()
+    
+    # ==================== Order Queries ====================
+    
+    def get_orders(self, 
+                   status: Optional[str] = None,
+                   order_type: Optional[str] = None,
+                   priority: Optional[str] = None,
+                   from_date: Optional[date] = None,
+                   to_date: Optional[date] = None,
+                   search: Optional[str] = None,
+                   page: int = 1, 
+                   page_size: int = 20) -> pd.DataFrame:
+        """
+        Get production orders with filters and pagination
+        
+        Args:
+            status: Filter by order status
+            order_type: Filter by BOM type (CUTTING, REPACKING, etc.)
+            priority: Filter by priority level
+            from_date: Filter orders from this date
+            to_date: Filter orders to this date
+            search: Search in order_no, product name
+            page: Page number (1-indexed)
+            page_size: Number of records per page
+            
+        Returns:
+            DataFrame with order list
+        """
+        query = """
+            SELECT 
+                o.id,
+                o.order_no,
+                o.order_date,
+                o.scheduled_date,
+                o.completion_date,
+                o.status,
+                o.priority,
+                o.planned_qty,
+                o.produced_qty,
+                o.uom,
+                o.product_id,
+                o.bom_header_id,
+                o.warehouse_id,
+                o.target_warehouse_id,
+                o.notes,
+                p.pt_code,
+                p.name as product_name,
+                p.package_size,
+                b.bom_type,
+                b.bom_name,
+                w1.name as warehouse_name,
+                w2.name as target_warehouse_name,
+                o.created_date,
+                o.created_by
+            FROM manufacturing_orders o
+            JOIN products p ON o.product_id = p.id
+            JOIN bom_headers b ON o.bom_header_id = b.id
+            JOIN warehouses w1 ON o.warehouse_id = w1.id
+            JOIN warehouses w2 ON o.target_warehouse_id = w2.id
+            WHERE o.delete_flag = 0
+        """
+        
+        params = []
+        
+        if status:
+            query += " AND o.status = %s"
+            params.append(status)
+        
+        if order_type:
+            query += " AND b.bom_type = %s"
+            params.append(order_type)
+        
+        if priority:
+            query += " AND o.priority = %s"
+            params.append(priority)
+        
+        if from_date:
+            query += " AND DATE(o.order_date) >= %s"
+            params.append(from_date)
+        
+        if to_date:
+            query += " AND DATE(o.order_date) <= %s"
+            params.append(to_date)
+        
+        if search:
+            query += " AND (o.order_no LIKE %s OR p.name LIKE %s OR p.pt_code LIKE %s)"
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern, search_pattern, search_pattern])
+        
+        query += " ORDER BY o.created_date DESC"
+        
+        # Pagination
+        offset = (page - 1) * page_size
+        query += " LIMIT %s OFFSET %s"
+        params.extend([page_size, offset])
+        
+        try:
+            return pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+        except Exception as e:
+            logger.error(f"Error getting orders: {e}")
+            return pd.DataFrame()
+    
+    def get_orders_count(self,
+                        status: Optional[str] = None,
+                        order_type: Optional[str] = None,
+                        priority: Optional[str] = None,
+                        from_date: Optional[date] = None,
+                        to_date: Optional[date] = None,
+                        search: Optional[str] = None) -> int:
+        """Get total count of orders matching filters"""
+        query = """
+            SELECT COUNT(*) as total
+            FROM manufacturing_orders o
+            JOIN products p ON o.product_id = p.id
+            JOIN bom_headers b ON o.bom_header_id = b.id
+            WHERE o.delete_flag = 0
+        """
+        
+        params = []
+        
+        if status:
+            query += " AND o.status = %s"
+            params.append(status)
+        
+        if order_type:
+            query += " AND b.bom_type = %s"
+            params.append(order_type)
+        
+        if priority:
+            query += " AND o.priority = %s"
+            params.append(priority)
+        
+        if from_date:
+            query += " AND DATE(o.order_date) >= %s"
+            params.append(from_date)
+        
+        if to_date:
+            query += " AND DATE(o.order_date) <= %s"
+            params.append(to_date)
+        
+        if search:
+            query += " AND (o.order_no LIKE %s OR p.name LIKE %s OR p.pt_code LIKE %s)"
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern, search_pattern, search_pattern])
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            return int(result['total'].iloc[0])
+        except Exception as e:
+            logger.error(f"Error getting orders count: {e}")
+            return 0
+    
+    def get_order_details(self, order_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed information for a single order"""
+        query = """
+            SELECT 
+                o.*,
+                p.name as product_name,
+                p.pt_code,
+                p.package_size,
+                p.description as product_description,
+                b.bom_name,
+                b.bom_type,
+                b.output_qty as bom_output_qty,
+                w1.name as warehouse_name,
+                w2.name as target_warehouse_name,
+                CONCAT(e.first_name, ' ', e.last_name) as created_by_name
+            FROM manufacturing_orders o
+            JOIN products p ON o.product_id = p.id
+            JOIN bom_headers b ON o.bom_header_id = b.id
+            JOIN warehouses w1 ON o.warehouse_id = w1.id
+            JOIN warehouses w2 ON o.target_warehouse_id = w2.id
+            LEFT JOIN users u ON o.created_by = u.id
+            LEFT JOIN employees e ON u.employee_id = e.id
+            WHERE o.id = %s AND o.delete_flag = 0
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=(order_id,))
+            return result.iloc[0].to_dict() if not result.empty else None
+        except Exception as e:
+            logger.error(f"Error getting order details for {order_id}: {e}")
+            return None
+    
+    def get_order_materials(self, order_id: int) -> pd.DataFrame:
+        """Get materials required for an order"""
+        query = """
+            SELECT 
+                m.id,
+                m.material_id,
+                p.name as material_name,
+                p.pt_code,
+                p.package_size,
+                m.required_qty,
+                COALESCE(m.issued_qty, 0) as issued_qty,
+                m.uom,
+                m.status,
+                (m.required_qty - COALESCE(m.issued_qty, 0)) as pending_qty
+            FROM manufacturing_order_materials m
+            JOIN products p ON m.material_id = p.id
+            WHERE m.manufacturing_order_id = %s
+            ORDER BY p.name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine, params=(order_id,))
+        except Exception as e:
+            logger.error(f"Error getting order materials for {order_id}: {e}")
+            return pd.DataFrame()
+    
+    # ==================== BOM Queries ====================
+    
+    def get_active_boms(self) -> pd.DataFrame:
+        """Get all active BOMs for order creation"""
+        query = """
+            SELECT 
+                b.id,
+                b.bom_name,
+                b.bom_type,
+                b.output_qty,
+                b.uom,
+                b.product_id,
+                p.name as product_name,
+                p.pt_code,
+                p.package_size
+            FROM bom_headers b
+            JOIN products p ON b.product_id = p.id
+            WHERE b.delete_flag = 0
+                AND b.status = 'ACTIVE'
+            ORDER BY b.bom_name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine)
+        except Exception as e:
+            logger.error(f"Error getting active BOMs: {e}")
+            return pd.DataFrame()
+    
+    def get_bom_info(self, bom_id: int) -> Optional[Dict[str, Any]]:
+        """Get BOM information by ID"""
+        query = """
+            SELECT 
+                b.id,
+                b.bom_name,
+                b.bom_type,
+                b.output_qty,
+                b.uom,
+                b.product_id,
+                p.name as product_name,
+                p.pt_code,
+                p.package_size
+            FROM bom_headers b
+            JOIN products p ON b.product_id = p.id
+            WHERE b.id = %s AND b.delete_flag = 0
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=(bom_id,))
+            return result.iloc[0].to_dict() if not result.empty else None
+        except Exception as e:
+            logger.error(f"Error getting BOM info for {bom_id}: {e}")
+            return None
+    
+    def get_bom_details(self, bom_id: int) -> pd.DataFrame:
+        """Get BOM detail lines (materials)"""
+        query = """
+            SELECT 
+                d.id as bom_detail_id,
+                d.material_id,
+                p.name as material_name,
+                p.pt_code,
+                p.package_size,
+                d.quantity,
+                d.uom,
+                d.scrap_rate,
+                h.output_qty
+            FROM bom_details d
+            JOIN bom_headers h ON d.bom_header_id = h.id
+            JOIN products p ON d.material_id = p.id
+            WHERE h.id = %s AND d.delete_flag = 0
+            ORDER BY p.name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine, params=(bom_id,))
+        except Exception as e:
+            logger.error(f"Error getting BOM details for {bom_id}: {e}")
+            return pd.DataFrame()
+    
+    # ==================== Warehouse Queries ====================
+    
+    def get_warehouses(self) -> pd.DataFrame:
+        """Get all active warehouses"""
+        query = """
+            SELECT 
+                id,
+                name,
+                address,
+                company_id,
+                manager_id
+            FROM warehouses
+            WHERE delete_flag = 0
+            ORDER BY name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine)
+        except Exception as e:
+            logger.error(f"Error getting warehouses: {e}")
+            return pd.DataFrame()
+    
+    # ==================== Employee Queries ====================
+    
+    def get_employees(self) -> pd.DataFrame:
+        """Get active employees for dropdowns"""
+        query = """
+            SELECT 
+                e.id,
+                CONCAT(e.first_name, ' ', e.last_name) as full_name,
+                e.email,
+                p.name as position_name,
+                d.name as department_name
+            FROM employees e
+            LEFT JOIN positions p ON e.position_id = p.id
+            LEFT JOIN departments d ON e.department_id = d.id
+            WHERE e.delete_flag = 0
+                AND (e.status = 'ACTIVE' OR e.status IS NULL)
+            ORDER BY e.first_name, e.last_name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine)
+        except Exception as e:
+            logger.error(f"Error getting employees: {e}")
+            return pd.DataFrame()
+    
+    # ==================== Filter Options ====================
+    
+    def get_filter_options(self) -> Dict[str, List[str]]:
+        """Get dynamic filter options from database"""
+        status_query = """
+            SELECT DISTINCT status 
+            FROM manufacturing_orders 
+            WHERE delete_flag = 0 
+            ORDER BY FIELD(status, 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED')
+        """
+        
+        type_query = """
+            SELECT DISTINCT bh.bom_type 
+            FROM manufacturing_orders mo
+            JOIN bom_headers bh ON mo.bom_header_id = bh.id
+            WHERE mo.delete_flag = 0
+            ORDER BY bh.bom_type
+        """
+        
+        priority_query = """
+            SELECT DISTINCT priority 
+            FROM manufacturing_orders 
+            WHERE delete_flag = 0 
+            ORDER BY FIELD(priority, 'LOW', 'NORMAL', 'HIGH', 'URGENT')
+        """
+        
+        try:
+            statuses = pd.read_sql(status_query, self.engine)['status'].tolist()
+            types = pd.read_sql(type_query, self.engine)['bom_type'].tolist()
+            priorities = pd.read_sql(priority_query, self.engine)['priority'].tolist()
+            
+            return {
+                'statuses': ['All'] + statuses,
+                'order_types': ['All'] + types,
+                'priorities': ['All'] + priorities
+            }
+        except Exception as e:
+            logger.error(f"Error getting filter options: {e}")
+            return {
+                'statuses': ['All', 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'],
+                'order_types': ['All', 'CUTTING', 'REPACKING', 'KITTING'],
+                'priorities': ['All', 'LOW', 'NORMAL', 'HIGH', 'URGENT']
+            }
+    
+    # ==================== Material Availability ====================
+    
+    def check_material_availability(self, bom_id: int, quantity: float, 
+                                   warehouse_id: int) -> pd.DataFrame:
+        """
+        Check material availability for a BOM
+        
+        Args:
+            bom_id: BOM header ID
+            quantity: Planned production quantity
+            warehouse_id: Source warehouse ID
+            
+        Returns:
+            DataFrame with material availability status
+        """
+        query = """
+            SELECT 
+                d.id as bom_detail_id,
+                d.material_id,
+                p.name as material_name,
+                p.pt_code,
+                p.package_size,
+                d.quantity * %s / h.output_qty * (1 + d.scrap_rate/100) as required_qty,
+                d.uom,
+                COALESCE(SUM(ih.remain), 0) as available_qty,
+                CASE 
+                    WHEN COALESCE(SUM(ih.remain), 0) >= 
+                         d.quantity * %s / h.output_qty * (1 + d.scrap_rate/100)
+                    THEN 'SUFFICIENT'
+                    WHEN COALESCE(SUM(ih.remain), 0) > 0
+                    THEN 'PARTIAL'
+                    ELSE 'INSUFFICIENT'
+                END as availability_status
+            FROM bom_details d
+            JOIN bom_headers h ON d.bom_header_id = h.id
+            JOIN products p ON d.material_id = p.id
+            LEFT JOIN inventory_histories ih 
+                ON ih.product_id = d.material_id 
+                AND ih.warehouse_id = %s
+                AND ih.remain > 0
+                AND ih.delete_flag = 0
+            WHERE h.id = %s AND d.delete_flag = 0
+            GROUP BY d.id, d.material_id, p.name, p.pt_code, p.package_size, 
+                     d.quantity, d.uom, d.scrap_rate, h.output_qty
+            ORDER BY p.name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine, 
+                             params=(quantity, quantity, warehouse_id, bom_id))
+        except Exception as e:
+            logger.error(f"Error checking material availability: {e}")
+            return pd.DataFrame()
+    
+    # ==================== Dashboard Metrics ====================
+    
+    def get_order_metrics(self, from_date: Optional[date] = None,
+                         to_date: Optional[date] = None) -> Dict[str, Any]:
+        """Get order metrics for dashboard"""
+        base_query = """
+            SELECT 
+                COUNT(*) as total_orders,
+                SUM(CASE WHEN status = 'DRAFT' THEN 1 ELSE 0 END) as draft_count,
+                SUM(CASE WHEN status = 'CONFIRMED' THEN 1 ELSE 0 END) as confirmed_count,
+                SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END) as in_progress_count,
+                SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN status = 'CANCELLED' THEN 1 ELSE 0 END) as cancelled_count,
+                SUM(CASE WHEN priority = 'URGENT' THEN 1 ELSE 0 END) as urgent_count,
+                SUM(CASE WHEN priority = 'HIGH' THEN 1 ELSE 0 END) as high_priority_count
+            FROM manufacturing_orders
+            WHERE delete_flag = 0
+        """
+        
+        params = []
+        
+        if from_date:
+            base_query += " AND DATE(order_date) >= %s"
+            params.append(from_date)
+        
+        if to_date:
+            base_query += " AND DATE(order_date) <= %s"
+            params.append(to_date)
+        
+        try:
+            result = pd.read_sql(base_query, self.engine, 
+                               params=tuple(params) if params else None)
+            
+            if result.empty:
+                return self._empty_metrics()
+            
+            row = result.iloc[0]
+            total = int(row['total_orders'])
+            completed = int(row['completed_count'])
+            
+            return {
+                'total_orders': total,
+                'draft_count': int(row['draft_count']),
+                'confirmed_count': int(row['confirmed_count']),
+                'in_progress_count': int(row['in_progress_count']),
+                'completed_count': completed,
+                'cancelled_count': int(row['cancelled_count']),
+                'urgent_count': int(row['urgent_count']),
+                'high_priority_count': int(row['high_priority_count']),
+                'active_count': int(row['in_progress_count']) + int(row['confirmed_count']),
+                'completion_rate': round((completed / total * 100), 1) if total > 0 else 0
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting order metrics: {e}")
+            return self._empty_metrics()
+    
+    def _empty_metrics(self) -> Dict[str, Any]:
+        """Return empty metrics structure"""
+        return {
+            'total_orders': 0,
+            'draft_count': 0,
+            'confirmed_count': 0,
+            'in_progress_count': 0,
+            'completed_count': 0,
+            'cancelled_count': 0,
+            'urgent_count': 0,
+            'high_priority_count': 0,
+            'active_count': 0,
+            'completion_rate': 0
+        }
