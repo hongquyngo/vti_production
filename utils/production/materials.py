@@ -1,9 +1,13 @@
 # utils/production/materials.py
 """
-Material Issue, Return, and Production Completion Logic - REFACTORED v8.1
+Material Issue, Return, and Production Completion Logic - REFACTORED v8.2
 FEFO-based material issuing with automatic alternative substitution and conversion ratio tracking
 
-MAJOR CHANGES v8.1:
+MAJOR CHANGES v8.2:
+✅ NEW: use_alternatives parameter in issue_materials to allow using alternative materials
+✅ NEW: Skip available stock check when use_alternatives is enabled for a material
+
+CHANGES v8.1:
 ✅ NEW: Vietnam timezone (Asia/Ho_Chi_Minh) for document number generation
 
 CHANGES v8.0:
@@ -37,7 +41,8 @@ logger = logging.getLogger(__name__)
 def issue_materials(order_id: int, user_id: int, keycloak_id: str, 
                    issued_by: int, received_by: int = None,
                    notes: str = None,
-                   custom_quantities: Dict[int, float] = None) -> Dict[str, Any]:
+                   custom_quantities: Dict[int, float] = None,
+                   use_alternatives: Dict[int, bool] = None) -> Dict[str, Any]:
     """
     Issue materials for production using FEFO (First Expiry, First Out)
     with automatic alternative material substitution and tracking
@@ -50,6 +55,7 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
         received_by: Employee ID of production staff receiving materials
         notes: Optional notes about the issue
         custom_quantities: Optional dict {material_id: quantity} for user-specified issue amounts
+        use_alternatives: Optional dict {material_id: bool} indicating which materials should use alternatives
     
     Returns:
         Dictionary with issue_no, issue_id, details, substitutions
@@ -121,12 +127,16 @@ def issue_materials(order_id: int, user_id: int, keycloak_id: str,
                     qty_to_issue = float(mat['required_qty']) - float(mat['issued_qty'])
                 
                 if qty_to_issue > 0:
-                    # Validate against available stock
+                    # Check if user wants to use alternatives for this material
+                    should_use_alternatives = use_alternatives and use_alternatives.get(material_id, False)
+                    
+                    # Validate against available stock (skip if using alternatives)
                     available = _get_available_stock(conn, material_id, order['warehouse_id'])
-                    if qty_to_issue > available:
+                    if qty_to_issue > available and not should_use_alternatives:
                         raise ValueError(
                             f"Cannot issue {qty_to_issue} of {mat['material_name']} - "
-                            f"only {available} available in stock"
+                            f"only {available} available in stock. "
+                            f"Enable 'Use Alternative' to issue from alternative materials."
                         )
                     
                     try:

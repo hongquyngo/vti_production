@@ -1,8 +1,18 @@
 # pages/2___Production.py
 """
-Production Management User Interface - REFACTORED v7.0
+Production Management User Interface - REFACTORED v7.2
 Complete production cycle: Order → Issue → Return → Complete
 WITH TAB-BASED UI AND INTEGRATED HISTORY/RECEIPTS
+
+IMPROVEMENTS v7.2:
+- ✅ NEW: "Use Alternative" checkbox when primary material insufficient
+- ✅ NEW: Auto-expand alternatives section when available_qty = 0
+- ✅ NEW: Dynamic max_value based on total available (primary + alternatives)
+- ✅ FIX: Allow issuing from alternatives when primary stock is 0
+
+IMPROVEMENTS v7.1:
+- ✅ Vietnam timezone (Asia/Ho_Chi_Minh) for all date/time operations
+- ✅ Removed scheduled_date validation (past dates allowed)
 
 IMPROVEMENTS v7.0 (UI/UX Refactor):
 - ✅ NEW: Tab-based navigation (4 main tabs)
@@ -925,6 +935,22 @@ def render_material_issue_form():
                 
                 col1, col2, col3, col4, col5 = st.columns([3, 1.5, 1.5, 2, 1])
                 
+                # Check if this material should use alternatives
+                use_alt_key = f"use_alt_{material_id}"
+                if 'use_alternatives' not in st.session_state:
+                    st.session_state['use_alternatives'] = {}
+                
+                # Calculate total available including alternatives
+                alt_total = float(row.get('alternative_total_qty', 0))
+                total_available = available_qty + alt_total
+                use_alternative = st.session_state['use_alternatives'].get(material_id, False)
+                
+                # Determine max issue quantity based on use_alternative flag
+                if use_alternative and alt_total > 0:
+                    max_issue_qty = min(total_available, required_qty * 1.5)  # Allow up to 150% of required
+                else:
+                    max_issue_qty = available_qty
+                
                 with col1:
                     st.write(f"**{material_name}**")
                     st.caption(f"PT Code: {pt_code}")
@@ -935,15 +961,19 @@ def render_material_issue_form():
                 
                 with col3:
                     st.write(f"Available: **{format_number(available_qty, 4)}**")
-                    st.caption(f"{status_icon} {status}")
+                    if use_alternative and alt_total > 0:
+                        st.caption(f"🔄 +{format_number(alt_total, 4)} alt")
+                    else:
+                        st.caption(f"{status_icon} {status}")
                 
                 with col4:
                     # Editable input for issue quantity
+                    default_qty = st.session_state['issue_quantities'].get(material_id, min(required_qty, max_issue_qty))
                     issue_qty = st.number_input(
                         f"Issue Qty",
                         min_value=0.0,
-                        max_value=float(available_qty),  # Cannot exceed available
-                        value=float(st.session_state['issue_quantities'].get(material_id, min(required_qty, available_qty))),
+                        max_value=float(max_issue_qty) if max_issue_qty > 0 else 0.0001,
+                        value=float(min(default_qty, max_issue_qty)),
                         step=0.0001,
                         format="%.4f",
                         key=f"issue_qty_{material_id}",
@@ -961,15 +991,35 @@ def render_material_issue_form():
                     else:
                         st.success("✅ Exact")
                     
-                    if issue_qty > available_qty:
-                        st.error("❌ Over")
-                        errors.append(f"{material_name}: cannot issue {format_number(issue_qty, 4)} > available {format_number(available_qty, 4)}")
-                        issue_valid = False
+                    # Check against available (considering alternatives if enabled)
+                    if use_alternative:
+                        if issue_qty > total_available:
+                            st.error("❌ Over")
+                            errors.append(f"{material_name}: cannot issue {format_number(issue_qty, 4)} > total available {format_number(total_available, 4)}")
+                            issue_valid = False
+                    else:
+                        if issue_qty > available_qty:
+                            st.error("❌ Over")
+                            errors.append(f"{material_name}: cannot issue {format_number(issue_qty, 4)} > available {format_number(available_qty, 4)}")
+                            issue_valid = False
                 
                 # Check for alternatives if current material is insufficient
                 if status != 'SUFFICIENT' and row.get('has_alternatives', False):
-                    with st.expander(f"🔄 Alternatives for {material_name}", expanded=False):
+                    with st.expander(f"🔄 Alternatives for {material_name}", expanded=(available_qty == 0)):
                         if 'alternative_details' in row and row['alternative_details']:
+                            # Show checkbox to use alternatives
+                            use_alt = st.checkbox(
+                                f"✅ Use alternative materials (Total: {format_number(alt_total, 4)} {uom} available)",
+                                value=use_alternative,
+                                key=use_alt_key
+                            )
+                            st.session_state['use_alternatives'][material_id] = use_alt
+                            
+                            # If checkbox state changed, trigger rerun to update max values
+                            if use_alt != use_alternative:
+                                st.rerun()
+                            
+                            st.markdown("**Available alternatives:**")
                             for alt in row['alternative_details']:
                                 st.write(
                                     f"• **{alt['name']}** (Priority {alt['priority']}): "
@@ -1006,6 +1056,7 @@ def render_material_issue_form():
                     if st.button("🔄 Reset to Suggested", key="reset_quantities", use_container_width=True):
                         st.session_state.pop('issue_quantities', None)
                         st.session_state.pop('issue_order_id', None)
+                        st.session_state.pop('use_alternatives', None)
                         st.rerun()
                 
                 if st.session_state.get('confirm_issue', False):
@@ -1057,6 +1108,7 @@ def render_material_issue_form():
                                     
                                     # Prepare custom quantities for issue
                                     custom_quantities = st.session_state.get('issue_quantities', {})
+                                    use_alternatives = st.session_state.get('use_alternatives', {})
                                     
                                     with st.spinner("Issuing materials..."):
                                         result = issue_materials(
@@ -1066,13 +1118,15 @@ def render_material_issue_form():
                                             issued_by=issued_by_id,
                                             received_by=received_by_id,
                                             notes=notes.strip() if notes else None,
-                                            custom_quantities=custom_quantities  # NEW: Pass custom quantities
+                                            custom_quantities=custom_quantities,
+                                            use_alternatives=use_alternatives  # NEW: Pass use alternatives flag
                                         )
                                     
                                     # Clear session state
                                     st.session_state['confirm_issue'] = False
                                     st.session_state.pop('issue_quantities', None)
                                     st.session_state.pop('issue_order_id', None)
+                                    st.session_state.pop('use_alternatives', None)
                                     
                                     PDFExportDialog.show_pdf_export_dialog(result)
                                     
