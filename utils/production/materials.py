@@ -1,17 +1,19 @@
 # utils/production/materials.py
 """
-Material Issue, Return, and Production Completion Logic - REFACTORED v7.0
+Material Issue, Return, and Production Completion Logic - REFACTORED v8.0
 FEFO-based material issuing with automatic alternative substitution and conversion ratio tracking
 
-MAJOR CHANGES v7.0:
-✅ NEW: issued_qty trong manufacturing_order_materials = tổng EQUIVALENT (quy đổi về primary)
-✅ NEW: material_issue_details ghi ACTUAL quantity xuất ra
-✅ NEW: Hỗ trợ nhiều alternatives với conversion ratios khác nhau
-✅ NEW: Return logic convert ngược về equivalent
-✅ NEW: Helper functions: _get_bom_detail_info, _get_alternatives_for_material, _get_conversion_ratio
-✅ MAINTAINED: All inventory_histories logic with fallback
+MAJOR CHANGES v8.0:
+✅ FIX: inventory_histories.type sử dụng đúng operation values:
+   - 'stockOutProduction' cho xuất NVL
+   - 'stockInProductionReturn' cho trả NVL
+   - 'stockInProduction' cho nhập thành phẩm
+✅ FIX: Thêm batch_no, expired_date, action_detail_id vào inventory OUT records
+✅ FIX: Bỏ tất cả check columns logic (không cần fallback)
+✅ MAINTAINED: issued_qty trong manufacturing_order_materials = tổng EQUIVALENT
+✅ MAINTAINED: material_issue_details ghi ACTUAL quantity xuất ra
 ✅ MAINTAINED: FEFO logic and batch tracking
-✅ MAINTAINED: Full alternative material tracking
+✅ MAINTAINED: Full alternative material tracking với conversion ratios
 """
 
 import logging
@@ -345,9 +347,7 @@ def complete_production(order_id: int, produced_qty: float,
                 _add_production_to_inventory(
                     conn, order, produced_qty, batch_no,
                     warehouse_id, expiry_date, 
-                    group_id, keycloak_id, 
-                    order.get('entity_id', 1),
-                    receipt_id
+                    group_id, keycloak_id, receipt_id
                 )
             
             # Update order produced quantity
@@ -667,8 +667,9 @@ def _issue_single_material_fefo(conn, issue_id: int, order_id: int,
         # Update inventory with proper operation tracking
         _update_inventory_for_issue(
             conn, batch['inventory_history_id'], material['material_id'],
-            warehouse_id, issue_qty, group_id, keycloak_id, 
-            entity_id, issue_id
+            warehouse_id, issue_qty, 
+            batch['batch_no'], batch['expired_date'],
+            group_id, keycloak_id, detail_id
         )
         
         issued_details.append({
@@ -975,87 +976,69 @@ def _insert_issue_detail(conn, issue_id: int, order_material_id: int,
     """
     Insert issue detail with alternative tracking
     
+    Args:
+        conn: Database connection
+        issue_id: Material issue header ID
+        order_material_id: Manufacturing order material ID
+        material_id: Material/Product ID being issued
+        batch_info: Batch info dict with inventory_history_id, batch_no, expired_date
+        quantity: Quantity to issue
+        uom: Unit of measure
+        is_alternative: Whether this is an alternative material
+        original_material_id: ID of primary material if this is alternative
+    
     Returns:
         Inserted detail ID
     """
-    # First check if alternative tracking columns exist
-    check_columns_query = text("""
-        SELECT COUNT(*) as col_count
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE table_schema = DATABASE() 
-            AND table_name = 'material_issue_details' 
-            AND column_name IN ('is_alternative', 'original_material_id')
+    detail_query = text("""
+        INSERT INTO material_issue_details (
+            material_issue_id, manufacturing_order_material_id,
+            material_id, inventory_history_id, batch_no,
+            quantity, uom, expired_date,
+            is_alternative, original_material_id
+        ) VALUES (
+            :issue_id, :order_material_id,
+            :material_id, :inv_history_id, :batch_no,
+            :quantity, :uom, :expired_date,
+            :is_alternative, :original_material_id
+        )
     """)
     
-    result = conn.execute(check_columns_query)
-    col_count = result.fetchone()[0]
+    result = conn.execute(detail_query, {
+        'issue_id': issue_id,
+        'order_material_id': order_material_id,
+        'material_id': material_id,
+        'inv_history_id': batch_info['inventory_history_id'],
+        'batch_no': batch_info['batch_no'],
+        'quantity': quantity,
+        'uom': uom,
+        'expired_date': batch_info['expired_date'],
+        'is_alternative': 1 if is_alternative else 0,
+        'original_material_id': original_material_id
+    })
     
-    if col_count == 2:
-        # New columns exist, use enhanced query
-        detail_query = text("""
-            INSERT INTO material_issue_details (
-                material_issue_id, manufacturing_order_material_id,
-                material_id, inventory_history_id, batch_no,
-                quantity, uom, expired_date,
-                is_alternative, original_material_id
-            ) VALUES (
-                :issue_id, :order_material_id,
-                :material_id, :inv_history_id, :batch_no,
-                :quantity, :uom, :expired_date,
-                :is_alternative, :original_material_id
-            )
-        """)
-        
-        params = {
-            'issue_id': issue_id,
-            'order_material_id': order_material_id,
-            'material_id': material_id,
-            'inv_history_id': batch_info['inventory_history_id'],
-            'batch_no': batch_info['batch_no'],
-            'quantity': quantity,
-            'uom': uom,
-            'expired_date': batch_info['expired_date'],
-            'is_alternative': 1 if is_alternative else 0,
-            'original_material_id': original_material_id
-        }
-    else:
-        # Use basic query without new columns
-        detail_query = text("""
-            INSERT INTO material_issue_details (
-                material_issue_id, manufacturing_order_material_id,
-                material_id, inventory_history_id, batch_no,
-                quantity, uom, expired_date
-            ) VALUES (
-                :issue_id, :order_material_id,
-                :material_id, :inv_history_id, :batch_no,
-                :quantity, :uom, :expired_date
-            )
-        """)
-        
-        params = {
-            'issue_id': issue_id,
-            'order_material_id': order_material_id,
-            'material_id': material_id,
-            'inv_history_id': batch_info['inventory_history_id'],
-            'batch_no': batch_info['batch_no'],
-            'quantity': quantity,
-            'uom': uom,
-            'expired_date': batch_info['expired_date']
-        }
-    
-    result = conn.execute(detail_query, params)
     return result.lastrowid
 
 
 def _update_inventory_for_issue(conn, inv_history_id: int, material_id: int,
                                warehouse_id: int, quantity: float,
+                               batch_no: Optional[str], expired_date,
                                group_id: str, keycloak_id: str,
-                               entity_id: int, issue_id: int):
+                               issue_detail_id: int):
     """
     Update inventory for material issue with proper tracking
     
-    CRITICAL: Uses keycloak_id for created_by (VARCHAR), not user_id (INT)
-    Checks if operation/reference columns exist before using them
+    Args:
+        conn: Database connection
+        inv_history_id: Source inventory history record ID
+        material_id: Material/Product ID being issued
+        warehouse_id: Source warehouse ID
+        quantity: Quantity to issue
+        batch_no: Batch number from source inventory
+        expired_date: Expiry date from source inventory
+        group_id: Transaction group ID
+        keycloak_id: Keycloak ID for created_by (VARCHAR)
+        issue_detail_id: Material issue detail ID for action_detail_id
     """
     # Update remain in original record
     update_query = text("""
@@ -1072,63 +1055,31 @@ def _update_inventory_for_issue(conn, inv_history_id: int, material_id: int,
     if result.rowcount == 0:
         raise ValueError("Inventory update failed - concurrent modification")
     
-    # Create OUT record with proper operation tracking
-    # Check if new columns exist
-    check_columns_query = text("""
-        SELECT COUNT(*) as col_count
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE table_schema = DATABASE() 
-            AND table_name = 'inventory_histories' 
-            AND column_name IN ('operation', 'reference_type', 'reference_id', 'entity_id')
+    # Create stockOutProduction record with full tracking
+    out_query = text("""
+        INSERT INTO inventory_histories (
+            product_id, warehouse_id, type,
+            quantity, remain, batch_no, expired_date,
+            group_id, action_detail_id,
+            created_by, created_date
+        ) VALUES (
+            :material_id, :warehouse_id, 'stockOutProduction',
+            :quantity, 0, :batch_no, :expired_date,
+            :group_id, :action_detail_id,
+            :created_by, NOW()
+        )
     """)
     
-    result = conn.execute(check_columns_query)
-    col_count = result.fetchone()[0]
-    
-    if col_count == 4:
-        # New columns exist - use enhanced tracking
-        out_query = text("""
-            INSERT INTO inventory_histories (
-                product_id, warehouse_id, type, operation,
-                quantity, remain, group_id, 
-                reference_type, reference_id, entity_id,
-                created_by, created_date
-            ) VALUES (
-                :material_id, :warehouse_id, 'OUT', 'stockOutProduction',
-                :quantity, 0, :group_id,
-                'MATERIAL_ISSUE', :issue_id, :entity_id,
-                :created_by, NOW()
-            )
-        """)
-        
-        conn.execute(out_query, {
-            'material_id': material_id,
-            'warehouse_id': warehouse_id,
-            'quantity': quantity,
-            'group_id': group_id,
-            'issue_id': issue_id,
-            'entity_id': entity_id,
-            'created_by': keycloak_id
-        })
-    else:
-        # Fallback to basic tracking
-        out_query = text("""
-            INSERT INTO inventory_histories (
-                product_id, warehouse_id, type, quantity, remain,
-                group_id, created_by, created_date
-            ) VALUES (
-                :material_id, :warehouse_id, 'OUT', :quantity, 0,
-                :group_id, :created_by, NOW()
-            )
-        """)
-        
-        conn.execute(out_query, {
-            'material_id': material_id,
-            'warehouse_id': warehouse_id,
-            'quantity': quantity,
-            'group_id': group_id,
-            'created_by': keycloak_id
-        })
+    conn.execute(out_query, {
+        'material_id': material_id,
+        'warehouse_id': warehouse_id,
+        'quantity': quantity,
+        'batch_no': batch_no,
+        'expired_date': expired_date,
+        'group_id': group_id,
+        'action_detail_id': issue_detail_id,
+        'created_by': keycloak_id
+    })
 
 
 def _process_return_item(conn, return_id: int, return_item: Dict,
@@ -1156,72 +1107,39 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
     row = result.fetchone()
     issue_detail = dict(zip(result.keys(), row))
     
-    # Check if material_return_details has alternative tracking columns
-    check_return_columns = text("""
-        SELECT COUNT(*) as col_count
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE table_schema = DATABASE() 
-            AND table_name = 'material_return_details' 
-            AND column_name IN ('is_alternative', 'original_material_id')
+    # Insert return detail with alternative tracking
+    detail_query = text("""
+        INSERT INTO material_return_details (
+            material_return_id, material_id, original_issue_detail_id,
+            batch_no, quantity, uom, `condition`, expired_date,
+            is_alternative, original_material_id
+        ) VALUES (
+            :return_id, :material_id, :issue_detail_id,
+            :batch_no, :quantity, :uom, :condition, :expired_date,
+            :is_alternative, :original_material_id
+        )
     """)
     
-    result = conn.execute(check_return_columns)
-    has_alt_columns = result.fetchone()[0] == 2
+    detail_result = conn.execute(detail_query, {
+        'return_id': return_id,
+        'material_id': issue_detail['material_id'],
+        'issue_detail_id': return_item['issue_detail_id'],
+        'batch_no': issue_detail['batch_no'],
+        'quantity': return_item['quantity'],
+        'uom': issue_detail['uom'],
+        'condition': return_item.get('condition', 'GOOD'),
+        'expired_date': issue_detail['expired_date'],
+        'is_alternative': issue_detail['is_alternative'],
+        'original_material_id': issue_detail['original_material_id']
+    })
     
-    if has_alt_columns:
-        # Insert return detail WITH alternative tracking
-        detail_query = text("""
-            INSERT INTO material_return_details (
-                material_return_id, material_id, original_issue_detail_id,
-                batch_no, quantity, uom, `condition`, expired_date,
-                is_alternative, original_material_id
-            ) VALUES (
-                :return_id, :material_id, :issue_detail_id,
-                :batch_no, :quantity, :uom, :condition, :expired_date,
-                :is_alternative, :original_material_id
-            )
-        """)
-        
-        conn.execute(detail_query, {
-            'return_id': return_id,
-            'material_id': issue_detail['material_id'],
-            'issue_detail_id': return_item['issue_detail_id'],
-            'batch_no': issue_detail['batch_no'],
-            'quantity': return_item['quantity'],
-            'uom': issue_detail['uom'],
-            'condition': return_item.get('condition', 'GOOD'),
-            'expired_date': issue_detail['expired_date'],
-            'is_alternative': issue_detail['is_alternative'],
-            'original_material_id': issue_detail['original_material_id']
-        })
-    else:
-        # Fallback to basic return detail
-        detail_query = text("""
-            INSERT INTO material_return_details (
-                material_return_id, material_id, original_issue_detail_id,
-                batch_no, quantity, uom, `condition`, expired_date
-            ) VALUES (
-                :return_id, :material_id, :issue_detail_id,
-                :batch_no, :quantity, :uom, :condition, :expired_date
-            )
-        """)
-        
-        conn.execute(detail_query, {
-            'return_id': return_id,
-            'material_id': issue_detail['material_id'],
-            'issue_detail_id': return_item['issue_detail_id'],
-            'batch_no': issue_detail['batch_no'],
-            'quantity': return_item['quantity'],
-            'uom': issue_detail['uom'],
-            'condition': return_item.get('condition', 'GOOD'),
-            'expired_date': issue_detail['expired_date']
-        })
+    return_detail_id = detail_result.lastrowid
     
     # Add back to inventory if condition is GOOD
     if return_item.get('condition', 'GOOD') == 'GOOD':
         _update_inventory_for_return(
             conn, issue_detail, return_item['quantity'],
-            warehouse_id, group_id, keycloak_id, entity_id, return_id
+            warehouse_id, group_id, keycloak_id, return_detail_id
         )
     
     return {
@@ -1235,144 +1153,90 @@ def _process_return_item(conn, return_id: int, return_item: Dict,
 
 def _update_inventory_for_return(conn, issue_detail: Dict, quantity: float,
                                 warehouse_id: int, group_id: str, 
-                                keycloak_id: str, entity_id: int, return_id: int):
+                                keycloak_id: str, return_detail_id: int):
     """
     Update inventory for material return with proper tracking
     
-    CRITICAL: Uses keycloak_id for created_by (VARCHAR), not user_id (INT)
+    Args:
+        conn: Database connection
+        issue_detail: Original issue detail info (material_id, batch_no, expired_date)
+        quantity: Quantity being returned
+        warehouse_id: Target warehouse for return
+        group_id: Transaction group ID
+        keycloak_id: Keycloak ID for created_by (VARCHAR)
+        return_detail_id: Material return detail ID for action_detail_id
     """
-    # Check if new columns exist
-    check_columns_query = text("""
-        SELECT COUNT(*) as col_count
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE table_schema = DATABASE() 
-            AND table_name = 'inventory_histories' 
-            AND column_name IN ('operation', 'reference_type', 'reference_id', 'entity_id')
+    # Create stockInProductionReturn record
+    inv_query = text("""
+        INSERT INTO inventory_histories (
+            product_id, warehouse_id, type,
+            quantity, remain, batch_no, expired_date, 
+            group_id, action_detail_id,
+            created_by, created_date
+        ) VALUES (
+            :material_id, :warehouse_id, 'stockInProductionReturn',
+            :quantity, :quantity, :batch_no, :expired_date,
+            :group_id, :action_detail_id,
+            :created_by, NOW()
+        )
     """)
     
-    result = conn.execute(check_columns_query)
-    col_count = result.fetchone()[0]
-    
-    if col_count == 4:
-        # New columns exist - use enhanced tracking
-        inv_query = text("""
-            INSERT INTO inventory_histories (
-                product_id, warehouse_id, type, operation,
-                quantity, remain, batch_no, expired_date, 
-                group_id, reference_type, reference_id, entity_id,
-                created_by, created_date
-            ) VALUES (
-                :material_id, :warehouse_id, 'IN', 'stockInProductionReturn',
-                :quantity, :quantity, :batch_no, :expired_date,
-                :group_id, 'MATERIAL_RETURN', :return_id, :entity_id,
-                :created_by, NOW()
-            )
-        """)
-        
-        conn.execute(inv_query, {
-            'material_id': issue_detail['material_id'],
-            'warehouse_id': warehouse_id,
-            'quantity': quantity,
-            'batch_no': issue_detail['batch_no'],
-            'expired_date': issue_detail['expired_date'],
-            'group_id': group_id,
-            'return_id': return_id,
-            'entity_id': entity_id,
-            'created_by': keycloak_id
-        })
-    else:
-        # Fallback to basic tracking
-        inv_query = text("""
-            INSERT INTO inventory_histories (
-                product_id, warehouse_id, type, quantity, remain,
-                batch_no, expired_date, group_id, created_by, created_date
-            ) VALUES (
-                :material_id, :warehouse_id, 'IN', :quantity, :quantity,
-                :batch_no, :expired_date, :group_id, :created_by, NOW()
-            )
-        """)
-        
-        conn.execute(inv_query, {
-            'material_id': issue_detail['material_id'],
-            'warehouse_id': warehouse_id,
-            'quantity': quantity,
-            'batch_no': issue_detail['batch_no'],
-            'expired_date': issue_detail['expired_date'],
-            'group_id': group_id,
-            'created_by': keycloak_id
-        })
+    conn.execute(inv_query, {
+        'material_id': issue_detail['material_id'],
+        'warehouse_id': warehouse_id,
+        'quantity': quantity,
+        'batch_no': issue_detail['batch_no'],
+        'expired_date': issue_detail['expired_date'],
+        'group_id': group_id,
+        'action_detail_id': return_detail_id,
+        'created_by': keycloak_id
+    })
 
 
 def _add_production_to_inventory(conn, order: Dict, quantity: float,
                                 batch_no: str, warehouse_id: int,
                                 expiry_date: Optional[date],
                                 group_id: str, keycloak_id: str, 
-                                entity_id: int, receipt_id: int):
+                                receipt_id: int):
     """
     Add production output to inventory with proper tracking
     
-    CRITICAL: Uses keycloak_id for created_by (VARCHAR), not user_id (INT)
+    Args:
+        conn: Database connection
+        order: Manufacturing order info (product_id, etc.)
+        quantity: Quantity produced
+        batch_no: New batch number for finished goods
+        warehouse_id: Target warehouse ID
+        expiry_date: Expiry date for finished goods
+        group_id: Transaction group ID
+        keycloak_id: Keycloak ID for created_by (VARCHAR)
+        receipt_id: Production receipt ID for action_detail_id
     """
-    # Check if new columns exist
-    check_columns_query = text("""
-        SELECT COUNT(*) as col_count
-        FROM INFORMATION_SCHEMA.COLUMNS 
-        WHERE table_schema = DATABASE() 
-            AND table_name = 'inventory_histories' 
-            AND column_name IN ('operation', 'reference_type', 'reference_id', 'entity_id')
+    # Create stockInProduction record
+    query = text("""
+        INSERT INTO inventory_histories (
+            product_id, warehouse_id, type,
+            quantity, remain, batch_no, expired_date,
+            group_id, action_detail_id,
+            created_by, created_date
+        ) VALUES (
+            :product_id, :warehouse_id, 'stockInProduction',
+            :quantity, :quantity, :batch_no, :expired_date,
+            :group_id, :action_detail_id,
+            :created_by, NOW()
+        )
     """)
     
-    result = conn.execute(check_columns_query)
-    col_count = result.fetchone()[0]
-    
-    if col_count == 4:
-        # New columns exist - use enhanced tracking
-        query = text("""
-            INSERT INTO inventory_histories (
-                product_id, warehouse_id, type, operation,
-                quantity, remain, batch_no, expired_date,
-                group_id, reference_type, reference_id, entity_id,
-                created_by, created_date
-            ) VALUES (
-                :product_id, :warehouse_id, 'IN', 'stockInProduction',
-                :quantity, :quantity, :batch_no, :expired_date,
-                :group_id, 'PRODUCTION_RECEIPT', :receipt_id, :entity_id,
-                :created_by, NOW()
-            )
-        """)
-        
-        conn.execute(query, {
-            'product_id': order['product_id'],
-            'warehouse_id': warehouse_id,
-            'quantity': quantity,
-            'batch_no': batch_no,
-            'expired_date': expiry_date,
-            'group_id': group_id,
-            'receipt_id': receipt_id,
-            'entity_id': entity_id,
-            'created_by': keycloak_id
-        })
-    else:
-        # Fallback to basic tracking
-        query = text("""
-            INSERT INTO inventory_histories (
-                product_id, warehouse_id, type, quantity, remain,
-                batch_no, expired_date, group_id, created_by, created_date
-            ) VALUES (
-                :product_id, :warehouse_id, 'IN', :quantity, :quantity,
-                :batch_no, :expired_date, :group_id, :created_by, NOW()
-            )
-        """)
-        
-        conn.execute(query, {
-            'product_id': order['product_id'],
-            'warehouse_id': warehouse_id,
-            'quantity': quantity,
-            'batch_no': batch_no,
-            'expired_date': expiry_date,
-            'group_id': group_id,
-            'created_by': keycloak_id
-        })
+    conn.execute(query, {
+        'product_id': order['product_id'],
+        'warehouse_id': warehouse_id,
+        'quantity': quantity,
+        'batch_no': batch_no,
+        'expired_date': expiry_date,
+        'group_id': group_id,
+        'action_detail_id': receipt_id,
+        'created_by': keycloak_id
+    })
 
 
 # ==================== NUMBER GENERATORS ====================
