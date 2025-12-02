@@ -109,6 +109,13 @@ def _render_return_history(queries: ReturnQueries, filters: Dict[str, Any]):
         page_size=page_size
     )
     
+    # Check for connection error (returns None)
+    if returns is None:
+        error_msg = queries.get_last_error() or "Cannot connect to database"
+        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
+        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
+        return
+    
     total_count = queries.get_returns_count(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
@@ -117,6 +124,7 @@ def _render_return_history(queries: ReturnQueries, filters: Dict[str, Any]):
         reason=filters['reason']
     )
     
+    # Check for empty data (returns empty DataFrame)
     if returns.empty:
         st.info("📭 No returns found matching the filters")
         return

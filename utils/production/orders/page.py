@@ -134,6 +134,13 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         page_size=page_size
     )
     
+    # Check for connection error (returns None)
+    if orders is None:
+        error_msg = queries.get_last_error() or "Cannot connect to database"
+        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
+        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
+        return
+    
     total_count = queries.get_orders_count(
         status=filters['status'],
         order_type=filters['order_type'],
@@ -143,6 +150,7 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         search=filters['search']
     )
     
+    # Check for empty data (returns empty DataFrame)
     if orders.empty:
         st.info("📭 No orders found matching the filters")
         return

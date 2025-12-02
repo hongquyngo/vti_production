@@ -3,15 +3,19 @@
 Database queries for Orders domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- Added connection check method
+- Better error handling to distinguish connection errors from no data
 """
 
 import logging
 from datetime import date
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 import pandas as pd
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, DatabaseError
 
 from utils.db import get_db_engine
 
@@ -23,6 +27,34 @@ class OrderQueries:
     
     def __init__(self):
         self.engine = get_db_engine()
+        self._connection_error = None
+    
+    def check_connection(self) -> Tuple[bool, Optional[str]]:
+        """
+        Check database connection
+        
+        Returns:
+            Tuple of (is_connected, error_message)
+        """
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            self._connection_error = None
+            return True, None
+        except OperationalError as e:
+            error_msg = "Cannot connect to database. Please check your network/VPN connection."
+            self._connection_error = error_msg
+            logger.error(f"Database connection error: {e}")
+            return False, error_msg
+        except Exception as e:
+            error_msg = f"Database error: {str(e)}"
+            self._connection_error = error_msg
+            logger.error(f"Database error: {e}")
+            return False, error_msg
+    
+    def get_last_error(self) -> Optional[str]:
+        """Get last connection error message"""
+        return self._connection_error
     
     # ==================== Order Queries ====================
     
@@ -34,7 +66,7 @@ class OrderQueries:
                    to_date: Optional[date] = None,
                    search: Optional[str] = None,
                    page: int = 1, 
-                   page_size: int = 20) -> pd.DataFrame:
+                   page_size: int = 20) -> Optional[pd.DataFrame]:
         """
         Get production orders with filters and pagination
         
@@ -120,10 +152,17 @@ class OrderQueries:
         params.extend([page_size, offset])
         
         try:
-            return pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            self._connection_error = None
+            return result
+        except (OperationalError, DatabaseError) as e:
+            self._connection_error = "Cannot connect to database. Please check your network/VPN connection."
+            logger.error(f"Database connection error getting orders: {e}")
+            return None
         except Exception as e:
+            self._connection_error = f"Database error: {str(e)}"
             logger.error(f"Error getting orders: {e}")
-            return pd.DataFrame()
+            return None
     
     def get_orders_count(self,
                         status: Optional[str] = None,

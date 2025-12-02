@@ -100,6 +100,13 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
         page_size=page_size
     )
     
+    # Check for connection error (returns None)
+    if issues is None:
+        error_msg = queries.get_last_error() or "Cannot connect to database"
+        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
+        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
+        return
+    
     total_count = queries.get_issues_count(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
@@ -107,6 +114,7 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
         status=filters['status']
     )
     
+    # Check for empty data (returns empty DataFrame)
     if issues.empty:
         st.info("📭 No issues found matching the filters")
         return

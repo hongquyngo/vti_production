@@ -136,6 +136,13 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         page_size=page_size
     )
     
+    # Check for connection error (returns None)
+    if receipts is None:
+        error_msg = queries.get_last_error() or "Cannot connect to database"
+        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
+        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
+        return
+    
     total_count = queries.get_receipts_count(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
@@ -146,6 +153,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         batch_no=filters['batch_no']
     )
     
+    # Check for empty data (returns empty DataFrame)
     if receipts.empty:
         st.info("📭 No production receipts found matching the filters")
         return
