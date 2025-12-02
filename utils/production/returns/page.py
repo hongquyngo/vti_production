@@ -279,7 +279,7 @@ def render_returns_tab():
     
     # Check current view
     if st.session_state.returns_view == 'create':
-        if st.button("⬅️ Back to History", key="btn_back_to_history"):
+        if st.button("⬅️ Back to History", key="btn_back_to_returns_history"):
             st.session_state.returns_view = 'history'
             st.session_state.pop('return_success', None)
             st.session_state.pop('return_info', None)

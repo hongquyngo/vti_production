@@ -335,10 +335,19 @@ class IssueQueries:
             if materials.empty:
                 return materials
             
-            # Calculate availability status and get alternatives
-            warehouse_id = materials['warehouse_id'].iloc[0]
+            # Initialize new columns with proper types
+            materials['availability_status'] = 'INSUFFICIENT'
+            materials['has_alternatives'] = False
+            materials['alternative_total_qty'] = 0.0
+            # Use object dtype for list column
+            materials['alternative_details'] = None
+            materials['alternative_details'] = materials['alternative_details'].astype(object)
             
-            for idx, row in materials.iterrows():
+            # Calculate availability status and get alternatives
+            warehouse_id = int(materials['warehouse_id'].iloc[0])
+            
+            for idx in range(len(materials)):
+                row = materials.iloc[idx]
                 pending = float(row['pending_qty'])
                 available = float(row['available_qty'])
                 
@@ -350,21 +359,21 @@ class IssueQueries:
                 else:
                     status = 'INSUFFICIENT'
                 
-                materials.at[idx, 'availability_status'] = status
+                materials.iloc[idx, materials.columns.get_loc('availability_status')] = status
                 
                 # Get alternatives if bom_detail_id exists
                 if pd.notna(row['bom_detail_id']):
                     alternatives = self._get_material_alternatives(
                         int(row['bom_detail_id']), warehouse_id
                     )
-                    materials.at[idx, 'has_alternatives'] = len(alternatives) > 0
-                    materials.at[idx, 'alternative_total_qty'] = sum(
+                    materials.iloc[idx, materials.columns.get_loc('has_alternatives')] = len(alternatives) > 0
+                    materials.iloc[idx, materials.columns.get_loc('alternative_total_qty')] = sum(
                         alt['available'] for alt in alternatives
                     )
                     materials.at[idx, 'alternative_details'] = alternatives
                 else:
-                    materials.at[idx, 'has_alternatives'] = False
-                    materials.at[idx, 'alternative_total_qty'] = 0
+                    materials.iloc[idx, materials.columns.get_loc('has_alternatives')] = False
+                    materials.iloc[idx, materials.columns.get_loc('alternative_total_qty')] = 0
                     materials.at[idx, 'alternative_details'] = []
             
             return materials

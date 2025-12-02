@@ -263,7 +263,7 @@ def render_issues_tab():
     
     # Check current view
     if st.session_state.issues_view == 'create':
-        if st.button("⬅️ Back to History", key="btn_back_to_history"):
+        if st.button("⬅️ Back to History", key="btn_back_to_issues_history"):
             st.session_state.issues_view = 'history'
             st.rerun()
         
