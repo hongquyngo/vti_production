@@ -333,6 +333,18 @@ def render_orders_tab():
     # Check for pending dialogs (e.g., confirm/cancel dialog triggered from detail dialog)
     check_pending_dialogs()
     
+    # Show success message if order was just created
+    if st.session_state.get('order_created_success'):
+        order_no = st.session_state.pop('order_created_success')
+        st.success(f"✅ Order **{order_no}** created successfully!")
+        st.balloons()
+        st.info("""
+        **Next Steps:**
+        1. View order details to review materials
+        2. Confirm the order when ready
+        3. Issue materials to start production
+        """)
+    
     queries = OrderQueries()
     
     # Check current view
@@ -350,9 +362,9 @@ def render_orders_tab():
     
     # Render components
     render_dashboard()
-    
+
     filters = _render_filter_bar(queries)
     
     _render_action_bar(queries, filters)
-    
+
     _render_order_list(queries, filters)

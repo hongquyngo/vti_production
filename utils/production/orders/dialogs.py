@@ -352,17 +352,19 @@ def show_pdf_dialog(order_id: int, order_no: str):
     
     with col1:
         language = st.selectbox(
-            "Language",
+            "🌐 Language / Ngôn ngữ",
             options=['vi', 'en'],
             format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
+            index=0,
             key="pdf_language"
         )
     
     with col2:
         layout = st.selectbox(
-            "Layout",
+            "📐 Layout",
             options=['landscape', 'portrait'],
-            format_func=lambda x: "📐 Landscape" if x == 'landscape' else "📄 Portrait",
+            format_func=lambda x: "🖼️ Landscape (Ngang)" if x == 'landscape' else "📄 Portrait (Dọc)",
+            index=0,  # Default landscape
             key="pdf_layout"
         )
     
@@ -371,7 +373,7 @@ def show_pdf_dialog(order_id: int, order_no: str):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("📄 Generate PDF", type="primary", use_container_width=True,
+        if st.button("📥 Generate PDF", type="primary", use_container_width=True,
                     key="pdf_gen_btn"):
             try:
                 from .pdf_generator import OrderPDFGenerator

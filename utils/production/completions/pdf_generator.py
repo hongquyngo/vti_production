@@ -284,6 +284,13 @@ class ReceiptPDFGenerator:
         elif quality_display == 'FAILED':
             quality_display = 'Không đạt / Failed' if language == 'vi' else 'Failed'
         
+        # Build product info with details (Name, Code, Size)
+        product_info = str(receipt['product_name'])
+        if receipt.get('pt_code'):
+            product_info += f"<br/>Mã VT: {receipt['pt_code']}" if language == 'vi' else f"<br/>Code: {receipt['pt_code']}"
+        if receipt.get('package_size'):
+            product_info += f"<br/>Size: {receipt['package_size']}"
+        
         left_data = [
             [Paragraph(f"<b>{labels['receipt_no']}</b>", styles['NormalViet']),
              Paragraph(str(receipt['receipt_no']), styles['NormalViet'])],
@@ -292,7 +299,7 @@ class ReceiptPDFGenerator:
             [Paragraph(f"<b>{labels['order']}</b>", styles['NormalViet']),
              Paragraph(str(receipt['order_no']), styles['NormalViet'])],
             [Paragraph(f"<b>{labels['product']}</b>", styles['NormalViet']),
-             Paragraph(str(receipt['product_name']), styles['NormalViet'])],
+             Paragraph(product_info, styles['NormalViet'])],
             [Paragraph(f"<b>{labels['batch']}</b>", styles['NormalViet']),
              Paragraph(str(receipt['batch_no']), styles['NormalViet'])],
         ]
@@ -316,6 +323,7 @@ class ReceiptPDFGenerator:
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('TOPPADDING', (0, 0), (-1, -1), 2),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ]))
         
         right_table = Table(right_data, colWidths=[right_lw, right_vw])

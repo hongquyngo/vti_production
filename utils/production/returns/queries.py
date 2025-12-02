@@ -159,6 +159,7 @@ class ReturnQueries:
                 mo.id as order_id,
                 p.name as product_name,
                 p.pt_code,
+                p.package_size,
                 w.name as warehouse_name,
                 mi.issue_no,
                 mr.returned_by as returned_by_id,

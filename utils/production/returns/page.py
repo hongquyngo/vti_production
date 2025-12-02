@@ -293,12 +293,12 @@ def render_returns_tab():
     
     # Dashboard
     render_dashboard()
-
+    
     # Filters
     filters = _render_filter_bar()
-    
+
     # Action bar
     _render_action_bar(queries, filters)
-    
+
     # Return list
     _render_return_history(queries, filters)

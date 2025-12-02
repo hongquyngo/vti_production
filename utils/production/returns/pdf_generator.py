@@ -269,6 +269,15 @@ class ReturnPDFGenerator:
         
         reason_display = create_reason_display(return_data['reason']).replace('📦 ', '').replace('⚠️ ', '').replace('❌ ', '').replace('📋 ', '').replace('📝 ', '')
         
+        # Build product info with details (Name, Code, Batch, Size)
+        product_info = str(return_data['product_name'])
+        if return_data.get('pt_code'):
+            product_info += f"<br/>Mã VT: {return_data['pt_code']}" if language == 'vi' else f"<br/>Code: {return_data['pt_code']}"
+        if return_data.get('product_batch'):
+            product_info += f"<br/>Batch: {return_data['product_batch']}"
+        if return_data.get('package_size'):
+            product_info += f"<br/>Size: {return_data['package_size']}"
+        
         left_data = [
             [Paragraph(f"<b>{labels['return_no']}</b>", styles['NormalViet']),
              Paragraph(str(return_data['return_no']), styles['NormalViet'])],
@@ -277,7 +286,7 @@ class ReturnPDFGenerator:
             [Paragraph(f"<b>{labels['order']}</b>", styles['NormalViet']),
              Paragraph(str(return_data['order_no']), styles['NormalViet'])],
             [Paragraph(f"<b>{labels['product']}</b>", styles['NormalViet']),
-             Paragraph(str(return_data['product_name']), styles['NormalViet'])],
+             Paragraph(product_info, styles['NormalViet'])],
             [Paragraph(f"<b>{labels['reason']}</b>", styles['NormalViet']),
              Paragraph(reason_display, styles['NormalViet'])],
             [Paragraph(f"<b>{labels['warehouse']}</b>", styles['NormalViet']),
@@ -297,6 +306,7 @@ class ReturnPDFGenerator:
             ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('TOPPADDING', (0, 0), (-1, -1), 2),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ]))
         
         right_table = Table(right_data, colWidths=[right_lw, right_vw])
@@ -322,11 +332,11 @@ class ReturnPDFGenerator:
         
         if language == 'vi':
             headers = ['STT', 'Thông tin vật tư', 'SL', 'ĐVT', 'Tình trạng', 'HSD', 'Ghi chú']
-            lbl_name, lbl_code, lbl_batch = 'Tên VT', 'Mã VT', 'Batch'
+            lbl_name, lbl_code, lbl_batch, lbl_size = 'Tên VT', 'Mã VT', 'Batch', 'Size'
             cond_good, cond_damaged = 'Tốt', 'Hư hỏng'
         else:
             headers = ['No.', 'Material Info', 'Qty', 'UOM', 'Condition', 'Expiry', 'Note']
-            lbl_name, lbl_code, lbl_batch = 'Name', 'Code', 'Batch'
+            lbl_name, lbl_code, lbl_batch, lbl_size = 'Name', 'Code', 'Batch', 'Size'
             cond_good, cond_damaged = 'Good', 'Damaged'
         
         header_row = [Paragraph(f"<b>{h}</b>", styles['TableHeader']) for h in headers]
@@ -351,6 +361,8 @@ class ReturnPDFGenerator:
                 mat_info_lines.append(f"<b>{lbl_code}:</b> {detail['pt_code']}")
             if detail.get('batch_no'):
                 mat_info_lines.append(f"<b>{lbl_batch}:</b> {detail['batch_no']}")
+            if detail.get('package_size'):
+                mat_info_lines.append(f"<b>{lbl_size}:</b> {detail['package_size']}")
             
             mat_info = "<br/>".join(mat_info_lines)
             

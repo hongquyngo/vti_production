@@ -268,6 +268,13 @@ class IssuePDFGenerator:
         else:
             issue_date_str = issue_date.strftime('%d/%m/%Y %H:%M')
         
+        # Build product info with details (Name, Code, Size)
+        product_info = str(issue['product_name'])
+        if issue.get('pt_code'):
+            product_info += f"<br/>Mã VT: {issue['pt_code']}" if language == 'vi' else f"<br/>Code: {issue['pt_code']}"
+        if issue.get('package_size'):
+            product_info += f"<br/>Size: {issue['package_size']}"
+        
         left_data = [
             [Paragraph(f"<b>{labels['issue_no']}</b>", styles['NormalViet']),
              Paragraph(str(issue['issue_no']), styles['NormalViet'])],
@@ -276,7 +283,7 @@ class IssuePDFGenerator:
             [Paragraph(f"<b>{labels['order']}</b>", styles['NormalViet']),
              Paragraph(str(issue['order_no']), styles['NormalViet'])],
             [Paragraph(f"<b>{labels['product']}</b>", styles['NormalViet']),
-             Paragraph(str(issue['product_name']), styles['NormalViet'])],
+             Paragraph(product_info, styles['NormalViet'])],
             [Paragraph(f"<b>{labels['planned_qty']}</b>", styles['NormalViet']),
              Paragraph(f"{issue['planned_qty']} {issue['product_uom']}", styles['NormalViet'])],
             [Paragraph(f"<b>{labels['warehouse']}</b>", styles['NormalViet']),

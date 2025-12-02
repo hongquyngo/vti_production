@@ -253,23 +253,25 @@ def show_pdf_dialog(receipt_id: int, receipt_no: str):
         receipt_id: Receipt ID
         receipt_no: Receipt number for display
     """
-    st.markdown(f"### Export: {receipt_no}")
+    st.markdown(f"### 📄 Export: {receipt_no}")
     
     col1, col2 = st.columns(2)
     
     with col1:
         language = st.selectbox(
-            "Language / Ngôn ngữ",
+            "🌐 Language / Ngôn ngữ",
             options=['vi', 'en'],
-            format_func=lambda x: 'Tiếng Việt' if x == 'vi' else 'English',
+            format_func=lambda x: "🇻🇳 Tiếng Việt" if x == 'vi' else "🇬🇧 English",
+            index=0,
             key="pdf_language"
         )
     
     with col2:
         layout = st.selectbox(
-            "Layout",
-            options=['portrait', 'landscape'],
-            format_func=lambda x: 'Portrait (Dọc)' if x == 'portrait' else 'Landscape (Ngang)',
+            "📐 Layout",
+            options=['landscape', 'portrait'],
+            format_func=lambda x: "🖼️ Landscape (Ngang)" if x == 'landscape' else "📄 Portrait (Dọc)",
+            index=0,  # Default landscape
             key="pdf_layout"
         )
     

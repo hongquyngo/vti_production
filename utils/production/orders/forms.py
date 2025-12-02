@@ -238,18 +238,9 @@ class OrderForms:
             with st.spinner("Creating order..."):
                 order_no = self.manager.create_order(order_data)
             
-            st.success(f"✅ Order **{order_no}** created successfully!")
-            st.balloons()
-            
-            # Show next steps
-            st.info("""
-            **Next Steps:**
-            1. View order details to review materials
-            2. Confirm the order when ready
-            3. Issue materials to start production
-            """)
-            
-            time.sleep(2)
+            # Set success state and go back to list
+            st.session_state['order_created_success'] = order_no
+            st.session_state['orders_view'] = 'list'
             st.rerun()
             
         except Exception as e:

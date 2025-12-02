@@ -156,6 +156,7 @@ class IssueQueries:
                 mo.id as order_id,
                 p.name as product_name,
                 p.pt_code,
+                p.package_size,
                 mo.planned_qty,
                 mo.uom as product_uom,
                 w.name as warehouse_name,

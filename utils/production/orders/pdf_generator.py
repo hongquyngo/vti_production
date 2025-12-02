@@ -365,10 +365,17 @@ class OrderPDFGenerator:
                 return dt[:10]
             return dt.strftime('%Y-%m-%d')
         
+        # Build product info with details (Name, Code, Size)
+        product_info = str(order['product_name'])
+        if order.get('pt_code'):
+            product_info += f"<br/>Mã VT: {order['pt_code']}" if language == 'vi' else f"<br/>Code: {order['pt_code']}"
+        if order.get('package_size'):
+            product_info += f"<br/>Size: {order['package_size']}"
+        
         # Build info data - single column, right-aligned labels
         info_data = [
             [Paragraph(f"<b>{labels['product']}</b>", styles['NormalViet']),
-             Paragraph(f"{order['product_name']} ({order.get('pt_code', 'N/A')})", styles['NormalViet'])],
+             Paragraph(product_info, styles['NormalViet'])],
             [Paragraph(f"<b>{labels['bom']}</b>", styles['NormalViet']),
              Paragraph(f"{order['bom_name']} ({order['bom_type']})", styles['NormalViet'])],
             [Paragraph(f"<b>{labels['quantity']}</b>", styles['NormalViet']),
@@ -401,7 +408,7 @@ class OrderPDFGenerator:
     
     def create_materials_table(self, story: list, data: Dict, styles: Any,
                               language: str = 'vi', layout: str = 'landscape'):
-        """Create materials table"""
+        """Create materials table with detailed info"""
         materials = data['materials']
         
         if materials.empty:
@@ -413,21 +420,34 @@ class OrderPDFGenerator:
         # Section header
         if language == 'vi':
             story.append(Paragraph("<b>DANH SÁCH VẬT TƯ</b>", styles['NormalViet']))
-            headers = ['STT', 'Vật tư', 'Mã PT', 'Yêu cầu', 'Đã xuất', 'Còn lại', 'ĐVT', 'Trạng thái']
+            headers = ['STT', 'Thông tin vật tư', 'Yêu cầu', 'Đã xuất', 'Còn lại', 'ĐVT', 'Trạng thái']
         else:
             story.append(Paragraph("<b>MATERIALS LIST</b>", styles['NormalViet']))
-            headers = ['No.', 'Material', 'PT Code', 'Required', 'Issued', 'Pending', 'UOM', 'Status']
+            headers = ['No.', 'Material Info', 'Required', 'Issued', 'Pending', 'UOM', 'Status']
         
         story.append(Spacer(1, 3*mm))
         
-        # Build table data
+        # Build table data with detailed material info
         table_data = [headers]
         
         for idx, row in materials.iterrows():
+            # Build material info cell with name, code, size
+            material_name = str(row['material_name'])[:50]
+            pt_code = row.get('pt_code', '') or ''
+            package_size = row.get('package_size', '') or ''
+            
+            if language == 'vi':
+                material_info = f"<b>{material_name}</b><br/>Mã VT: {pt_code}"
+                if package_size:
+                    material_info += f"<br/>Size: {package_size}"
+            else:
+                material_info = f"<b>{material_name}</b><br/>Code: {pt_code}"
+                if package_size:
+                    material_info += f"<br/>Size: {package_size}"
+            
             table_data.append([
                 str(idx + 1),
-                Paragraph(str(row['material_name'])[:40], styles['TableCell']),
-                str(row.get('pt_code', ''))[:15],
+                Paragraph(material_info, styles['TableCell']),
                 format_number(row['required_qty'], 4),
                 format_number(row['issued_qty'], 4),
                 format_number(row['pending_qty'], 4),
@@ -437,9 +457,9 @@ class OrderPDFGenerator:
         
         # Column widths based on layout
         if layout == 'landscape':
-            col_widths = [12*mm, 70*mm, 35*mm, 25*mm, 25*mm, 25*mm, 18*mm, 25*mm]
+            col_widths = [12*mm, 95*mm, 25*mm, 25*mm, 25*mm, 18*mm, 25*mm]
         else:
-            col_widths = [10*mm, 45*mm, 25*mm, 20*mm, 20*mm, 20*mm, 15*mm, 20*mm]
+            col_widths = [10*mm, 60*mm, 20*mm, 20*mm, 20*mm, 15*mm, 20*mm]
         
         materials_table = Table(table_data, colWidths=col_widths)
         
@@ -454,9 +474,9 @@ class OrderPDFGenerator:
             ('FONTNAME', (0, 1), (-1, -1), normal_font),
             ('FONTSIZE', (0, 1), (-1, -1), 9),
             ('ALIGN', (0, 1), (0, -1), 'CENTER'),   # STT
-            ('ALIGN', (1, 1), (2, -1), 'LEFT'),     # Material, PT Code
-            ('ALIGN', (3, 1), (5, -1), 'RIGHT'),    # Numbers
-            ('ALIGN', (6, 1), (7, -1), 'CENTER'),   # UOM, Status
+            ('ALIGN', (1, 1), (1, -1), 'LEFT'),     # Material info
+            ('ALIGN', (2, 1), (4, -1), 'RIGHT'),    # Numbers
+            ('ALIGN', (5, 1), (6, -1), 'CENTER'),   # UOM, Status
             # Grid and colors
             ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f0f0')]),

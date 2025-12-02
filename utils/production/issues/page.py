@@ -278,9 +278,9 @@ def render_issues_tab():
 
     # Filters
     filters = _render_filter_bar()
-    
+
     # Action bar
     _render_action_bar(queries, filters)
-    
+
     # Issue list
     _render_issue_history(queries, filters)

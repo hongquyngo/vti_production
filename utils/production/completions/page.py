@@ -376,9 +376,9 @@ def render_completions_tab():
 
     # Filters
     filters = _render_filter_bar(queries)
-    
+
     # Action bar
     _render_action_bar(queries, filters)
-    
+
     # Receipts list
     _render_receipts_list(queries, filters)
