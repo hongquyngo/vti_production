@@ -437,15 +437,15 @@ class IssueManager:
                             material_id: int, batch: Dict, quantity: float,
                             uom: str, is_alternative: bool,
                             original_material_id: Optional[int]) -> int:
-        """Insert issue detail record"""
+        """Insert issue detail record with full tracking"""
         query = text("""
             INSERT INTO material_issue_details (
                 material_issue_id, manufacturing_order_material_id,
-                material_id, batch_no, quantity, uom, expired_date,
+                material_id, inventory_history_id, batch_no, quantity, uom, expired_date,
                 is_alternative, original_material_id
             ) VALUES (
                 :issue_id, :order_material_id,
-                :material_id, :batch_no, :quantity, :uom, :expired_date,
+                :material_id, :inventory_history_id, :batch_no, :quantity, :uom, :expired_date,
                 :is_alternative, :original_material_id
             )
         """)
@@ -454,6 +454,7 @@ class IssueManager:
             'issue_id': issue_id,
             'order_material_id': order_material_id,
             'material_id': material_id,
+            'inventory_history_id': batch.get('inventory_history_id'),
             'batch_no': batch['batch_no'],
             'quantity': quantity,
             'uom': uom,

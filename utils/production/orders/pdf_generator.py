@@ -53,7 +53,7 @@ except ImportError:
                 return None
 
 from .queries import OrderQueries
-from .common import format_number, get_vietnam_now
+from .common import format_number, get_vietnam_now, format_datetime_vn
 
 logger = logging.getLogger(__name__)
 

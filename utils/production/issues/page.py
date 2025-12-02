@@ -87,7 +87,7 @@ def _render_filter_bar() -> Dict[str, Any]:
 # ==================== Issue History ====================
 
 def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
-    """Render issue history list"""
+    """Render issue history list with single row selection"""
     page_size = IssueConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.issues_page
     
@@ -111,8 +111,18 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
         st.info("📭 No issues found matching the filters")
         return
     
+    # Initialize selected index in session state
+    if 'issues_selected_idx' not in st.session_state:
+        st.session_state.issues_selected_idx = None
+    
     # Prepare display
     display_df = issues.copy()
+    
+    # Set Select column based on session state (single selection)
+    display_df['Select'] = False
+    if st.session_state.issues_selected_idx is not None and st.session_state.issues_selected_idx < len(display_df):
+        display_df.loc[st.session_state.issues_selected_idx, 'Select'] = True
+    
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
     display_df['issue_date_display'] = pd.to_datetime(display_df['issue_date']).dt.strftime('%d/%m/%Y %H:%M')
     display_df['product_display'] = display_df.apply(
@@ -120,10 +130,10 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
         axis=1
     )
     
-    # Display table
-    st.dataframe(
+    # Create editable dataframe with selection
+    edited_df = st.data_editor(
         display_df[[
-            'issue_no', 'issue_date_display', 'order_no', 'product_display',
+            'Select', 'issue_no', 'issue_date_display', 'order_no', 'product_display',
             'item_count', 'status_display', 'warehouse_name'
         ]].rename(columns={
             'issue_no': 'Issue No',
@@ -135,37 +145,52 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
             'warehouse_name': 'Warehouse'
         }),
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        disabled=['Issue No', 'Date', 'Order', 'Product', 'Items', 'Status', 'Warehouse'],
+        column_config={
+            'Select': st.column_config.CheckboxColumn(
+                '✓',
+                help='Select row to perform actions',
+                default=False,
+                width='small'
+            )
+        },
+        key="issues_table_editor"
     )
     
-    # Row actions
-    st.markdown("### Actions")
+    # Handle single selection - find newly selected row
+    selected_indices = edited_df[edited_df['Select'] == True].index.tolist()
     
-    issue_options = {
-        f"{row['issue_no']} | {row['order_no']} | {row['product_name']}": row
-        for _, row in issues.iterrows()
-    }
+    if selected_indices:
+        # If multiple selected (user clicked new one), keep only the newest
+        if len(selected_indices) > 1:
+            new_selection = [idx for idx in selected_indices if idx != st.session_state.issues_selected_idx]
+            if new_selection:
+                st.session_state.issues_selected_idx = new_selection[0]
+                st.rerun()
+        else:
+            st.session_state.issues_selected_idx = selected_indices[0]
+    else:
+        st.session_state.issues_selected_idx = None
     
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        selected_label = st.selectbox(
-            "Select Issue",
-            options=list(issue_options.keys()),
-            key="issue_action_select"
-        )
-    
-    selected_issue = issue_options[selected_label]
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if st.button("👁️ View Details", use_container_width=True, key="btn_view_issue"):
-            show_detail_dialog(selected_issue['id'])
-    
-    with col2:
-        if st.button("📄 Export PDF", use_container_width=True, key="btn_pdf_issue"):
-            show_pdf_dialog(selected_issue['id'], selected_issue['issue_no'])
+    # Action buttons - only show when row is selected
+    if st.session_state.issues_selected_idx is not None:
+        selected_issue = issues.iloc[st.session_state.issues_selected_idx]
+        
+        st.markdown("---")
+        st.markdown(f"**Selected:** `{selected_issue['issue_no']}` | {selected_issue['order_no']} | {selected_issue['product_name']}")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("👁️ View Details", type="primary", use_container_width=True, key="btn_view_issue"):
+                show_detail_dialog(selected_issue['id'])
+        
+        with col2:
+            if st.button("📄 Export PDF", use_container_width=True, key="btn_pdf_issue"):
+                show_pdf_dialog(selected_issue['id'], selected_issue['issue_no'])
+    else:
+        st.info("💡 Tick checkbox to select an issue and perform actions")
     
     # Pagination
     st.markdown("---")
@@ -176,14 +201,16 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
     with col1:
         if st.button("⬅️ Previous", disabled=page <= 1, key="btn_prev_issue"):
             st.session_state.issues_page = max(1, page - 1)
+            st.session_state.issues_selected_idx = None  # Reset selection on page change
             st.rerun()
     
     with col2:
-        st.write(f"Page {page} of {total_pages} | Total: {total_count} issues")
+        st.markdown(f"<div style='text-align:center'>Page {page} of {total_pages} | Total: {total_count} issues</div>", unsafe_allow_html=True)
     
     with col3:
         if st.button("Next ➡️", disabled=page >= total_pages, key="btn_next_issue"):
             st.session_state.issues_page = page + 1
+            st.session_state.issues_selected_idx = None  # Reset selection on page change
             st.rerun()
 
 
@@ -275,12 +302,18 @@ def render_issues_tab():
     
     # Dashboard
     render_dashboard()
-
+    
+    st.markdown("---")
+    
     # Filters
     filters = _render_filter_bar()
-
+    
+    st.markdown("---")
+    
     # Action bar
     _render_action_bar(queries, filters)
-
+    
+    st.markdown("---")
+    
     # Issue list
     _render_issue_history(queries, filters)

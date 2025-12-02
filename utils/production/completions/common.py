@@ -69,6 +69,54 @@ def get_vietnam_today() -> date:
     return date.today()
 
 
+def convert_to_vietnam_tz(dt: Union[datetime, str, None]) -> Optional[datetime]:
+    """
+    Convert datetime to Vietnam timezone (UTC+7)
+    """
+    if dt is None:
+        return None
+    
+    if isinstance(dt, str):
+        try:
+            dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            try:
+                dt = datetime.strptime(dt, '%Y-%m-%d')
+            except ValueError:
+                return None
+    
+    if not isinstance(dt, datetime):
+        return None
+    
+    if VN_TIMEZONE:
+        if dt.tzinfo is None:
+            try:
+                from zoneinfo import ZoneInfo
+                utc = ZoneInfo('UTC')
+                dt = dt.replace(tzinfo=utc)
+            except ImportError:
+                try:
+                    import pytz
+                    utc = pytz.UTC
+                    dt = utc.localize(dt)
+                except:
+                    return dt
+        try:
+            return dt.astimezone(VN_TIMEZONE)
+        except:
+            return dt
+    
+    return dt
+
+
+def format_datetime_vn(dt: Union[datetime, str, None], fmt: str = '%d/%m/%Y %H:%M') -> str:
+    """Format datetime in Vietnam timezone"""
+    vn_dt = convert_to_vietnam_tz(dt)
+    if vn_dt is None:
+        return 'N/A'
+    return vn_dt.strftime(fmt)
+
+
 # ==================== Number Formatting ====================
 
 def format_number(value: Union[int, float, Decimal, None],

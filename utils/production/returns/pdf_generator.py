@@ -43,7 +43,7 @@ except ImportError:
             return None
 
 from .queries import ReturnQueries
-from .common import format_number, get_vietnam_now, create_reason_display
+from .common import format_number, get_vietnam_now, create_reason_display, format_datetime_vn
 
 logger = logging.getLogger(__name__)
 
@@ -257,15 +257,9 @@ class ReturnPDFGenerator:
                 'returned_by': 'Returned By:', 'received_by': 'Received By:'
             }
         
-        # Format date
+        # Format date with Vietnam timezone
         return_date = return_data['return_date']
-        if isinstance(return_date, str):
-            try:
-                return_date_str = datetime.strptime(return_date, '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M')
-            except:
-                return_date_str = return_date[:10]
-        else:
-            return_date_str = return_date.strftime('%d/%m/%Y %H:%M')
+        return_date_str = format_datetime_vn(return_date, '%d/%m/%Y %H:%M')
         
         reason_display = create_reason_display(return_data['reason']).replace('📦 ', '').replace('⚠️ ', '').replace('❌ ', '').replace('📋 ', '').replace('📝 ', '')
         

@@ -43,7 +43,7 @@ except ImportError:
             return None
 
 from .queries import CompletionQueries
-from .common import format_number, get_vietnam_now, create_status_indicator
+from .common import format_number, get_vietnam_now, create_status_indicator, format_datetime_vn
 
 logger = logging.getLogger(__name__)
 
@@ -259,15 +259,9 @@ class ReceiptPDFGenerator:
                 'expiry': 'Expiry Date:', 'created_by': 'Created By:'
             }
         
-        # Format date
+        # Format date with Vietnam timezone
         receipt_date = receipt['receipt_date']
-        if isinstance(receipt_date, str):
-            try:
-                receipt_date_str = datetime.strptime(receipt_date, '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M')
-            except:
-                receipt_date_str = receipt_date[:10]
-        else:
-            receipt_date_str = receipt_date.strftime('%d/%m/%Y %H:%M')
+        receipt_date_str = format_datetime_vn(receipt_date, '%d/%m/%Y %H:%M')
         
         expiry_str = ''
         if receipt.get('expired_date'):

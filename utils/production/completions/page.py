@@ -193,8 +193,18 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     st.markdown("---")
     st.markdown("### 📋 Receipts List")
     
+    # Initialize selected index in session state
+    if 'completions_selected_idx' not in st.session_state:
+        st.session_state.completions_selected_idx = None
+    
     # Prepare display
     display_df = receipts.copy()
+    
+    # Set Select column based on session state (single selection)
+    display_df['Select'] = False
+    if st.session_state.completions_selected_idx is not None and st.session_state.completions_selected_idx < len(display_df):
+        display_df.loc[st.session_state.completions_selected_idx, 'Select'] = True
+    
     display_df['receipt_date_display'] = pd.to_datetime(display_df['receipt_date']).dt.strftime('%d-%b-%Y')
     display_df['quality_display'] = display_df['quality_status'].apply(create_status_indicator)
     display_df['yield_display'] = display_df['yield_rate'].apply(
@@ -204,10 +214,10 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         lambda x: f"{format_number(x['quantity'], 0)} {x['uom']}", axis=1
     )
     
-    # Display table
-    st.dataframe(
+    # Create editable dataframe with selection
+    edited_df = st.data_editor(
         display_df[[
-            'receipt_no', 'receipt_date_display', 'order_no', 'product_name',
+            'Select', 'receipt_no', 'receipt_date_display', 'order_no', 'product_name',
             'qty_display', 'batch_no', 'quality_display', 'yield_display', 'warehouse_name'
         ]].rename(columns={
             'receipt_no': 'Receipt No',
@@ -221,44 +231,56 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
             'warehouse_name': 'Warehouse'
         }),
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        disabled=['Receipt No', 'Date', 'Order No', 'Product', 'Quantity', 'Batch', 'Quality', 'Yield', 'Warehouse'],
+        column_config={
+            'Select': st.column_config.CheckboxColumn(
+                '✓',
+                help='Select row to perform actions',
+                default=False,
+                width='small'
+            )
+        },
+        key="completions_table_editor"
     )
     
-    st.markdown("---")
-    st.markdown("### ⚡ Quick Actions")
+    # Handle single selection - find newly selected row
+    selected_indices = edited_df[edited_df['Select'] == True].index.tolist()
     
-    # Row actions
-    col1, col2, col3 = st.columns([2, 2, 1])
+    if selected_indices:
+        # If multiple selected (user clicked new one), keep only the newest
+        if len(selected_indices) > 1:
+            new_selection = [idx for idx in selected_indices if idx != st.session_state.completions_selected_idx]
+            if new_selection:
+                st.session_state.completions_selected_idx = new_selection[0]
+                st.rerun()
+        else:
+            st.session_state.completions_selected_idx = selected_indices[0]
+    else:
+        st.session_state.completions_selected_idx = None
     
-    with col1:
-        receipt_options = {
-            f"{row['receipt_no']} | {row['order_no']} | {row['product_name']}": row
-            for _, row in receipts.iterrows()
-        }
-        selected_label = st.selectbox(
-            "Select Receipt",
-            options=list(receipt_options.keys()),
-            key="receipt_action_select"
-        )
-    
-    with col2:
-        action = st.selectbox(
-            "Action",
-            options=["View Details", "Update Quality", "Export PDF"],
-            key="receipt_action_type"
-        )
-    
-    with col3:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Execute", type="primary", use_container_width=True,
-                    key="receipt_execute_btn"):
-            selected_receipt = receipt_options[selected_label]
-            if action == "View Details":
+    # Action buttons - only show when row is selected
+    if st.session_state.completions_selected_idx is not None:
+        selected_receipt = receipts.iloc[st.session_state.completions_selected_idx]
+        
+        st.markdown("---")
+        st.markdown(f"**Selected:** `{selected_receipt['receipt_no']}` | {selected_receipt['order_no']} | {selected_receipt['product_name']}")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("👁️ View Details", type="primary", use_container_width=True, key="btn_view_receipt"):
                 show_receipt_details_dialog(selected_receipt['id'])
-            elif action == "Update Quality":
+        
+        with col2:
+            if st.button("✏️ Update Quality", use_container_width=True, key="btn_update_quality"):
                 show_update_quality_dialog(selected_receipt['id'])
-            elif action == "Export PDF":
+        
+        with col3:
+            if st.button("📄 Export PDF", use_container_width=True, key="btn_pdf_receipt"):
                 show_pdf_dialog(selected_receipt['id'], selected_receipt['receipt_no'])
+    else:
+        st.info("💡 Tick checkbox to select a receipt and perform actions")
     
     # Pagination
     st.markdown("---")
@@ -269,14 +291,16 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     with col1:
         if st.button("⬅️ Previous", disabled=page <= 1, key="btn_prev_receipt"):
             st.session_state.completions_page = max(1, page - 1)
+            st.session_state.completions_selected_idx = None  # Reset selection on page change
             st.rerun()
     
     with col2:
-        st.write(f"Page {page} of {total_pages} | Total: {total_count} receipts")
+        st.markdown(f"<div style='text-align:center'>Page {page} of {total_pages} | Total: {total_count} receipts</div>", unsafe_allow_html=True)
     
     with col3:
         if st.button("Next ➡️", disabled=page >= total_pages, key="btn_next_receipt"):
             st.session_state.completions_page = page + 1
+            st.session_state.completions_selected_idx = None  # Reset selection on page change
             st.rerun()
 
 
@@ -373,12 +397,18 @@ def render_completions_tab():
     
     # Dashboard
     render_dashboard()
-
+    
+    st.markdown("---")
+    
     # Filters
     filters = _render_filter_bar(queries)
-
+    
+    st.markdown("---")
+    
     # Action bar
     _render_action_bar(queries, filters)
-
+    
+    st.markdown("---")
+    
     # Receipts list
     _render_receipts_list(queries, filters)

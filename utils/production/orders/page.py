@@ -118,7 +118,7 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
 # ==================== Order List ====================
 
 def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render order list with pagination"""
+    """Render order list with single row selection"""
     page_size = OrderConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.orders_page
     
@@ -147,8 +147,18 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         st.info("📭 No orders found matching the filters")
         return
     
+    # Initialize selected index in session state
+    if 'orders_selected_idx' not in st.session_state:
+        st.session_state.orders_selected_idx = None
+    
     # Prepare display dataframe
     display_df = orders.copy()
+    
+    # Set Select column based on session state (single selection)
+    display_df['Select'] = False
+    if st.session_state.orders_selected_idx is not None and st.session_state.orders_selected_idx < len(display_df):
+        display_df.loc[st.session_state.orders_selected_idx, 'Select'] = True
+    
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
     display_df['priority_display'] = display_df['priority'].apply(create_status_indicator)
     display_df['progress'] = display_df.apply(
@@ -162,10 +172,10 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     )
     display_df['scheduled'] = pd.to_datetime(display_df['scheduled_date']).dt.strftime('%d/%m/%Y')
     
-    # Display table
-    st.dataframe(
+    # Create editable dataframe with selection
+    edited_df = st.data_editor(
         display_df[[
-            'order_no', 'product_display', 'progress', 
+            'Select', 'order_no', 'product_display', 'progress', 
             'status_display', 'priority_display', 'scheduled',
             'warehouse_name', 'target_warehouse_name'
         ]].rename(columns={
@@ -179,61 +189,76 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
             'target_warehouse_name': 'Target'
         }),
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        disabled=['Order No', 'Product', 'Progress', 'Status', 'Priority', 'Scheduled', 'Source', 'Target'],
+        column_config={
+            'Select': st.column_config.CheckboxColumn(
+                '✓',
+                help='Select row to perform actions',
+                default=False,
+                width='small'
+            )
+        },
+        key="orders_table_editor"
     )
     
-    # Row actions
-    st.markdown("### Actions")
+    # Handle single selection - find newly selected row
+    selected_indices = edited_df[edited_df['Select'] == True].index.tolist()
     
-    order_options = {
-        f"{row['order_no']} | {row['status']} | {row['pt_code']} - {row['product_name']}": row
-        for _, row in orders.iterrows()
-    }
+    if selected_indices:
+        # If multiple selected (user clicked new one), keep only the newest
+        if len(selected_indices) > 1:
+            # Find the new selection (not the previously stored one)
+            new_selection = [idx for idx in selected_indices if idx != st.session_state.orders_selected_idx]
+            if new_selection:
+                st.session_state.orders_selected_idx = new_selection[0]
+                st.rerun()
+        else:
+            st.session_state.orders_selected_idx = selected_indices[0]
+    else:
+        st.session_state.orders_selected_idx = None
     
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        selected_label = st.selectbox(
-            "Select Order",
-            options=list(order_options.keys()),
-            key="order_action_select"
-        )
-    
-    selected_order = order_options[selected_label]
-    order_id = selected_order['id']
-    order_no = selected_order['order_no']
-    status = selected_order['status']
-    
-    # Action buttons
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    
-    with col1:
-        if st.button("👁️ View", use_container_width=True, key="btn_view_order"):
-            show_detail_dialog(order_id)
-    
-    with col2:
-        if st.button("✏️ Edit", use_container_width=True, key="btn_edit_order",
-                    disabled=not OrderValidator.can_edit(status)):
-            show_edit_dialog(order_id)
-    
-    with col3:
-        if st.button("✅ Confirm", use_container_width=True, key="btn_confirm_order",
-                    disabled=not OrderValidator.can_confirm(status)):
-            show_confirm_dialog(order_id, order_no)
-    
-    with col4:
-        if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_order",
-                    disabled=not OrderValidator.can_cancel(status)):
-            show_cancel_dialog(order_id, order_no)
-    
-    with col5:
-        if st.button("📄 PDF", use_container_width=True, key="btn_pdf_order"):
-            show_pdf_dialog(order_id, order_no)
-    
-    with col6:
-        if st.button("🗑️ Delete", use_container_width=True, key="btn_delete_order",
-                    disabled=status not in ['DRAFT', 'CANCELLED']):
-            show_delete_dialog(order_id, order_no)
+    # Action buttons - only show when row is selected
+    if st.session_state.orders_selected_idx is not None:
+        selected_order = orders.iloc[st.session_state.orders_selected_idx]
+        order_id = selected_order['id']
+        order_no = selected_order['order_no']
+        status = selected_order['status']
+        
+        st.markdown("---")
+        st.markdown(f"**Selected:** `{order_no}` | Status: {create_status_indicator(status)} | {selected_order['product_name']}")
+        
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        
+        with col1:
+            if st.button("👁️ View", type="primary", use_container_width=True, key="btn_view_order"):
+                show_detail_dialog(order_id)
+        
+        with col2:
+            if st.button("✏️ Edit", use_container_width=True, key="btn_edit_order",
+                        disabled=not OrderValidator.can_edit(status)):
+                show_edit_dialog(order_id)
+        
+        with col3:
+            if st.button("✅ Confirm", use_container_width=True, key="btn_confirm_order",
+                        disabled=not OrderValidator.can_confirm(status)):
+                show_confirm_dialog(order_id, order_no)
+        
+        with col4:
+            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_order",
+                        disabled=not OrderValidator.can_cancel(status)):
+                show_cancel_dialog(order_id, order_no)
+        
+        with col5:
+            if st.button("📄 PDF", use_container_width=True, key="btn_pdf_order"):
+                show_pdf_dialog(order_id, order_no)
+        
+        with col6:
+            if st.button("🗑️ Delete", use_container_width=True, key="btn_delete_order",
+                        disabled=status not in ['DRAFT', 'CANCELLED']):
+                show_delete_dialog(order_id, order_no)
+    else:
+        st.info("💡 Tick checkbox to select an order and perform actions")
     
     # Pagination
     st.markdown("---")
@@ -244,14 +269,16 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     with col1:
         if st.button("⬅️ Previous", disabled=page <= 1, key="btn_prev_page"):
             st.session_state.orders_page = max(1, page - 1)
+            st.session_state.orders_selected_idx = None  # Reset selection on page change
             st.rerun()
     
     with col2:
-        st.write(f"Page {page} of {total_pages} | Total: {total_count} orders")
+        st.markdown(f"<div style='text-align:center'>Page {page} of {total_pages} | Total: {total_count} orders</div>", unsafe_allow_html=True)
     
     with col3:
         if st.button("Next ➡️", disabled=page >= total_pages, key="btn_next_page"):
             st.session_state.orders_page = page + 1
+            st.session_state.orders_selected_idx = None  # Reset selection on page change
             st.rerun()
 
 
@@ -362,9 +389,15 @@ def render_orders_tab():
     
     # Render components
     render_dashboard()
-
+    
+    st.markdown("---")
+    
     filters = _render_filter_bar(queries)
     
+    st.markdown("---")
+    
     _render_action_bar(queries, filters)
-
+    
+    st.markdown("---")
+    
     _render_order_list(queries, filters)

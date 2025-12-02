@@ -44,7 +44,7 @@ except ImportError:
             return None
 
 from .queries import IssueQueries
-from .common import format_number, get_vietnam_now
+from .common import format_number, get_vietnam_now, format_datetime_vn
 
 logger = logging.getLogger(__name__)
 
@@ -258,15 +258,9 @@ class IssuePDFGenerator:
                 'issued_by': 'Issued By:', 'received_by': 'Received By:'
             }
         
-        # Format date
+        # Format date with Vietnam timezone
         issue_date = issue['issue_date']
-        if isinstance(issue_date, str):
-            try:
-                issue_date_str = datetime.strptime(issue_date, '%Y-%m-%d %H:%M:%S').strftime('%d/%m/%Y %H:%M')
-            except:
-                issue_date_str = issue_date[:10]
-        else:
-            issue_date_str = issue_date.strftime('%d/%m/%Y %H:%M')
+        issue_date_str = format_datetime_vn(issue_date, '%d/%m/%Y %H:%M')
         
         # Build product info with details (Name, Code, Size)
         product_info = str(issue['product_name'])

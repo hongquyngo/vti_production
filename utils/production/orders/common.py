@@ -74,6 +74,76 @@ def get_vietnam_today() -> date:
     return date.today()
 
 
+def convert_to_vietnam_tz(dt: Union[datetime, str, None]) -> Optional[datetime]:
+    """
+    Convert datetime to Vietnam timezone (UTC+7)
+    Handles both timezone-aware and naive datetimes from database
+    
+    Args:
+        dt: datetime object or string in format 'YYYY-MM-DD HH:MM:SS'
+    
+    Returns:
+        datetime in Vietnam timezone
+    """
+    if dt is None:
+        return None
+    
+    # Parse string if needed
+    if isinstance(dt, str):
+        try:
+            dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            try:
+                dt = datetime.strptime(dt, '%Y-%m-%d')
+            except ValueError:
+                return None
+    
+    if not isinstance(dt, datetime):
+        return None
+    
+    if VN_TIMEZONE:
+        # If datetime is naive (no timezone), assume it's in UTC and convert
+        if dt.tzinfo is None:
+            try:
+                from zoneinfo import ZoneInfo
+                utc = ZoneInfo('UTC')
+                dt = dt.replace(tzinfo=utc)
+            except ImportError:
+                try:
+                    import pytz
+                    utc = pytz.UTC
+                    dt = utc.localize(dt)
+                except:
+                    # Fallback: assume it's already in VN timezone
+                    return dt
+        
+        # Convert to Vietnam timezone
+        try:
+            return dt.astimezone(VN_TIMEZONE)
+        except:
+            return dt
+    
+    return dt
+
+
+def format_datetime_vn(dt: Union[datetime, str, None], fmt: str = '%d/%m/%Y %H:%M') -> str:
+    """
+    Format datetime in Vietnam timezone
+    
+    Args:
+        dt: datetime object or string
+        fmt: output format string (default: DD/MM/YYYY HH:MM)
+    
+    Returns:
+        Formatted datetime string
+    """
+    vn_dt = convert_to_vietnam_tz(dt)
+    if vn_dt is None:
+        return 'N/A'
+    
+    return vn_dt.strftime(fmt)
+
+
 # ==================== Number Formatting ====================
 
 def format_number(value: Union[int, float, Decimal, None],
