@@ -215,7 +215,7 @@ class IssueQueries:
     # ==================== Issuable Orders Queries ====================
     
     def get_issuable_orders(self) -> pd.DataFrame:
-        """Get orders that can have materials issued"""
+        """Get orders that can have materials issued (including IN_PROGRESS for additional issues)"""
         query = """
             SELECT 
                 mo.id,
@@ -239,7 +239,12 @@ class IssueQueries:
             JOIN bom_headers b ON mo.bom_header_id = b.id
             JOIN warehouses w ON mo.warehouse_id = w.id
             WHERE mo.delete_flag = 0
-                AND mo.status IN ('DRAFT', 'CONFIRMED')
+                AND mo.status IN ('DRAFT', 'CONFIRMED', 'IN_PROGRESS')
+                AND EXISTS (
+                    SELECT 1 FROM manufacturing_order_materials mom
+                    WHERE mom.manufacturing_order_id = mo.id
+                    AND mom.required_qty > COALESCE(mom.issued_qty, 0)
+                )
             ORDER BY 
                 FIELD(mo.priority, 'URGENT', 'HIGH', 'NORMAL', 'LOW'),
                 mo.scheduled_date ASC

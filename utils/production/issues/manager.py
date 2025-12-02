@@ -33,7 +33,8 @@ class IssueManager:
                        issued_by: int, received_by: int = None,
                        notes: str = None,
                        custom_quantities: Dict[int, float] = None,
-                       use_alternatives: Dict[int, bool] = None) -> Dict[str, Any]:
+                       use_alternatives: Dict[int, bool] = None,
+                       alternative_quantities: Dict[str, float] = None) -> Dict[str, Any]:
         """
         Issue materials for production using FEFO (First Expiry, First Out)
         with automatic alternative material substitution
@@ -47,6 +48,7 @@ class IssueManager:
             notes: Optional notes
             custom_quantities: Dict {material_id: quantity} for custom amounts
             use_alternatives: Dict {material_id: bool} for using alternatives
+            alternative_quantities: Dict {"material_id_alt_id": quantity} for alternative amounts
         
         Returns:
             Dictionary with issue_no, issue_id, details, substitutions
@@ -64,7 +66,7 @@ class IssueManager:
                 if not order:
                     raise ValueError(f"Order {order_id} not found")
                 
-                if order['status'] not in ['DRAFT', 'CONFIRMED']:
+                if order['status'] not in ['DRAFT', 'CONFIRMED', 'IN_PROGRESS']:
                     raise ValueError(f"Cannot issue materials for {order['status']} order")
                 
                 # Generate issue number
@@ -133,7 +135,8 @@ class IssueManager:
                                 conn, issue_id, order_id, mat,
                                 qty_to_issue, order['warehouse_id'],
                                 group_id, user_id, keycloak_id,
-                                order.get('entity_id', 1)
+                                order.get('entity_id', 1),
+                                alternative_quantities=alternative_quantities
                             )
                             issue_details.extend(issued['details'])
                             if issued['substitutions']:
@@ -249,49 +252,52 @@ class IssueManager:
                                          material: pd.Series, required_qty: float,
                                          warehouse_id: int, group_id: str,
                                          user_id: int, keycloak_id: str,
-                                         entity_id: int) -> Dict[str, Any]:
+                                         entity_id: int,
+                                         alternative_quantities: Dict[str, float] = None) -> Dict[str, Any]:
         """Issue material with FEFO and alternative substitution"""
         issued_details = []
         substitutions = []
-        remaining_equivalent = float(required_qty)
+        
+        material_id = int(material['material_id'])
         
         # Get BOM detail info
         bom_info = self._get_bom_detail_info(conn, material['order_material_id'])
         primary_bom_qty = float(bom_info['quantity']) if bom_info else 1.0
         
-        # Try primary material first
-        primary_equivalent_issued = 0.0
-        try:
-            primary_details = self._issue_single_material_fefo(
-                conn, issue_id, order_id, material,
-                remaining_equivalent, warehouse_id, group_id,
-                user_id, keycloak_id, entity_id,
-                is_alternative=False, original_material_id=None,
-                conversion_ratio=1.0
-            )
-            issued_details.extend(primary_details)
-            
-            for detail in primary_details:
-                primary_equivalent_issued += float(detail['quantity'])
-            
-            remaining_equivalent -= primary_equivalent_issued
-            
-        except ValueError as e:
-            logger.warning(f"⚠️ Insufficient primary {material['material_name']}: {e}")
+        # Issue primary material (quantity from custom_quantities, passed as required_qty)
+        primary_issued = 0.0
+        if required_qty > 0:
+            try:
+                primary_details = self._issue_single_material_fefo(
+                    conn, issue_id, order_id, material,
+                    required_qty, warehouse_id, group_id,
+                    user_id, keycloak_id, entity_id,
+                    is_alternative=False, original_material_id=None,
+                    conversion_ratio=1.0
+                )
+                issued_details.extend(primary_details)
+                
+                for detail in primary_details:
+                    primary_issued += float(detail['quantity'])
+                    
+            except ValueError as e:
+                logger.warning(f"⚠️ Insufficient primary {material['material_name']}: {e}")
         
-        # Try alternatives if needed
-        if remaining_equivalent > 0 and bom_info:
+        # Issue alternatives based on specified quantities
+        if alternative_quantities and bom_info:
             alternatives = self._get_alternatives_for_material(
                 conn, bom_info['bom_detail_id']
             )
             
             for alt in alternatives:
-                if remaining_equivalent <= 0:
-                    break
+                alt_key = f"{material_id}_{alt['alternative_material_id']}"
+                alt_qty_to_issue = alternative_quantities.get(alt_key, 0)
+                
+                if alt_qty_to_issue <= 0:
+                    continue
                 
                 try:
                     conversion_ratio = float(alt['quantity']) / primary_bom_qty
-                    alt_actual_qty = remaining_equivalent * conversion_ratio
                     
                     alt_material = pd.Series({
                         'order_material_id': material['order_material_id'],
@@ -302,7 +308,7 @@ class IssueManager:
                     
                     alt_details = self._issue_single_material_fefo(
                         conn, issue_id, order_id, alt_material,
-                        alt_actual_qty, warehouse_id, group_id,
+                        alt_qty_to_issue, warehouse_id, group_id,
                         user_id, keycloak_id, entity_id,
                         is_alternative=True,
                         original_material_id=material['material_id'],
@@ -310,7 +316,7 @@ class IssueManager:
                     )
                     
                     alt_actual_issued = sum(float(d['quantity']) for d in alt_details)
-                    alt_equivalent_issued = alt_actual_issued / conversion_ratio
+                    alt_equivalent_issued = alt_actual_issued / conversion_ratio if conversion_ratio != 0 else 0
                     
                     if alt_actual_issued > 0:
                         issued_details.extend(alt_details)
@@ -325,16 +331,10 @@ class IssueManager:
                             'uom': alt['uom'],
                             'priority': alt['priority']
                         })
-                        remaining_equivalent -= alt_equivalent_issued
                         
                 except ValueError as e:
-                    logger.warning(f"⚠️ Alternative also insufficient: {e}")
+                    logger.warning(f"⚠️ Alternative issue failed: {e}")
                     continue
-            
-            if remaining_equivalent > 0:
-                total_equivalent = float(required_qty) - float(remaining_equivalent)
-                if total_equivalent == 0:
-                    raise ValueError(f"No materials available for {material['material_name']}")
         
         return {'details': issued_details, 'substitutions': substitutions}
     
@@ -442,11 +442,11 @@ class IssueManager:
             INSERT INTO material_issue_details (
                 material_issue_id, manufacturing_order_material_id,
                 material_id, batch_no, quantity, uom, expired_date,
-                is_alternative, original_material_id, created_date
+                is_alternative, original_material_id
             ) VALUES (
                 :issue_id, :order_material_id,
                 :material_id, :batch_no, :quantity, :uom, :expired_date,
-                :is_alternative, :original_material_id, NOW()
+                :is_alternative, :original_material_id
             )
         """)
         

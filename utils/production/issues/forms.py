@@ -142,7 +142,7 @@ class IssueForms:
             st.error("❌ Cannot issue materials. Please fix errors above.")
     
     def _render_material_row(self, row: pd.Series, errors: List[str], warnings: List[str]):
-        """Render a single material row"""
+        """Render a single material row with enhanced alternative support"""
         material_id = row['material_id']
         material_name = row['material_name']
         pt_code = row.get('pt_code', 'N/A')
@@ -151,18 +151,25 @@ class IssueForms:
         uom = row['uom']
         status = row['availability_status']
         alt_total = float(row.get('alternative_total_qty', 0))
+        alternatives = row.get('alternative_details', [])
         
         # Status icon
         status_icons = {'SUFFICIENT': '✅', 'PARTIAL': '⚠️', 'INSUFFICIENT': '❌'}
         status_icon = status_icons.get(status, '⚪')
         
+        # Get alternative usage settings
         use_alternative = st.session_state['use_alternatives'].get(material_id, False)
+        alt_quantities = st.session_state.get('alternative_quantities', {})
         
-        # Determine max issue
-        if use_alternative and alt_total > 0:
-            max_issue = min(available_qty + alt_total, pending_qty * 1.5)
-        else:
-            max_issue = available_qty
+        # Calculate total alternative being used
+        total_alt_used = 0
+        if use_alternative and alternatives:
+            for alt in alternatives:
+                alt_key = f"{material_id}_{alt['alternative_material_id']}"
+                total_alt_used += alt_quantities.get(alt_key, 0)
+        
+        # Determine max issue from primary
+        max_primary = available_qty
         
         col1, col2, col3, col4, col5 = st.columns([3, 1.5, 1.5, 2, 1])
         
@@ -176,20 +183,21 @@ class IssueForms:
         
         with col3:
             st.write(f"Available: **{format_number(available_qty, 4)}**")
-            if use_alternative and alt_total > 0:
-                st.caption(f"🔄 +{format_number(alt_total, 4)} alt")
+            if use_alternative and total_alt_used > 0:
+                st.caption(f"🔄 +{format_number(total_alt_used, 4)} alt")
             else:
                 st.caption(f"{status_icon} {status}")
         
         with col4:
+            # Primary material quantity
             default_qty = st.session_state['issue_quantities'].get(
-                material_id, min(pending_qty, max_issue)
+                material_id, min(pending_qty, max_primary)
             )
             issue_qty = st.number_input(
                 "Issue Qty",
                 min_value=0.0,
-                max_value=float(max_issue) if max_issue > 0 else 0.0001,
-                value=float(min(default_qty, max_issue)),
+                max_value=float(max_primary) if max_primary > 0 else 0.0001,
+                value=float(min(default_qty, max_primary)),
                 step=0.0001,
                 format="%.4f",
                 key=f"issue_qty_{material_id}",
@@ -198,50 +206,104 @@ class IssueForms:
             st.session_state['issue_quantities'][material_id] = issue_qty
         
         with col5:
-            # Validation
-            total_available = available_qty + alt_total if use_alternative else available_qty
+            # Validation - total = primary + alternatives
+            total_issue = issue_qty + total_alt_used
             
-            if issue_qty > total_available:
+            if issue_qty > available_qty:
                 st.error("❌ Over")
                 errors.append(
                     f"{material_name}: cannot issue {format_number(issue_qty, 4)} > "
-                    f"available {format_number(total_available, 4)}"
+                    f"available {format_number(available_qty, 4)}"
                 )
-            elif issue_qty < pending_qty:
+            elif total_issue < pending_qty:
                 st.warning("⚠️ Less")
                 warnings.append(
-                    f"{material_name}: issuing {format_number(issue_qty, 4)} < "
+                    f"{material_name}: issuing {format_number(total_issue, 4)} < "
                     f"required {format_number(pending_qty, 4)}"
                 )
-            elif issue_qty > pending_qty:
-                st.info("📈 More")
+            elif total_issue > pending_qty * 1.5:
+                st.error("❌ Over")
+                errors.append(
+                    f"{material_name}: total issue {format_number(total_issue, 4)} > 150% of required"
+                )
             else:
-                st.success("✅ Exact")
+                st.success("✅ OK")
         
-        # Alternatives expander
-        if status != 'SUFFICIENT' and row.get('has_alternatives', False):
+        # Alternatives expander with quantity adjustment
+        if status != 'SUFFICIENT' and row.get('has_alternatives', False) and alternatives:
             with st.expander(f"🔄 Alternatives for {material_name}", 
                            expanded=(available_qty == 0)):
-                alternatives = row.get('alternative_details', [])
-                if alternatives:
-                    use_alt = st.checkbox(
-                        f"✅ Use alternative materials (Total: {format_number(alt_total, 4)} {uom})",
-                        value=use_alternative,
-                        key=f"use_alt_{material_id}"
-                    )
-                    st.session_state['use_alternatives'][material_id] = use_alt
-                    
-                    if use_alt != use_alternative:
-                        st.rerun()
-                    
+                
+                use_alt = st.checkbox(
+                    f"✅ Use alternative materials (Total available: {format_number(alt_total, 4)} {uom})",
+                    value=use_alternative,
+                    key=f"use_alt_{material_id}"
+                )
+                st.session_state['use_alternatives'][material_id] = use_alt
+                
+                if use_alt != use_alternative:
+                    # Initialize alternative quantities when enabling
+                    if use_alt and 'alternative_quantities' not in st.session_state:
+                        st.session_state['alternative_quantities'] = {}
+                    st.rerun()
+                
+                if use_alt:
                     st.markdown("**Available alternatives:**")
+                    
+                    # Calculate remaining need
+                    remaining_need = max(0, pending_qty - issue_qty)
+                    
                     for alt in alternatives:
-                        st.write(
-                            f"• **{alt['name']}** (Priority {alt['priority']}): "
-                            f"{format_number(alt['available'], 4)} {alt['uom']}"
-                        )
-                else:
-                    st.info("No alternatives available")
+                        alt_id = alt['alternative_material_id']
+                        alt_key = f"{material_id}_{alt_id}"
+                        alt_available = float(alt['available'])
+                        
+                        # Initialize if not exists
+                        if alt_key not in alt_quantities:
+                            # Auto-suggest based on remaining need
+                            suggested = min(remaining_need, alt_available)
+                            st.session_state.setdefault('alternative_quantities', {})[alt_key] = suggested
+                            remaining_need -= suggested
+                        
+                        acol1, acol2, acol3 = st.columns([3, 2, 1])
+                        
+                        with acol1:
+                            st.write(f"• **{alt['name']}** (Priority {alt['priority']})")
+                            st.caption(f"Available: {format_number(alt_available, 4)} {alt['uom']}")
+                        
+                        with acol2:
+                            alt_qty = st.number_input(
+                                f"Use from {alt['name'][:20]}",
+                                min_value=0.0,
+                                max_value=float(alt_available),
+                                value=float(st.session_state.get('alternative_quantities', {}).get(alt_key, 0)),
+                                step=0.0001,
+                                format="%.4f",
+                                key=f"alt_qty_{alt_key}",
+                                label_visibility="collapsed"
+                            )
+                            st.session_state.setdefault('alternative_quantities', {})[alt_key] = alt_qty
+                        
+                        with acol3:
+                            if alt_qty > alt_available:
+                                st.error("❌")
+                                errors.append(
+                                    f"Alternative {alt['name']}: cannot use {format_number(alt_qty, 4)} > "
+                                    f"available {format_number(alt_available, 4)}"
+                                )
+                            elif alt_qty > 0:
+                                st.success("✅")
+                            else:
+                                st.write("")
+                    
+                    # Summary of alternative usage
+                    total_alt_used_now = sum(
+                        st.session_state.get('alternative_quantities', {}).get(f"{material_id}_{alt['alternative_material_id']}", 0)
+                        for alt in alternatives
+                    )
+                    
+                    st.markdown("---")
+                    st.info(f"📊 **Primary:** {format_number(issue_qty, 4)} + **Alternatives:** {format_number(total_alt_used_now, 4)} = **Total:** {format_number(issue_qty + total_alt_used_now, 4)} {uom}")
         
         st.markdown("---")
     
@@ -262,6 +324,7 @@ class IssueForms:
                 st.session_state.pop('issue_quantities', None)
                 st.session_state.pop('issue_order_id', None)
                 st.session_state.pop('use_alternatives', None)
+                st.session_state.pop('alternative_quantities', None)
                 st.rerun()
         
         # Confirmation dialog
@@ -271,11 +334,23 @@ class IssueForms:
             st.info(f"Order: **{order['order_no']}** - {order['product_name']}")
             
             st.markdown("**Materials to issue:**")
+            alt_quantities = st.session_state.get('alternative_quantities', {})
+            
             for _, row in availability.iterrows():
                 material_id = row['material_id']
                 issue_qty = st.session_state['issue_quantities'].get(material_id, 0)
+                
                 if issue_qty > 0:
                     st.write(f"• {row['material_name']}: **{format_number(issue_qty, 4)}** {row['uom']}")
+                
+                # Show alternatives being used
+                alternatives = row.get('alternative_details', [])
+                if alternatives:
+                    for alt in alternatives:
+                        alt_key = f"{material_id}_{alt['alternative_material_id']}"
+                        alt_qty = alt_quantities.get(alt_key, 0)
+                        if alt_qty > 0:
+                            st.write(f"  ↳ 🔄 {alt['name']}: **{format_number(alt_qty, 4)}** {alt['uom']}")
             
             # Employee selection
             employees = self.queries.get_employees()
@@ -327,6 +402,7 @@ class IssueForms:
             audit_info = get_user_audit_info()
             custom_quantities = st.session_state.get('issue_quantities', {})
             use_alternatives = st.session_state.get('use_alternatives', {})
+            alternative_quantities = st.session_state.get('alternative_quantities', {})
             
             with st.spinner("Issuing materials..."):
                 result = self.manager.issue_materials(
@@ -337,7 +413,8 @@ class IssueForms:
                     received_by=received_by,
                     notes=notes.strip() if notes else None,
                     custom_quantities=custom_quantities,
-                    use_alternatives=use_alternatives
+                    use_alternatives=use_alternatives,
+                    alternative_quantities=alternative_quantities
                 )
             
             # Clear session state
@@ -345,6 +422,7 @@ class IssueForms:
             st.session_state.pop('issue_quantities', None)
             st.session_state.pop('issue_order_id', None)
             st.session_state.pop('use_alternatives', None)
+            st.session_state.pop('alternative_quantities', None)
             
             # Show success with PDF option
             from .dialogs import show_success_dialog
