@@ -419,7 +419,7 @@ class OrderManager:
                 h.output_qty
             FROM bom_details d
             JOIN bom_headers h ON d.bom_header_id = h.id
-            WHERE h.id = :bom_id AND d.delete_flag = 0
+            WHERE h.id = :bom_id
         """)
         
         materials = conn.execute(bom_query, {
@@ -467,7 +467,7 @@ class OrderManager:
             SELECT d.material_id, d.quantity, d.scrap_rate, h.output_qty
             FROM bom_details d
             JOIN bom_headers h ON d.bom_header_id = h.id
-            WHERE h.id = :bom_id AND d.delete_flag = 0
+            WHERE h.id = :bom_id
         """)
         
         materials = conn.execute(bom_query, {'bom_id': bom_header_id}).fetchall()

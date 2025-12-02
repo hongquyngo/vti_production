@@ -302,7 +302,7 @@ class OrderQueries:
             FROM bom_details d
             JOIN bom_headers h ON d.bom_header_id = h.id
             JOIN products p ON d.material_id = p.id
-            WHERE h.id = %s AND d.delete_flag = 0
+            WHERE h.id = %s
             ORDER BY p.name
         """
         
@@ -444,7 +444,7 @@ class OrderQueries:
                 AND ih.warehouse_id = %s
                 AND ih.remain > 0
                 AND ih.delete_flag = 0
-            WHERE h.id = %s AND d.delete_flag = 0
+            WHERE h.id = %s
             GROUP BY d.id, d.material_id, p.name, p.pt_code, p.package_size, 
                      d.quantity, d.uom, d.scrap_rate, h.output_qty
             ORDER BY p.name
