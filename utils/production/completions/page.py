@@ -373,18 +373,12 @@ def render_completions_tab():
     
     # Dashboard
     render_dashboard()
-    
-    st.markdown("---")
-    
+
     # Filters
     filters = _render_filter_bar(queries)
     
-    st.markdown("---")
-    
     # Action bar
     _render_action_bar(queries, filters)
-    
-    st.markdown("---")
     
     # Receipts list
     _render_receipts_list(queries, filters)
