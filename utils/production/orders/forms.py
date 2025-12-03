@@ -3,7 +3,12 @@
 Form components for Orders domain
 Create and Edit order forms
 
-Version: 1.0.0
+Version: 2.0.0
+Changes:
+- Added st.form() to prevent unnecessary reruns in Create form (Step 2)
+- Added st.form() to prevent unnecessary reruns in Edit form
+- Added session state to preserve form values across interactions
+- BOM selection remains outside form (needs to reload materials)
 """
 
 import logging
@@ -36,7 +41,7 @@ class OrderForms:
         """Render create new order form"""
         st.subheader("➕ Create New Production Order")
         
-        # Step 1: Select BOM
+        # Step 1: Select BOM (outside form - needs to reload materials)
         st.markdown("### 1️⃣ Select BOM")
         
         bom_list = self.queries.get_active_boms()
@@ -75,139 +80,210 @@ class OrderForms:
         
         st.markdown("---")
         
-        # Step 2: Order Details
+        # Initialize/reset form data when BOM changes
+        if st.session_state.get('create_order_bom_id') != selected_bom_id:
+            st.session_state['create_order_bom_id'] = selected_bom_id
+            st.session_state['create_order_form_data'] = {
+                'planned_qty': float(bom_info.get('output_qty', 1)),
+                'scheduled_date': get_vietnam_today(),
+                'priority': 'NORMAL',
+                'source_warehouse': None,
+                'target_warehouse': None,
+                'notes': ''
+            }
+        
+        # Get warehouses
+        warehouses = self.queries.get_warehouses()
+        if warehouses.empty:
+            st.error("❌ No warehouses available")
+            return
+        
+        warehouse_options = {row['name']: row['id'] for _, row in warehouses.iterrows()}
+        warehouse_list = list(warehouse_options.keys())
+        
+        # Set default warehouses if not set
+        form_data = st.session_state['create_order_form_data']
+        if form_data['source_warehouse'] is None:
+            form_data['source_warehouse'] = warehouse_list[0]
+        if form_data['target_warehouse'] is None:
+            form_data['target_warehouse'] = warehouse_list[min(1, len(warehouse_list) - 1)]
+        
+        # ========== FORM - Prevents reruns when changing inputs ==========
         st.markdown("### 2️⃣ Order Details")
+        st.caption("💡 Fill in order details. **No page reload when changing values!**")
         
-        col1, col2 = st.columns(2)
+        with st.form(key="create_order_form", clear_on_submit=False):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                planned_qty = st.number_input(
+                    "Planned Quantity *",
+                    min_value=0.01,
+                    value=float(form_data['planned_qty']),
+                    step=1.0,
+                    format="%.2f",
+                    key="form_create_order_qty"
+                )
+                
+                scheduled_date = st.date_input(
+                    "Scheduled Date *",
+                    value=form_data['scheduled_date'],
+                    key="form_create_order_date"
+                )
+                
+                priority_options = ["LOW", "NORMAL", "HIGH", "URGENT"]
+                priority_idx = priority_options.index(form_data['priority']) if form_data['priority'] in priority_options else 1
+                priority = st.selectbox(
+                    "Priority",
+                    options=priority_options,
+                    index=priority_idx,
+                    key="form_create_order_priority"
+                )
+            
+            with col2:
+                source_idx = warehouse_list.index(form_data['source_warehouse']) if form_data['source_warehouse'] in warehouse_list else 0
+                source_warehouse = st.selectbox(
+                    "Source Warehouse *",
+                    options=warehouse_list,
+                    index=source_idx,
+                    key="form_create_order_source_wh"
+                )
+                
+                target_idx = warehouse_list.index(form_data['target_warehouse']) if form_data['target_warehouse'] in warehouse_list else 0
+                target_warehouse = st.selectbox(
+                    "Target Warehouse *",
+                    options=warehouse_list,
+                    index=target_idx,
+                    key="form_create_order_target_wh"
+                )
+                
+                notes = st.text_area(
+                    "Notes",
+                    value=form_data['notes'],
+                    height=100,
+                    key="form_create_order_notes"
+                )
+            
+            st.markdown("---")
+            
+            # Form submit buttons
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                check_materials_btn = st.form_submit_button(
+                    "📋 Check Materials & Create",
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            with col2:
+                reset_btn = st.form_submit_button(
+                    "🔄 Reset Form",
+                    use_container_width=True
+                )
         
-        with col1:
-            planned_qty = st.number_input(
-                "Planned Quantity *",
-                min_value=0.01,
-                value=float(bom_info.get('output_qty', 1)),
-                step=1.0,
-                format="%.2f",
-                key="create_order_qty"
-            )
-            
-            scheduled_date = st.date_input(
-                "Scheduled Date *",
-                value=get_vietnam_today(),
-                key="create_order_date"
-            )
-            
-            priority = st.selectbox(
-                "Priority",
-                options=["LOW", "NORMAL", "HIGH", "URGENT"],
-                index=1,
-                key="create_order_priority"
-            )
+        # Handle form submission
+        if reset_btn:
+            st.session_state['create_order_form_data'] = {
+                'planned_qty': float(bom_info.get('output_qty', 1)),
+                'scheduled_date': get_vietnam_today(),
+                'priority': 'NORMAL',
+                'source_warehouse': warehouse_list[0],
+                'target_warehouse': warehouse_list[min(1, len(warehouse_list) - 1)],
+                'notes': ''
+            }
+            st.rerun()
         
-        with col2:
-            warehouses = self.queries.get_warehouses()
+        if check_materials_btn:
+            # Save form data to session state
+            st.session_state['create_order_form_data'] = {
+                'planned_qty': planned_qty,
+                'scheduled_date': scheduled_date,
+                'priority': priority,
+                'source_warehouse': source_warehouse,
+                'target_warehouse': target_warehouse,
+                'notes': notes
+            }
             
-            if warehouses.empty:
-                st.error("❌ No warehouses available")
-                return
-            
-            warehouse_options = {row['name']: row['id'] for _, row in warehouses.iterrows()}
-            
-            source_warehouse = st.selectbox(
-                "Source Warehouse *",
-                options=list(warehouse_options.keys()),
-                key="create_order_source_wh"
-            )
             source_warehouse_id = warehouse_options[source_warehouse]
-            
-            target_warehouse = st.selectbox(
-                "Target Warehouse *",
-                options=list(warehouse_options.keys()),
-                index=min(1, len(warehouse_options) - 1),
-                key="create_order_target_wh"
-            )
             target_warehouse_id = warehouse_options[target_warehouse]
             
-            notes = st.text_area(
-                "Notes",
-                height=100,
-                key="create_order_notes"
-            )
-        
-        st.markdown("---")
-        
-        # Step 3: Material Availability Check
-        st.markdown("### 3️⃣ Material Availability Check")
-        
-        with st.spinner("Checking material availability..."):
-            availability = self.queries.check_material_availability(
-                selected_bom_id, planned_qty, source_warehouse_id
-            )
-        
-        if not availability.empty:
-            # Summary metrics
-            total = len(availability)
-            sufficient = len(availability[availability['availability_status'] == 'SUFFICIENT'])
-            partial = len(availability[availability['availability_status'] == 'PARTIAL'])
-            insufficient = len(availability[availability['availability_status'] == 'INSUFFICIENT'])
+            # Step 3: Material Availability Check
+            st.markdown("---")
+            st.markdown("### 3️⃣ Material Availability Check")
             
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Materials", total)
-            with col2:
-                st.metric("✅ Sufficient", sufficient)
-            with col3:
-                st.metric("⚠️ Partial", partial)
-            with col4:
-                st.metric("❌ Insufficient", insufficient)
+            with st.spinner("Checking material availability..."):
+                availability = self.queries.check_material_availability(
+                    selected_bom_id, planned_qty, source_warehouse_id
+                )
             
-            # Material details
-            with st.expander("📋 View Material Details", expanded=insufficient > 0):
-                display_df = availability.copy()
-                display_df['material_info'] = display_df.apply(format_material_display, axis=1)
-                display_df['required'] = display_df['required_qty'].apply(lambda x: format_number(x, 4))
-                display_df['available'] = display_df['available_qty'].apply(lambda x: format_number(x, 4))
-                display_df['status'] = display_df['availability_status'].apply(create_status_indicator)
+            if not availability.empty:
+                # Summary metrics
+                total = len(availability)
+                sufficient = len(availability[availability['availability_status'] == 'SUFFICIENT'])
+                partial = len(availability[availability['availability_status'] == 'PARTIAL'])
+                insufficient = len(availability[availability['availability_status'] == 'INSUFFICIENT'])
                 
-                st.dataframe(
-                    display_df[['material_info', 'required', 'available', 'status', 'uom']].rename(columns={
-                        'material_info': 'Material',
-                        'required': 'Required',
-                        'available': 'Available',
-                        'status': 'Status',
-                        'uom': 'UOM'
-                    }),
-                    use_container_width=True,
-                    hide_index=True
-                )
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Materials", total)
+                with col2:
+                    st.metric("✅ Sufficient", sufficient)
+                with col3:
+                    st.metric("⚠️ Partial", partial)
+                with col4:
+                    st.metric("❌ Insufficient", insufficient)
+                
+                # Material details
+                with st.expander("📋 View Material Details", expanded=insufficient > 0):
+                    display_df = availability.copy()
+                    display_df['material_info'] = display_df.apply(format_material_display, axis=1)
+                    display_df['required'] = display_df['required_qty'].apply(lambda x: format_number(x, 4))
+                    display_df['available'] = display_df['available_qty'].apply(lambda x: format_number(x, 4))
+                    display_df['status'] = display_df['availability_status'].apply(create_status_indicator)
+                    
+                    st.dataframe(
+                        display_df[['material_info', 'required', 'available', 'status', 'uom']].rename(columns={
+                            'material_info': 'Material',
+                            'required': 'Required',
+                            'available': 'Available',
+                            'status': 'Status',
+                            'uom': 'UOM'
+                        }),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                
+                # Warning if insufficient materials
+                if insufficient > 0:
+                    st.warning(
+                        f"⚠️ **{insufficient} material(s) have insufficient stock.** "
+                        "You can still create the order, but materials need to be procured before production."
+                    )
             
-            # Warning if insufficient materials
-            if insufficient > 0:
-                st.warning(
-                    f"⚠️ **{insufficient} material(s) have insufficient stock.** "
-                    "You can still create the order, but materials need to be procured before production."
-                )
-        
-        st.markdown("---")
-        
-        # Action buttons
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("✅ Create Order", type="primary", use_container_width=True, 
-                        key="btn_create_order"):
-                self._handle_create_order(
-                    bom_info=bom_info,
-                    planned_qty=planned_qty,
-                    scheduled_date=scheduled_date,
-                    priority=priority,
-                    source_warehouse_id=source_warehouse_id,
-                    target_warehouse_id=target_warehouse_id,
-                    notes=notes
-                )
-        
-        with col2:
-            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
-                st.rerun()
+            st.markdown("---")
+            
+            # Confirm creation buttons
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("✅ Create Order", type="primary", use_container_width=True, 
+                            key="btn_confirm_create_order"):
+                    self._handle_create_order(
+                        bom_info=bom_info,
+                        planned_qty=planned_qty,
+                        scheduled_date=scheduled_date,
+                        priority=priority,
+                        source_warehouse_id=source_warehouse_id,
+                        target_warehouse_id=target_warehouse_id,
+                        notes=notes
+                    )
+            
+            with col2:
+                if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
+                    st.session_state.pop('create_order_form_data', None)
+                    st.session_state.pop('create_order_bom_id', None)
+                    st.rerun()
     
     def _handle_create_order(self, bom_info: Dict, planned_qty: float,
                             scheduled_date, priority: str,
@@ -237,6 +313,10 @@ class OrderForms:
         try:
             with st.spinner("Creating order..."):
                 order_no = self.manager.create_order(order_data)
+            
+            # Clear form data
+            st.session_state.pop('create_order_form_data', None)
+            st.session_state.pop('create_order_bom_id', None)
             
             # Set success state and go back to list
             st.session_state['order_created_success'] = order_no
@@ -270,18 +350,11 @@ class OrderForms:
         
         warehouse_options = {row['name']: row['id'] for _, row in warehouses.iterrows()}
         warehouse_id_to_name = {row['id']: row['name'] for _, row in warehouses.iterrows()}
+        warehouse_list = list(warehouse_options.keys())
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            new_planned_qty = st.number_input(
-                "Planned Quantity",
-                min_value=0.01,
-                value=float(order['planned_qty']),
-                step=1.0,
-                format="%.2f",
-                key="edit_order_qty"
-            )
+        # Initialize form data for this order
+        if st.session_state.get('edit_order_id') != order['id']:
+            st.session_state['edit_order_id'] = order['id']
             
             # Parse scheduled date
             current_date = order['scheduled_date']
@@ -289,72 +362,121 @@ class OrderForms:
                 from datetime import datetime
                 current_date = datetime.strptime(current_date, '%Y-%m-%d').date()
             
-            new_scheduled_date = st.date_input(
-                "Scheduled Date",
-                value=current_date,
-                key="edit_order_date"
-            )
+            st.session_state['edit_order_form_data'] = {
+                'planned_qty': float(order['planned_qty']),
+                'scheduled_date': current_date,
+                'priority': order['priority'],
+                'source_warehouse': warehouse_id_to_name.get(order['warehouse_id'], warehouse_list[0]),
+                'target_warehouse': warehouse_id_to_name.get(order['target_warehouse_id'], warehouse_list[0]),
+                'notes': order.get('notes', '') or ''
+            }
+        
+        form_data = st.session_state['edit_order_form_data']
+        
+        st.caption("💡 Edit order details. **No page reload when changing values!**")
+        
+        # ========== FORM - Prevents reruns when changing inputs ==========
+        with st.form(key="edit_order_form", clear_on_submit=False):
+            col1, col2 = st.columns(2)
             
-            priority_options = ["LOW", "NORMAL", "HIGH", "URGENT"]
-            current_priority_idx = priority_options.index(order['priority']) if order['priority'] in priority_options else 1
-            new_priority = st.selectbox(
-                "Priority",
-                options=priority_options,
-                index=current_priority_idx,
-                key="edit_order_priority"
-            )
-        
-        with col2:
-            current_source = warehouse_id_to_name.get(order['warehouse_id'], list(warehouse_options.keys())[0])
-            new_source_warehouse = st.selectbox(
-                "Source Warehouse",
-                options=list(warehouse_options.keys()),
-                index=list(warehouse_options.keys()).index(current_source) if current_source in warehouse_options else 0,
-                key="edit_order_source_wh"
-            )
-            new_source_warehouse_id = warehouse_options[new_source_warehouse]
+            with col1:
+                new_planned_qty = st.number_input(
+                    "Planned Quantity",
+                    min_value=0.01,
+                    value=float(form_data['planned_qty']),
+                    step=1.0,
+                    format="%.2f",
+                    key="form_edit_order_qty"
+                )
+                
+                new_scheduled_date = st.date_input(
+                    "Scheduled Date",
+                    value=form_data['scheduled_date'],
+                    key="form_edit_order_date"
+                )
+                
+                priority_options = ["LOW", "NORMAL", "HIGH", "URGENT"]
+                current_priority_idx = priority_options.index(form_data['priority']) if form_data['priority'] in priority_options else 1
+                new_priority = st.selectbox(
+                    "Priority",
+                    options=priority_options,
+                    index=current_priority_idx,
+                    key="form_edit_order_priority"
+                )
             
-            current_target = warehouse_id_to_name.get(order['target_warehouse_id'], list(warehouse_options.keys())[0])
-            new_target_warehouse = st.selectbox(
-                "Target Warehouse",
-                options=list(warehouse_options.keys()),
-                index=list(warehouse_options.keys()).index(current_target) if current_target in warehouse_options else 0,
-                key="edit_order_target_wh"
-            )
-            new_target_warehouse_id = warehouse_options[new_target_warehouse]
+            with col2:
+                source_idx = warehouse_list.index(form_data['source_warehouse']) if form_data['source_warehouse'] in warehouse_list else 0
+                new_source_warehouse = st.selectbox(
+                    "Source Warehouse",
+                    options=warehouse_list,
+                    index=source_idx,
+                    key="form_edit_order_source_wh"
+                )
+                
+                target_idx = warehouse_list.index(form_data['target_warehouse']) if form_data['target_warehouse'] in warehouse_list else 0
+                new_target_warehouse = st.selectbox(
+                    "Target Warehouse",
+                    options=warehouse_list,
+                    index=target_idx,
+                    key="form_edit_order_target_wh"
+                )
+                
+                new_notes = st.text_area(
+                    "Notes",
+                    value=form_data['notes'],
+                    height=100,
+                    key="form_edit_order_notes"
+                )
             
-            new_notes = st.text_area(
-                "Notes",
-                value=order.get('notes', '') or '',
-                height=100,
-                key="edit_order_notes"
-            )
-        
-        # Warning if quantity changed
-        if new_planned_qty != float(order['planned_qty']):
-            st.warning("⚠️ Changing planned quantity will recalculate all required materials.")
-        
-        st.markdown("---")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("💾 Save Changes", type="primary", use_container_width=True,
-                        key="btn_save_edit"):
-                self._handle_save_edit(
-                    order_id=order['id'],
-                    order=order,
-                    new_planned_qty=new_planned_qty,
-                    new_scheduled_date=new_scheduled_date,
-                    new_priority=new_priority,
-                    new_source_warehouse_id=new_source_warehouse_id,
-                    new_target_warehouse_id=new_target_warehouse_id,
-                    new_notes=new_notes
+            # Warning about quantity change (shown inside form)
+            if new_planned_qty != float(order['planned_qty']):
+                st.warning("⚠️ Changing planned quantity will recalculate all required materials.")
+            
+            st.markdown("---")
+            
+            # Form submit buttons
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                save_btn = st.form_submit_button(
+                    "💾 Save Changes",
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            with col2:
+                cancel_btn = st.form_submit_button(
+                    "❌ Cancel",
+                    use_container_width=True
                 )
         
-        with col2:
-            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_edit"):
-                st.rerun()
+        # Handle form submission
+        if cancel_btn:
+            st.session_state.pop('edit_order_form_data', None)
+            st.session_state.pop('edit_order_id', None)
+            st.rerun()
+        
+        if save_btn:
+            # Update form data in session state
+            st.session_state['edit_order_form_data'] = {
+                'planned_qty': new_planned_qty,
+                'scheduled_date': new_scheduled_date,
+                'priority': new_priority,
+                'source_warehouse': new_source_warehouse,
+                'target_warehouse': new_target_warehouse,
+                'notes': new_notes
+            }
+            
+            self._handle_save_edit(
+                order_id=order['id'],
+                order=order,
+                new_planned_qty=new_planned_qty,
+                new_scheduled_date=new_scheduled_date,
+                new_priority=new_priority,
+                new_source_warehouse_id=warehouse_options[new_source_warehouse],
+                new_target_warehouse_id=warehouse_options[new_target_warehouse],
+                new_notes=new_notes
+            )
     
     def _handle_save_edit(self, order_id: int, order: Dict,
                          new_planned_qty: float, new_scheduled_date,
@@ -392,6 +514,10 @@ class OrderForms:
             success = self.manager.update_order(order_id, update_data, user_id)
             
             if success:
+                # Clear form data
+                st.session_state.pop('edit_order_form_data', None)
+                st.session_state.pop('edit_order_id', None)
+                
                 st.success(f"✅ Order {order['order_no']} updated successfully!")
                 time.sleep(1)
                 st.rerun()

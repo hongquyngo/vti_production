@@ -3,7 +3,11 @@
 Form components for Returns domain
 Return materials form with quantity and condition editing
 
-Version: 1.0.0
+Version: 2.0.0
+Changes:
+- Added st.form() to prevent unnecessary reruns when changing quantities/conditions
+- Session state for form data preserved across interactions
+- Order selection remains outside form (needs to reload materials)
 """
 
 import logging
@@ -58,7 +62,7 @@ class ReturnForms:
                     show_pdf_dialog(return_info.get('return_id'), return_info.get('return_no'))
             return
         
-        # Step 1: Select Order
+        # Step 1: Select Order (outside form - needs to reload materials)
         orders = self.queries.get_returnable_orders()
         
         if orders.empty:
@@ -114,33 +118,22 @@ class ReturnForms:
         )
         
         st.markdown("---")
-        st.markdown("### ↩️ Return Details")
         
-        # Initialize session state for return quantities
-        if 'return_quantities' not in st.session_state or st.session_state.get('return_order_id') != order_id:
-            st.session_state['return_quantities'] = {}
-            st.session_state['return_conditions'] = {}
+        # Initialize/reset form data when order changes
+        if st.session_state.get('return_order_id') != order_id:
             st.session_state['return_order_id'] = order_id
+            # Initialize with zeros
+            st.session_state['return_form_data'] = {
+                'quantities': {row['issue_detail_id']: 0.0 for _, row in returnable.iterrows()},
+                'conditions': {row['issue_detail_id']: 'GOOD' for _, row in returnable.iterrows()},
+                'reason': 'EXCESS',
+                'returned_by': None,
+                'received_by': None
+            }
         
-        # Material rows for return
-        for idx, row in returnable.iterrows():
-            self._render_return_row(row)
+        form_data = st.session_state['return_form_data']
         
-        st.markdown("---")
-        
-        # Return reason
-        col1, col2 = st.columns(2)
-        with col1:
-            reason_options = [r[0] for r in ReturnConstants.REASONS]
-            reason_labels = {r[0]: r[1] for r in ReturnConstants.REASONS}
-            reason = st.selectbox(
-                "Return Reason",
-                options=reason_options,
-                format_func=lambda x: reason_labels.get(x, x),
-                key="return_reason"
-            )
-        
-        # Employee selection
+        # Get employees for dropdowns
         employees = self.queries.get_employees()
         
         if employees.empty:
@@ -153,90 +146,178 @@ class ReturnForms:
         }
         emp_list = ["-- Select --"] + list(emp_options.keys())
         
-        col1, col2 = st.columns(2)
-        with col1:
-            returned_by = st.selectbox(
-                "Returned By (Production Staff)",
-                options=emp_list,
-                key="return_returned_by"
-            )
-        with col2:
-            received_by = st.selectbox(
-                "Received By (Warehouse Staff)",
-                options=emp_list,
-                key="return_received_by"
-            )
+        # ========== FORM - Prevents reruns when changing inputs ==========
+        st.markdown("### ↩️ Return Details")
+        st.caption("💡 Enter return quantities and conditions. **No page reload when changing values!**")
         
-        st.markdown("---")
-        
-        # Action buttons
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("✅ Return Materials", type="primary", 
-                        use_container_width=True, key="btn_return"):
-                self._execute_return(
-                    order_id, returnable, reason,
-                    returned_by if returned_by != "-- Select --" else None,
-                    received_by if received_by != "-- Select --" else None,
-                    emp_options
+        with st.form(key="return_materials_form", clear_on_submit=False):
+            
+            # Material rows
+            form_quantities = {}
+            form_conditions = {}
+            
+            for idx, row in returnable.iterrows():
+                issue_detail_id = row['issue_detail_id']
+                material_name = row['display_name']
+                batch_no = row['batch_no']
+                returnable_qty = float(row['returnable_qty'])
+                uom = row['uom']
+                
+                st.markdown(f"**{material_name}** (Batch: {batch_no})")
+                
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    # Get saved value or default
+                    saved_qty = form_data['quantities'].get(issue_detail_id, 0.0)
+                    return_qty = st.number_input(
+                        f"Return Qty (max: {format_number(returnable_qty, 4)} {uom})",
+                        min_value=0.0,
+                        max_value=float(returnable_qty),
+                        value=float(min(saved_qty, returnable_qty)),
+                        step=0.0001,
+                        format="%.4f",
+                        key=f"form_return_qty_{issue_detail_id}"
+                    )
+                    form_quantities[issue_detail_id] = return_qty
+                
+                with col2:
+                    condition_options = [c[0] for c in ReturnConstants.CONDITIONS]
+                    condition_labels = {c[0]: c[1] for c in ReturnConstants.CONDITIONS}
+                    
+                    saved_condition = form_data['conditions'].get(issue_detail_id, 'GOOD')
+                    condition_idx = condition_options.index(saved_condition) if saved_condition in condition_options else 0
+                    
+                    condition = st.selectbox(
+                        "Condition",
+                        options=condition_options,
+                        format_func=lambda x: condition_labels.get(x, x),
+                        index=condition_idx,
+                        key=f"form_condition_{issue_detail_id}"
+                    )
+                    form_conditions[issue_detail_id] = condition
+                
+                st.markdown("---")
+            
+            # Return reason
+            st.markdown("### 📋 Return Information")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                reason_options = [r[0] for r in ReturnConstants.REASONS]
+                reason_labels = {r[0]: r[1] for r in ReturnConstants.REASONS}
+                
+                saved_reason = form_data.get('reason', 'EXCESS')
+                reason_idx = reason_options.index(saved_reason) if saved_reason in reason_options else 0
+                
+                reason = st.selectbox(
+                    "Return Reason",
+                    options=reason_options,
+                    format_func=lambda x: reason_labels.get(x, x),
+                    index=reason_idx,
+                    key="form_return_reason"
+                )
+            
+            # Employee selection
+            col1, col2 = st.columns(2)
+            with col1:
+                # Find saved index
+                saved_returned_by = form_data.get('returned_by')
+                returned_by_idx = 0
+                if saved_returned_by and saved_returned_by in emp_list:
+                    returned_by_idx = emp_list.index(saved_returned_by)
+                
+                returned_by = st.selectbox(
+                    "Returned By (Production Staff)",
+                    options=emp_list,
+                    index=returned_by_idx,
+                    key="form_return_returned_by"
+                )
+            with col2:
+                saved_received_by = form_data.get('received_by')
+                received_by_idx = 0
+                if saved_received_by and saved_received_by in emp_list:
+                    received_by_idx = emp_list.index(saved_received_by)
+                
+                received_by = st.selectbox(
+                    "Received By (Warehouse Staff)",
+                    options=emp_list,
+                    index=received_by_idx,
+                    key="form_return_received_by"
+                )
+            
+            st.markdown("---")
+            
+            # Summary
+            total_return = sum(form_quantities.values())
+            good_count = sum(1 for k, v in form_quantities.items() if v > 0 and form_conditions.get(k) == 'GOOD')
+            damaged_count = sum(1 for k, v in form_quantities.items() if v > 0 and form_conditions.get(k) == 'DAMAGED')
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.info(f"**Total Return:** {format_number(total_return, 4)}")
+            with col2:
+                st.info(f"**✅ Good:** {good_count} items")
+            with col3:
+                st.info(f"**⚠️ Damaged:** {damaged_count} items")
+            
+            st.markdown("---")
+            
+            # Form submit buttons
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                submit_btn = st.form_submit_button(
+                    "✅ Return Materials",
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            with col2:
+                reset_btn = st.form_submit_button(
+                    "🔄 Reset",
+                    use_container_width=True
                 )
         
-        with col2:
-            if st.button("🔄 Reset", use_container_width=True, key="btn_reset_return"):
-                st.session_state.pop('return_quantities', None)
-                st.session_state.pop('return_conditions', None)
-                st.session_state.pop('return_order_id', None)
-                st.rerun()
-    
-    def _render_return_row(self, row: pd.Series):
-        """Render a single return row"""
-        issue_detail_id = row['issue_detail_id']
-        material_name = row['display_name']
-        batch_no = row['batch_no']
-        returnable_qty = float(row['returnable_qty'])
-        uom = row['uom']
+        # Handle form submission
+        if reset_btn:
+            st.session_state['return_form_data'] = {
+                'quantities': {row['issue_detail_id']: 0.0 for _, row in returnable.iterrows()},
+                'conditions': {row['issue_detail_id']: 'GOOD' for _, row in returnable.iterrows()},
+                'reason': 'EXCESS',
+                'returned_by': None,
+                'received_by': None
+            }
+            st.rerun()
         
-        st.markdown(f"**{material_name}** (Batch: {batch_no})")
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            return_qty = st.number_input(
-                f"Return Qty (max: {format_number(returnable_qty, 4)} {uom})",
-                min_value=0.0,
-                max_value=float(returnable_qty),
-                value=st.session_state['return_quantities'].get(issue_detail_id, 0.0),
-                step=0.0001,
-                format="%.4f",
-                key=f"return_qty_{issue_detail_id}"
+        if submit_btn:
+            # Save form data
+            st.session_state['return_form_data'] = {
+                'quantities': form_quantities,
+                'conditions': form_conditions,
+                'reason': reason,
+                'returned_by': returned_by,
+                'received_by': received_by
+            }
+            
+            self._execute_return(
+                order_id, returnable, reason,
+                returned_by if returned_by != "-- Select --" else None,
+                received_by if received_by != "-- Select --" else None,
+                emp_options, form_quantities, form_conditions
             )
-            st.session_state['return_quantities'][issue_detail_id] = return_qty
-        
-        with col2:
-            condition_options = [c[0] for c in ReturnConstants.CONDITIONS]
-            condition_labels = {c[0]: c[1] for c in ReturnConstants.CONDITIONS}
-            condition = st.selectbox(
-                "Condition",
-                options=condition_options,
-                format_func=lambda x: condition_labels.get(x, x),
-                index=0,
-                key=f"condition_{issue_detail_id}"
-            )
-            st.session_state['return_conditions'][issue_detail_id] = condition
-        
-        st.markdown("---")
     
     def _execute_return(self, order_id: int, returnable: pd.DataFrame,
                        reason: str, returned_by_label: Optional[str],
-                       received_by_label: Optional[str], emp_options: Dict):
+                       received_by_label: Optional[str], emp_options: Dict,
+                       form_quantities: Dict, form_conditions: Dict):
         """Execute the material return"""
         # Build returns list
         returns = []
         for _, row in returnable.iterrows():
             issue_detail_id = row['issue_detail_id']
-            return_qty = st.session_state['return_quantities'].get(issue_detail_id, 0)
-            condition = st.session_state['return_conditions'].get(issue_detail_id, 'GOOD')
+            return_qty = form_quantities.get(issue_detail_id, 0)
+            condition = form_conditions.get(issue_detail_id, 'GOOD')
             
             if return_qty > 0:
                 returns.append({
@@ -287,9 +368,8 @@ class ReturnForms:
                 'total_qty': sum(r['quantity'] for r in returns)
             }
             
-            # Clear quantities
-            st.session_state.pop('return_quantities', None)
-            st.session_state.pop('return_conditions', None)
+            # Clear form data
+            st.session_state.pop('return_form_data', None)
             st.session_state.pop('return_order_id', None)
             
             st.rerun()

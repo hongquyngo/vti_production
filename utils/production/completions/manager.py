@@ -3,7 +3,12 @@
 Completion Manager - Business logic for Production Completions
 Complete production orders with receipt creation and inventory updates
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- Fixed inventory type to use 'stockInProduction' for all cases (spec compliance)
+- Removed non-standard types: stockInQualityPassed, stockOutQualityFailed
+- When quality changes from PASSED to non-PASSED: find existing stockInProduction record and set remain=0
+
 Based on: materials.py complete_production function
 """
 
@@ -111,6 +116,7 @@ class CompletionManager:
                 receipt_id = receipt_result.lastrowid
                 
                 # Update inventory if quality passed
+                # Type: stockInProduction (as per spec)
                 if quality_status == 'PASSED':
                     self._add_production_to_inventory(
                         conn, order, produced_qty, batch_no,
@@ -183,6 +189,10 @@ class CompletionManager:
         
         Returns:
             True if successful
+        
+        Inventory Logic (spec compliant):
+        - PENDING/FAILED → PASSED: Create stockInProduction record
+        - PASSED → PENDING/FAILED: Find existing stockInProduction (via action_detail_id) and set remain=0
         """
         with self.engine.begin() as conn:
             try:
@@ -226,15 +236,17 @@ class CompletionManager:
                     group_id = str(uuid.uuid4())
                     
                     # If changing from non-PASSED to PASSED, add to inventory
+                    # Use type: stockInProduction (as per spec)
                     if old_status != 'PASSED' and new_status == 'PASSED':
-                        self._add_quality_passed_to_inventory(
+                        self._add_stock_in_production(
                             conn, receipt, group_id, keycloak_id
                         )
                     
                     # If changing from PASSED to non-PASSED, remove from inventory
+                    # Find existing stockInProduction record and set remain=0
                     elif old_status == 'PASSED' and new_status != 'PASSED':
-                        self._remove_from_inventory(
-                            conn, receipt, group_id, keycloak_id
+                        self._remove_stock_in_production(
+                            conn, receipt, keycloak_id
                         )
                 
                 logger.info(f"✅ Updated receipt {receipt_id} quality: {old_status} → {new_status}")
@@ -292,7 +304,11 @@ class CompletionManager:
                                      expiry_date: Optional[date],
                                      group_id: str, keycloak_id: str,
                                      receipt_id: int):
-        """Add production output to inventory"""
+        """
+        Add production output to inventory
+        Type: stockInProduction (as per spec)
+        action_detail_id: production_receipts.id
+        """
         inv_query = text("""
             INSERT INTO inventory_histories (
                 product_id, warehouse_id, type,
@@ -318,11 +334,15 @@ class CompletionManager:
             'created_by': keycloak_id
         })
         
-        logger.info(f"📦 Added {quantity} to inventory for product {order['product_id']}")
+        logger.info(f"📦 Added {quantity} to inventory for product {order['product_id']} (stockInProduction)")
     
-    def _add_quality_passed_to_inventory(self, conn, receipt: Dict,
-                                         group_id: str, keycloak_id: str):
-        """Add inventory when quality changes to PASSED"""
+    def _add_stock_in_production(self, conn, receipt: Dict,
+                                  group_id: str, keycloak_id: str):
+        """
+        Add inventory when quality changes to PASSED
+        Type: stockInProduction (as per spec)
+        action_detail_id: production_receipts.id
+        """
         inv_query = text("""
             INSERT INTO inventory_histories (
                 product_id, warehouse_id, type,
@@ -330,7 +350,7 @@ class CompletionManager:
                 group_id, action_detail_id,
                 created_by, created_date
             ) VALUES (
-                :product_id, :warehouse_id, 'stockInQualityPassed',
+                :product_id, :warehouse_id, 'stockInProduction',
                 :quantity, :quantity, :batch_no, :expired_date,
                 :group_id, :action_detail_id,
                 :created_by, NOW()
@@ -348,74 +368,56 @@ class CompletionManager:
             'created_by': keycloak_id
         })
         
-        logger.info(f"📦 Added quality-passed inventory for receipt {receipt['id']}")
+        logger.info(f"📦 Added stockInProduction for receipt {receipt['id']} (quality → PASSED)")
     
-    def _remove_from_inventory(self, conn, receipt: Dict,
-                               group_id: str, keycloak_id: str):
-        """Remove from inventory when quality changes from PASSED"""
-        # Find the inventory record to reduce
+    def _remove_stock_in_production(self, conn, receipt: Dict, keycloak_id: str):
+        """
+        Remove inventory when quality changes from PASSED to non-PASSED
+        
+        Logic: Find existing stockInProduction record with action_detail_id = receipt_id
+        and set remain = 0 (soft removal - keeps audit trail)
+        """
+        # Find the stockInProduction record created for this receipt
         find_query = text("""
             SELECT id, remain
             FROM inventory_histories
-            WHERE product_id = :product_id
+            WHERE type = 'stockInProduction'
+                AND action_detail_id = :receipt_id
+                AND product_id = :product_id
                 AND warehouse_id = :warehouse_id
-                AND batch_no = :batch_no
                 AND remain > 0
                 AND delete_flag = 0
-            ORDER BY created_date DESC
-            LIMIT 1
             FOR UPDATE
         """)
         
         result = conn.execute(find_query, {
+            'receipt_id': receipt['id'],
             'product_id': receipt['product_id'],
-            'warehouse_id': receipt['warehouse_id'],
-            'batch_no': receipt['batch_no']
+            'warehouse_id': receipt['warehouse_id']
         })
         row = result.fetchone()
         
         if row:
             inv_record = dict(zip(result.keys(), row))
             
-            # Create stock out record
-            out_query = text("""
-                INSERT INTO inventory_histories (
-                    product_id, warehouse_id, type,
-                    quantity, remain, batch_no, expired_date,
-                    group_id, action_detail_id,
-                    created_by, created_date
-                ) VALUES (
-                    :product_id, :warehouse_id, 'stockOutQualityFailed',
-                    :quantity, 0, :batch_no, :expired_date,
-                    :group_id, :action_detail_id,
-                    :created_by, NOW()
-                )
-            """)
-            
-            conn.execute(out_query, {
-                'product_id': receipt['product_id'],
-                'warehouse_id': receipt['warehouse_id'],
-                'quantity': receipt['quantity'],
-                'batch_no': receipt['batch_no'],
-                'expired_date': receipt['expired_date'],
-                'group_id': group_id,
-                'action_detail_id': receipt['id'],
-                'created_by': keycloak_id
-            })
-            
-            # Update original record remain
+            # Set remain = 0 (soft removal)
             update_query = text("""
                 UPDATE inventory_histories
-                SET remain = GREATEST(0, remain - :quantity)
+                SET remain = 0,
+                    updated_by = :updated_by,
+                    updated_date = NOW()
                 WHERE id = :inv_id
             """)
             
             conn.execute(update_query, {
-                'quantity': receipt['quantity'],
-                'inv_id': inv_record['id']
+                'inv_id': inv_record['id'],
+                'updated_by': keycloak_id
             })
             
-            logger.info(f"📦 Removed quality-failed inventory for receipt {receipt['id']}")
+            logger.info(f"📦 Removed stockInProduction for receipt {receipt['id']} (quality PASSED → non-PASSED)")
+        else:
+            # No inventory record found - might have been already processed
+            logger.warning(f"⚠️ No stockInProduction record found for receipt {receipt['id']}")
     
     def _get_pending_raw_materials(self, conn, order_id: int) -> List[Dict]:
         """

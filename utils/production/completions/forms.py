@@ -3,7 +3,12 @@
 Form components for Completions domain
 Production completion form with quantity and quality inputs
 
-Version: 1.0.0
+Version: 2.0.0
+Changes:
+- Added st.form() to prevent unnecessary reruns when changing inputs
+- Fixed batch_no generation - now generates ONCE and persists in session state
+- Added session state to preserve all form values
+- Order selection remains outside form (needs to reload order info)
 """
 
 import logging
@@ -68,7 +73,7 @@ class CompletionForms:
                     st.rerun()
             return
         
-        # Get completable orders
+        # Step 1: Select Order (outside form - needs to reload order info)
         orders = self.queries.get_completable_orders()
         
         if orders.empty:
@@ -146,89 +151,141 @@ class CompletionForms:
                     )
         
         st.markdown("---")
-        st.markdown("### 🏭 Record Production Output")
         
-        # Production output form
-        col1, col2 = st.columns(2)
-        
-        with col1:
+        # Initialize/reset form data when order changes
+        # CRITICAL: This prevents batch_no from regenerating on every rerun
+        if st.session_state.get('completion_order_id') != order_id:
+            st.session_state['completion_order_id'] = order_id
             remaining = float(order['remaining_qty'])
-            max_qty = remaining * 1.5  # Allow 50% overproduction
             
-            produced_qty = st.number_input(
-                "Produced Quantity",
-                min_value=0.01,
-                max_value=max_qty,
-                value=remaining if remaining > 0 else 1.0,
-                step=0.1,
-                format="%.2f",
-                key="produced_qty_input"
-            )
+            st.session_state['completion_form_data'] = {
+                'produced_qty': remaining if remaining > 0 else 1.0,
+                'batch_no': generate_batch_no(),  # Generate ONCE when order changes
+                'quality_status': 'PENDING',
+                'expired_date': get_vietnam_today() + timedelta(days=365),
+                'notes': ''
+            }
+        
+        form_data = st.session_state['completion_form_data']
+        
+        # ========== FORM - Prevents reruns when changing inputs ==========
+        st.markdown("### 🏭 Record Production Output")
+        st.caption("💡 Enter production details. **No page reload when changing values!**")
+        
+        remaining = float(order['remaining_qty'])
+        max_qty = remaining * 1.5  # Allow 50% overproduction
+        
+        with st.form(key="completion_form", clear_on_submit=False):
+            col1, col2 = st.columns(2)
             
-            batch_no = st.text_input(
-                "Batch Number",
-                value=generate_batch_no(),
-                key="batch_no_input"
-            )
+            with col1:
+                produced_qty = st.number_input(
+                    "Produced Quantity",
+                    min_value=0.01,
+                    max_value=max(max_qty, 1.0),
+                    value=float(min(form_data['produced_qty'], max(max_qty, 1.0))),
+                    step=0.1,
+                    format="%.2f",
+                    key="form_produced_qty"
+                )
+                
+                batch_no = st.text_input(
+                    "Batch Number",
+                    value=form_data['batch_no'],
+                    key="form_batch_no"
+                )
+                
+                quality_options = [q[0] for q in CompletionConstants.QUALITY_STATUSES]
+                quality_labels = {q[0]: q[1] for q in CompletionConstants.QUALITY_STATUSES}
+                
+                quality_idx = quality_options.index(form_data['quality_status']) if form_data['quality_status'] in quality_options else 0
+                quality_status = st.selectbox(
+                    "Quality Status",
+                    options=quality_options,
+                    format_func=lambda x: quality_labels.get(x, x),
+                    index=quality_idx,
+                    key="form_quality_status"
+                )
             
-            quality_options = [q[0] for q in CompletionConstants.QUALITY_STATUSES]
-            quality_labels = {q[0]: q[1] for q in CompletionConstants.QUALITY_STATUSES}
+            with col2:
+                expired_date = st.date_input(
+                    "Expiry Date",
+                    value=form_data['expired_date'],
+                    key="form_expiry_date"
+                )
+                
+                notes = st.text_area(
+                    "Production Notes",
+                    value=form_data['notes'],
+                    height=100,
+                    placeholder="Optional notes about this production batch...",
+                    key="form_completion_notes"
+                )
             
-            quality_status = st.selectbox(
-                "Quality Status",
-                options=quality_options,
-                format_func=lambda x: quality_labels.get(x, x),
-                key="quality_status_input"
-            )
-        
-        with col2:
-            expired_date = st.date_input(
-                "Expiry Date",
-                value=get_vietnam_today() + timedelta(days=365),
-                key="expiry_date_input"
-            )
+            st.markdown("---")
             
-            notes = st.text_area(
-                "Production Notes",
-                height=100,
-                placeholder="Optional notes about this production batch...",
-                key="completion_notes_input"
-            )
-        
-        st.markdown("---")
-        st.markdown("### 📊 Output Preview")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            new_total = order['produced_qty'] + produced_qty
-            st.info(f"**New Total:** {format_number(new_total, 2)} {order['uom']}")
-        
-        with col2:
-            new_yield = calculate_percentage(new_total, order['planned_qty'])
-            st.info(f"**New Yield:** {new_yield}%")
-        
-        with col3:
-            will_complete = new_total >= order['planned_qty']
-            status_text = "✅ Will Complete" if will_complete else "🔄 Partial"
-            st.info(f"**Status:** {status_text}")
-        
-        st.markdown("---")
-        
-        # Action buttons
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("✅ Record Output", type="primary",
-                        use_container_width=True, key="btn_complete"):
-                self._execute_completion(
-                    order_id, order, produced_qty, batch_no,
-                    quality_status, expired_date, notes
+            # Output Preview (calculated from current form values)
+            st.markdown("### 📊 Output Preview")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                new_total = order['produced_qty'] + produced_qty
+                st.info(f"**New Total:** {format_number(new_total, 2)} {order['uom']}")
+            
+            with col2:
+                new_yield = calculate_percentage(new_total, order['planned_qty'])
+                st.info(f"**New Yield:** {new_yield}%")
+            
+            with col3:
+                will_complete = new_total >= order['planned_qty']
+                status_text = "✅ Will Complete" if will_complete else "🔄 Partial"
+                st.info(f"**Status:** {status_text}")
+            
+            st.markdown("---")
+            
+            # Form submit buttons
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                submit_btn = st.form_submit_button(
+                    "✅ Record Output",
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            with col2:
+                reset_btn = st.form_submit_button(
+                    "🔄 Reset",
+                    use_container_width=True
                 )
         
-        with col2:
-            if st.button("🔄 Reset", use_container_width=True, key="btn_reset_completion"):
-                st.rerun()
+        # Handle form submission
+        if reset_btn:
+            remaining = float(order['remaining_qty'])
+            st.session_state['completion_form_data'] = {
+                'produced_qty': remaining if remaining > 0 else 1.0,
+                'batch_no': generate_batch_no(),  # Generate new batch_no on reset
+                'quality_status': 'PENDING',
+                'expired_date': get_vietnam_today() + timedelta(days=365),
+                'notes': ''
+            }
+            st.rerun()
+        
+        if submit_btn:
+            # Save form data to session state
+            st.session_state['completion_form_data'] = {
+                'produced_qty': produced_qty,
+                'batch_no': batch_no,
+                'quality_status': quality_status,
+                'expired_date': expired_date,
+                'notes': notes
+            }
+            
+            self._execute_completion(
+                order_id, order, produced_qty, batch_no,
+                quality_status, expired_date, notes
+            )
     
     def _execute_completion(self, order_id: int, order: Dict,
                            produced_qty: float, batch_no: str,
@@ -260,6 +317,10 @@ class CompletionForms:
             # Set success state
             st.session_state['completion_success'] = True
             st.session_state['completion_info'] = result
+            
+            # Clear form data
+            st.session_state.pop('completion_form_data', None)
+            st.session_state.pop('completion_order_id', None)
             
             st.rerun()
             
