@@ -64,6 +64,17 @@ class CompletionManager:
                 if order['status'] not in ['IN_PROGRESS']:
                     raise ValueError(f"Cannot complete {order['status']} order. Only IN_PROGRESS orders can be completed.")
                 
+                # Validate all RAW_MATERIALs have been issued
+                pending_materials = self._get_pending_raw_materials(conn, order_id)
+                if pending_materials:
+                    material_list = ", ".join([m['name'] for m in pending_materials[:3]])
+                    if len(pending_materials) > 3:
+                        material_list += f" and {len(pending_materials) - 3} more..."
+                    raise ValueError(
+                        f"Cannot complete order: {len(pending_materials)} raw material(s) have not been fully issued. "
+                        f"Materials: {material_list}"
+                    )
+                
                 # Generate receipt number and group ID
                 receipt_no = self._generate_receipt_number(conn)
                 group_id = str(uuid.uuid4())
@@ -405,3 +416,52 @@ class CompletionManager:
             })
             
             logger.info(f"📦 Removed quality-failed inventory for receipt {receipt['id']}")
+    
+    def _get_pending_raw_materials(self, conn, order_id: int) -> List[Dict]:
+        """
+        Get list of RAW_MATERIALs that have not been fully issued
+        
+        Args:
+            conn: Database connection
+            order_id: Manufacturing order ID
+            
+        Returns:
+            List of dict with pending material info
+        """
+        query = text("""
+            SELECT 
+                mom.id,
+                mom.material_id,
+                p.name,
+                p.pt_code,
+                mom.required_qty,
+                COALESCE(mom.issued_qty, 0) as issued_qty,
+                mom.required_qty - COALESCE(mom.issued_qty, 0) as pending_qty,
+                bd.material_type
+            FROM manufacturing_order_materials mom
+            JOIN products p ON mom.material_id = p.id
+            LEFT JOIN manufacturing_orders mo ON mom.manufacturing_order_id = mo.id
+            LEFT JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
+                AND bd.material_id = mom.material_id
+            WHERE mom.manufacturing_order_id = :order_id
+                AND mom.required_qty > COALESCE(mom.issued_qty, 0)
+                AND (bd.material_type = 'RAW_MATERIAL' OR bd.material_type IS NULL)
+        """)
+        
+        result = conn.execute(query, {'order_id': order_id})
+        
+        pending = []
+        for row in result.fetchall():
+            row_dict = dict(zip(result.keys(), row))
+            pending.append({
+                'id': row_dict['id'],
+                'material_id': row_dict['material_id'],
+                'name': row_dict['name'],
+                'pt_code': row_dict.get('pt_code'),
+                'required_qty': float(row_dict['required_qty']),
+                'issued_qty': float(row_dict['issued_qty']),
+                'pending_qty': float(row_dict['pending_qty']),
+                'material_type': row_dict.get('material_type', 'RAW_MATERIAL')
+            })
+        
+        return pending

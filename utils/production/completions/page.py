@@ -22,7 +22,7 @@ from .dialogs import (
 )
 from .common import (
     format_number, create_status_indicator, get_yield_indicator,
-    calculate_percentage, format_datetime, get_vietnam_today, get_vietnam_now,
+    calculate_percentage, format_datetime, format_datetime_vn, get_vietnam_today, get_vietnam_now,
     export_to_excel, get_date_filter_presets, CompletionConstants
 )
 
@@ -213,7 +213,9 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     if st.session_state.completions_selected_idx is not None and st.session_state.completions_selected_idx < len(display_df):
         display_df.loc[st.session_state.completions_selected_idx, 'Select'] = True
     
-    display_df['receipt_date_display'] = pd.to_datetime(display_df['receipt_date']).dt.strftime('%d-%b-%Y')
+    display_df['receipt_date_display'] = display_df['receipt_date'].apply(
+        lambda x: format_datetime_vn(x, '%d-%b-%Y')
+    )
     display_df['quality_display'] = display_df['quality_status'].apply(create_status_indicator)
     display_df['yield_display'] = display_df['yield_rate'].apply(
         lambda x: f"{x:.1f}% {get_yield_indicator(x)}"

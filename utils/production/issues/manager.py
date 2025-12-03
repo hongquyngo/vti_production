@@ -108,27 +108,37 @@ class IssueManager:
                 for _, mat in materials.iterrows():
                     material_id = int(mat['material_id'])
                     
-                    # Determine quantity
+                    # Determine quantity for primary material
                     if custom_quantities and material_id in custom_quantities:
                         qty_to_issue = float(custom_quantities[material_id])
                     else:
                         qty_to_issue = float(mat['required_qty']) - float(mat['issued_qty'])
                     
-                    if qty_to_issue > 0:
+                    # Check if there's any alternative quantity to issue
+                    has_alt_qty = False
+                    if alternative_quantities:
+                        for key in alternative_quantities:
+                            if key.startswith(f"{material_id}_") and alternative_quantities[key] > 0:
+                                has_alt_qty = True
+                                break
+                    
+                    # Process if primary > 0 OR has alternatives with quantity
+                    if qty_to_issue > 0 or has_alt_qty:
                         should_use_alternatives = (
                             use_alternatives and 
                             use_alternatives.get(material_id, False)
                         )
                         
-                        # Validate stock
-                        available = self._get_available_stock(
-                            conn, material_id, order['warehouse_id']
-                        )
-                        if qty_to_issue > available and not should_use_alternatives:
-                            raise ValueError(
-                                f"Cannot issue {qty_to_issue} of {mat['material_name']} - "
-                                f"only {available} available"
+                        # Validate stock only for primary if issuing primary
+                        if qty_to_issue > 0:
+                            available = self._get_available_stock(
+                                conn, material_id, order['warehouse_id']
                             )
+                            if qty_to_issue > available and not should_use_alternatives:
+                                raise ValueError(
+                                    f"Cannot issue {qty_to_issue} of {mat['material_name']} - "
+                                    f"only {available} available"
+                                )
                         
                         try:
                             issued = self._issue_material_with_alternatives(

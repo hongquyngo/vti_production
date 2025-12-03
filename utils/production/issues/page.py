@@ -18,7 +18,7 @@ from .dashboard import render_dashboard
 from .forms import render_issue_form
 from .dialogs import show_detail_dialog, show_pdf_dialog, check_pending_dialogs
 from .common import (
-    format_number, create_status_indicator, format_datetime,
+    format_number, create_status_indicator, format_datetime, format_datetime_vn,
     get_vietnam_today, export_to_excel, IssueConstants
 )
 
@@ -132,7 +132,7 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
         display_df.loc[st.session_state.issues_selected_idx, 'Select'] = True
     
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
-    display_df['issue_date_display'] = pd.to_datetime(display_df['issue_date']).dt.strftime('%d/%m/%Y %H:%M')
+    display_df['issue_date_display'] = display_df['issue_date'].apply(format_datetime_vn)
     display_df['product_display'] = display_df.apply(
         lambda x: f"{x['pt_code']} - {x['product_name']}" if x['pt_code'] else x['product_name'],
         axis=1

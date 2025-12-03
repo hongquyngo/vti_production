@@ -19,7 +19,7 @@ from .forms import render_return_form
 from .dialogs import show_detail_dialog, show_pdf_dialog, check_pending_dialogs
 from .common import (
     format_number, create_status_indicator, create_reason_display,
-    format_datetime, get_vietnam_today, export_to_excel, ReturnConstants
+    format_datetime, format_datetime_vn, get_vietnam_today, export_to_excel, ReturnConstants
 )
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,7 @@ def _render_return_history(queries: ReturnQueries, filters: Dict[str, Any]):
     
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
     display_df['reason_display'] = display_df['reason'].apply(create_reason_display)
-    display_df['return_date_display'] = pd.to_datetime(display_df['return_date']).dt.strftime('%d/%m/%Y %H:%M')
+    display_df['return_date_display'] = display_df['return_date'].apply(format_datetime_vn)
     display_df['product_display'] = display_df.apply(
         lambda x: f"{x['pt_code']} - {x['product_name']}" if x['pt_code'] else x['product_name'],
         axis=1

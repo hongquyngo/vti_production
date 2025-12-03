@@ -23,7 +23,7 @@ from .dialogs import (
     check_pending_dialogs
 )
 from .common import (
-    format_number, create_status_indicator, calculate_percentage,
+    format_number, create_status_indicator, calculate_percentage, format_datetime_vn,
     get_vietnam_today, export_to_excel, OrderConstants, OrderValidator
 )
 
@@ -178,7 +178,9 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
                   (f" | {x['package_size']}" if x['package_size'] else ""),
         axis=1
     )
-    display_df['scheduled'] = pd.to_datetime(display_df['scheduled_date']).dt.strftime('%d/%m/%Y')
+    display_df['scheduled'] = display_df['scheduled_date'].apply(
+        lambda x: format_datetime_vn(x, '%d/%m/%Y') if x else ''
+    )
     
     # Create editable dataframe with selection
     edited_df = st.data_editor(

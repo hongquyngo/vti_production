@@ -3,16 +3,15 @@
 Form components for Issues domain
 Issue materials form with quantity editing and alternatives
 
-Version: 2.0.0
+Version: 2.1.0
 Changes:
-- Show all primary + alternatives together, let user choose quantities
-- Use st.fragment for performance optimization
-- Fixed data integrity for inventory_history_id
+- Use st.form to prevent reruns when changing input values
+- Show all primary + alternatives together
+- Only rerun when clicking submit button
 """
 
 import logging
 from typing import Dict, Any, Optional, List
-import time
 
 import streamlit as st
 import pandas as pd
@@ -40,7 +39,7 @@ class IssueForms:
         """Render issue materials form"""
         st.subheader("📦 Issue Materials")
         
-        # Step 1: Select Order
+        # Step 1: Select Order (outside form - needs to reload materials)
         orders = self.queries.get_issuable_orders()
         
         if orders.empty:
@@ -78,6 +77,11 @@ class IssueForms:
         
         st.markdown("---")
         
+        # Check if in confirmation mode
+        if st.session_state.get('confirm_issue', False):
+            self._render_confirmation_dialog(order)
+            return
+        
         # Step 2: Material Availability
         st.markdown("### 📋 Material Availability")
         
@@ -87,34 +91,11 @@ class IssueForms:
             st.error("❌ No materials found for this order")
             return
         
-        # Initialize session state
-        if ('issue_quantities' not in st.session_state or 
-            st.session_state.get('issue_order_id') != order_id):
-            st.session_state['issue_quantities'] = {}
+        # Reset quantities if order changed
+        if st.session_state.get('issue_order_id') != order_id:
             st.session_state['issue_order_id'] = order_id
-            st.session_state['alternative_quantities'] = {}
-            
-            for _, row in availability.iterrows():
-                material_id = row['material_id']
-                pending_qty = float(row['pending_qty'])
-                available_qty = float(row['available_qty'])
-                
-                # Auto-suggest: use primary first, then alternatives
-                suggested = min(pending_qty, available_qty)
-                st.session_state['issue_quantities'][material_id] = suggested
-                
-                # If primary is insufficient, auto-suggest alternatives
-                remaining = pending_qty - suggested
-                alternatives = row.get('alternative_details', [])
-                if remaining > 0 and alternatives:
-                    for alt in alternatives:
-                        alt_key = f"{material_id}_{alt['alternative_material_id']}"
-                        alt_available = float(alt['available'])
-                        alt_suggest = min(remaining, alt_available)
-                        st.session_state['alternative_quantities'][alt_key] = alt_suggest
-                        remaining -= alt_suggest
-                        if remaining <= 0:
-                            break
+            st.session_state.pop('saved_quantities', None)
+            st.session_state.pop('saved_alt_quantities', None)
         
         # Summary metrics
         total = len(availability)
@@ -134,42 +115,115 @@ class IssueForms:
         
         st.markdown("---")
         st.markdown("### 📝 Adjust Issue Quantities")
-        st.caption("💡 Enter quantities for primary material and/or alternatives. Total should meet or exceed required quantity.")
+        st.caption("💡 Enter quantities for primary material and/or alternatives. Click **Review & Issue** when ready. **No page reload when changing values!**")
         
-        # Material rows
-        errors = []
-        warnings = []
+        # ========== FORM - No reruns when changing inputs ==========
+        with st.form(key="issue_materials_form", clear_on_submit=False):
+            
+            # Calculate default values
+            default_quantities = {}
+            default_alt_quantities = {}
+            
+            for _, row in availability.iterrows():
+                material_id = row['material_id']
+                pending_qty = float(row['pending_qty'])
+                available_qty = float(row['available_qty'])
+                
+                # Use saved values if available, otherwise auto-suggest
+                if 'saved_quantities' in st.session_state:
+                    default_quantities[material_id] = st.session_state['saved_quantities'].get(material_id, 0)
+                else:
+                    default_quantities[material_id] = min(pending_qty, available_qty)
+                
+                # Alternatives
+                alternatives = row.get('alternative_details', [])
+                if alternatives:
+                    remaining = pending_qty - default_quantities[material_id]
+                    for alt in alternatives:
+                        alt_key = f"{material_id}_{alt['alternative_material_id']}"
+                        if 'saved_alt_quantities' in st.session_state:
+                            default_alt_quantities[alt_key] = st.session_state['saved_alt_quantities'].get(alt_key, 0)
+                        else:
+                            if remaining > 0:
+                                alt_available = float(alt['available'])
+                                alt_suggest = min(remaining, alt_available)
+                                default_alt_quantities[alt_key] = alt_suggest
+                                remaining -= alt_suggest
+                            else:
+                                default_alt_quantities[alt_key] = 0
+            
+            # Render material rows
+            errors = []
+            warnings = []
+            form_quantities = {}
+            form_alt_quantities = {}
+            
+            for idx, row in availability.iterrows():
+                mat_qty, alt_qtys, mat_errors, mat_warnings = self._render_material_row_form(
+                    row, default_quantities, default_alt_quantities
+                )
+                form_quantities[row['material_id']] = mat_qty
+                form_alt_quantities.update(alt_qtys)
+                errors.extend(mat_errors)
+                warnings.extend(mat_warnings)
+            
+            st.markdown("---")
+            
+            # Form submit buttons
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                submit_btn = st.form_submit_button(
+                    "🚀 Review & Issue", 
+                    type="primary",
+                    use_container_width=True
+                )
+            
+            with col2:
+                reset_btn = st.form_submit_button(
+                    "🔄 Reset to Defaults",
+                    use_container_width=True
+                )
         
-        for idx, row in availability.iterrows():
-            self._render_material_row_v2(row, errors, warnings)
+        # Handle form submission
+        if submit_btn:
+            # Save quantities to session state
+            st.session_state['saved_quantities'] = form_quantities
+            st.session_state['saved_alt_quantities'] = form_alt_quantities
+            
+            # Validate
+            has_any_material = any(q > 0 for q in form_quantities.values()) or \
+                              any(q > 0 for q in form_alt_quantities.values())
+            
+            if not has_any_material:
+                st.error("❌ No materials selected to issue. Please enter quantities.")
+            elif errors:
+                st.error("❌ **Errors - Cannot proceed:**")
+                for err in errors:
+                    st.write(f"• {err}")
+            else:
+                if warnings:
+                    st.warning("⚠️ **Warnings:**")
+                    for warn in warnings:
+                        st.write(f"• {warn}")
+                
+                # Proceed to confirmation
+                st.session_state['confirm_issue'] = True
+                st.session_state['issue_quantities'] = form_quantities
+                st.session_state['alternative_quantities'] = form_alt_quantities
+                st.rerun()
         
-        # Validation messages
-        if errors:
-            st.error("❌ **Errors - Cannot proceed:**")
-            for err in errors:
-                st.write(f"• {err}")
-        
-        if warnings:
-            st.warning("⚠️ **Warnings - Issuing less than required:**")
-            for warn in warnings:
-                st.write(f"• {warn}")
-            st.info("💡 Materials can be issued again later if needed")
-        
-        # Action buttons
-        issue_valid = len(errors) == 0
-        
-        if issue_valid:
-            self._render_action_buttons(order, availability)
-        else:
-            st.error("❌ Cannot issue materials. Please fix errors above.")
+        if reset_btn:
+            st.session_state.pop('saved_quantities', None)
+            st.session_state.pop('saved_alt_quantities', None)
+            st.rerun()
     
-    def _render_material_row_v2(self, row: pd.Series, errors: List[str], warnings: List[str]):
+    def _render_material_row_form(self, row: pd.Series, 
+                                   default_quantities: Dict,
+                                   default_alt_quantities: Dict) -> tuple:
         """
-        Render material row with NEW logic:
-        - Always show primary + all alternatives
-        - User can choose any combination
-        - No "use alternatives" checkbox needed
-        - Shows already issued quantity for partial issues
+        Render material row inside form
+        Returns: (primary_qty, alt_qtys_dict, errors, warnings)
         """
         material_id = row['material_id']
         material_name = row['material_name']
@@ -182,269 +236,207 @@ class IssueForms:
         status = row['availability_status']
         alternatives = row.get('alternative_details', [])
         
-        # Status icon
-        status_icons = {'SUFFICIENT': '✅', 'PARTIAL': '⚠️', 'INSUFFICIENT': '❌'}
-        status_icon = status_icons.get(status, '⚪')
+        errors = []
+        warnings = []
+        alt_qtys = {}
         
-        # Get current quantities
-        primary_qty = st.session_state['issue_quantities'].get(material_id, 0)
-        alt_quantities = st.session_state.get('alternative_quantities', {})
-        
-        # Calculate total from alternatives
-        total_alt_used = 0
-        if alternatives:
-            for alt in alternatives:
-                alt_key = f"{material_id}_{alt['alternative_material_id']}"
-                total_alt_used += alt_quantities.get(alt_key, 0)
-        
-        # Total issue for this material
-        total_issue = primary_qty + total_alt_used
-        
-        # Container for the material
+        # Container for material
         with st.container():
-            # Header row with required/issued info
+            # Header row
             col1, col2, col3 = st.columns([4, 2, 2])
             
             with col1:
-                st.markdown(f"**{material_name}**")
+                st.markdown(f"**📦 {material_name}**")
                 st.caption(f"PT Code: {pt_code}")
             
             with col2:
-                # Show required and already issued
                 if issued_qty > 0:
                     st.write(f"Required: **{format_number(required_qty, 4)}** {uom}")
-                    st.caption(f"📦 Already issued: {format_number(issued_qty, 4)} | Remaining: {format_number(pending_qty, 4)}")
+                    st.caption(f"✅ Issued: {format_number(issued_qty, 4)} | Remaining: {format_number(pending_qty, 4)}")
                 else:
                     st.write(f"Required: **{format_number(pending_qty, 4)}** {uom}")
             
             with col3:
-                # Validation status
-                if total_issue >= pending_qty and total_issue <= pending_qty * 1.5:
-                    st.success(f"✅ Total: {format_number(total_issue, 4)} {uom}")
-                elif total_issue < pending_qty:
-                    if total_issue > 0:
-                        st.warning(f"⚠️ Total: {format_number(total_issue, 4)} {uom}")
-                    else:
-                        st.error(f"❌ Total: 0 {uom}")
-                else:
-                    st.error(f"❌ Over: {format_number(total_issue, 4)} {uom}")
+                status_icons = {'SUFFICIENT': '✅', 'PARTIAL': '⚠️', 'INSUFFICIENT': '❌'}
+                st.write(f"Stock: **{format_number(available_qty, 4)}** {status_icons.get(status, '')}")
             
-            # Primary material row
-            pcol1, pcol2, pcol3, pcol4 = st.columns([3, 1.5, 2, 1.5])
+            # Primary material input row
+            pcol1, pcol2, pcol3 = st.columns([3, 2, 1])
             
             with pcol1:
-                st.write(f"📦 **Primary:** {material_name[:40]}...")
+                st.write(f"  └─ Primary: {material_name[:40]}...")
             
             with pcol2:
-                avail_display = format_number(available_qty, 4)
-                if available_qty > 0:
-                    st.write(f"Stock: **{avail_display}**")
-                else:
-                    st.write(f"Stock: **{avail_display}** ❌")
-            
-            with pcol3:
-                # Primary quantity input
                 max_primary = max(0.0, available_qty)
-                default_primary = min(float(primary_qty), max_primary)
+                default_primary = min(float(default_quantities.get(material_id, 0)), max_primary)
                 
-                new_primary_qty = st.number_input(
-                    f"Primary qty for {material_id}",
+                primary_qty = st.number_input(
+                    f"Primary {material_id}",
                     min_value=0.0,
-                    max_value=float(max_primary) if max_primary > 0 else 0.0,
+                    max_value=float(max_primary) if max_primary > 0 else 9999999.0,
                     value=float(default_primary),
                     step=0.0001,
                     format="%.4f",
-                    key=f"primary_qty_{material_id}",
+                    key=f"form_primary_{material_id}",
                     label_visibility="collapsed"
                 )
-                
-                # Update session state
-                if new_primary_qty != primary_qty:
-                    st.session_state['issue_quantities'][material_id] = new_primary_qty
             
-            with pcol4:
-                if new_primary_qty > available_qty:
-                    st.error("❌ Over stock")
-                    errors.append(f"{material_name}: Primary {format_number(new_primary_qty, 4)} > available {format_number(available_qty, 4)}")
-                elif new_primary_qty > 0:
+            with pcol3:
+                if primary_qty > available_qty:
+                    st.error("❌")
+                    errors.append(f"{material_name}: Primary qty {format_number(primary_qty, 4)} > stock {format_number(available_qty, 4)}")
+                elif primary_qty > 0:
                     st.success("✅")
                 else:
-                    st.caption("—")
+                    st.write("—")
             
-            # Alternative materials rows (always show if available)
+            # Alternative materials
             if alternatives:
-                st.caption(f"🔄 **Alternatives available:** ({len(alternatives)} options)")
+                st.caption(f"  🔄 Alternatives: ({len(alternatives)} options)")
                 
                 for alt in alternatives:
                     alt_id = alt['alternative_material_id']
                     alt_key = f"{material_id}_{alt_id}"
-                    alt_name = alt['name']
-                    alt_available = float(alt['available'])
-                    alt_uom = alt.get('uom', uom)
+                    alt_name = alt.get('name', 'Unknown')
+                    alt_available = float(alt.get('available', 0))
                     alt_priority = alt.get('priority', 1)
                     
-                    acol1, acol2, acol3, acol4 = st.columns([3, 1.5, 2, 1.5])
+                    acol1, acol2, acol3 = st.columns([3, 2, 1])
                     
                     with acol1:
-                        st.write(f"  ↳ {alt_name[:35]}... (P{alt_priority})")
+                        st.write(f"    ↳ {alt_name[:35]}... (P{alt_priority})")
                     
                     with acol2:
-                        if alt_available > 0:
-                            st.write(f"Stock: **{format_number(alt_available, 4)}**")
-                        else:
-                            st.write(f"Stock: **0** ❌")
-                    
-                    with acol3:
-                        current_alt_qty = alt_quantities.get(alt_key, 0)
                         max_alt = max(0.0, alt_available)
-                        default_alt = min(float(current_alt_qty), max_alt)
+                        default_alt = min(float(default_alt_quantities.get(alt_key, 0)), max_alt)
                         
-                        new_alt_qty = st.number_input(
-                            f"Alt qty for {alt_key}",
+                        alt_qty = st.number_input(
+                            f"Alt {alt_key}",
                             min_value=0.0,
-                            max_value=float(max_alt) if max_alt > 0 else 0.0,
+                            max_value=float(max_alt) if max_alt > 0 else 9999999.0,
                             value=float(default_alt),
                             step=0.0001,
                             format="%.4f",
-                            key=f"alt_qty_{alt_key}",
+                            key=f"form_alt_{alt_key}",
                             label_visibility="collapsed"
                         )
                         
-                        # Update session state
-                        if new_alt_qty != current_alt_qty:
-                            st.session_state['alternative_quantities'][alt_key] = new_alt_qty
+                        alt_qtys[alt_key] = alt_qty
                     
-                    with acol4:
-                        if new_alt_qty > alt_available:
-                            st.error("❌ Over")
-                            errors.append(f"Alt {alt_name}: {format_number(new_alt_qty, 4)} > available {format_number(alt_available, 4)}")
-                        elif new_alt_qty > 0:
+                    with acol3:
+                        if alt_qty > alt_available:
+                            st.error("❌")
+                            errors.append(f"Alt {alt_name}: qty {format_number(alt_qty, 4)} > stock {format_number(alt_available, 4)}")
+                        elif alt_qty > 0:
                             st.success("✅")
                         else:
-                            st.caption("—")
+                            st.write("—")
             
-            # Recalculate total after inputs
-            updated_primary = st.session_state['issue_quantities'].get(material_id, 0)
-            updated_alt_total = sum(
-                st.session_state.get('alternative_quantities', {}).get(f"{material_id}_{alt['alternative_material_id']}", 0)
-                for alt in alternatives
-            ) if alternatives else 0
+            # Calculate total and add warnings
+            total_qty = primary_qty + sum(alt_qtys.values())
             
-            updated_total = updated_primary + updated_alt_total
+            # Summary for this material
+            if total_qty > 0:
+                if total_qty >= pending_qty:
+                    st.caption(f"  📊 Total: {format_number(total_qty, 4)} {uom} ✅")
+                else:
+                    st.caption(f"  📊 Total: {format_number(total_qty, 4)} {uom} ⚠️ (< required)")
+                    warnings.append(f"{material_name}: Total {format_number(total_qty, 4)} < required {format_number(pending_qty, 4)}")
+            else:
+                if pending_qty > 0:
+                    warnings.append(f"{material_name}: No quantity entered")
             
-            # Add warnings for this material
-            if updated_total < pending_qty and updated_total > 0:
-                warnings.append(
-                    f"{material_name}: issuing {format_number(updated_total, 4)} < required {format_number(pending_qty, 4)}"
-                )
-            elif updated_total > pending_qty * 1.5:
-                errors.append(
-                    f"{material_name}: total {format_number(updated_total, 4)} > 150% of required"
-                )
-            elif updated_total == 0 and pending_qty > 0:
-                warnings.append(
-                    f"{material_name}: no quantity specified (required: {format_number(pending_qty, 4)})"
-                )
+            st.markdown("---")
         
-        st.markdown("---")
+        return primary_qty, alt_qtys, errors, warnings
     
-    def _render_action_buttons(self, order: Dict, availability: pd.DataFrame):
-        """Render action buttons and confirmation"""
+    def _render_confirmation_dialog(self, order: Dict):
+        """Render confirmation dialog after form submission"""
+        st.markdown("---")
+        st.warning("⚠️ **Confirm Issue Materials**")
+        st.info(f"Order: **{order['order_no']}** - {order['product_name']}")
+        
+        quantities = st.session_state.get('issue_quantities', {})
+        alt_quantities = st.session_state.get('alternative_quantities', {})
+        
+        # Get material names
+        availability = self.queries.get_material_availability(order['id'])
+        material_names = {row['material_id']: row['material_name'] for _, row in availability.iterrows()}
+        material_uoms = {row['material_id']: row['uom'] for _, row in availability.iterrows()}
+        
+        # Build alternative names lookup
+        alt_names = {}
+        for _, row in availability.iterrows():
+            alts = row.get('alternative_details', [])
+            if alts:
+                for alt in alts:
+                    alt_key = f"{row['material_id']}_{alt['alternative_material_id']}"
+                    alt_names[alt_key] = alt.get('name', 'Unknown')
+        
+        st.markdown("**Materials to issue:**")
+        
+        has_any = False
+        for mat_id, qty in quantities.items():
+            if qty > 0:
+                mat_name = material_names.get(mat_id, f"Material {mat_id}")
+                uom = material_uoms.get(mat_id, '')
+                st.write(f"• 📦 {mat_name}: **{format_number(qty, 4)}** {uom}")
+                has_any = True
+        
+        for alt_key, qty in alt_quantities.items():
+            if qty > 0:
+                alt_name = alt_names.get(alt_key, alt_key)
+                st.write(f"  ↳ 🔄 {alt_name}: **{format_number(qty, 4)}**")
+                has_any = True
+        
+        if not has_any:
+            st.error("❌ No materials selected")
+            if st.button("↩️ Go Back"):
+                st.session_state['confirm_issue'] = False
+                st.rerun()
+            return
+        
+        # Employee selection
+        employees = self.queries.get_employees()
+        
+        if employees.empty:
+            st.error("❌ No active employees found")
+            return
+        
+        emp_options = {
+            f"{row['full_name']} ({row['position_name'] or 'N/A'})": row['id']
+            for _, row in employees.iterrows()
+        }
+        emp_list = ["-- Select --"] + list(emp_options.keys())
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            issued_by = st.selectbox("Issued By (Warehouse)", emp_list, key="issue_issued_by")
+        with col2:
+            received_by = st.selectbox("Received By (Production)", emp_list, key="issue_received_by")
+        
+        notes = st.text_area("Notes (Optional)", height=80, key="issue_notes")
+        
         col1, col2 = st.columns(2)
         
         with col1:
-            if not st.session_state.get('confirm_issue', False):
-                if st.button("🚀 Issue Materials", type="primary", 
-                           use_container_width=True, key="issue_btn"):
-                    st.session_state['confirm_issue'] = True
-                    st.rerun()
+            if st.button("✅ Yes, Issue Now", type="primary", use_container_width=True):
+                if issued_by == "-- Select --":
+                    st.error("❌ Please select warehouse staff")
+                elif received_by == "-- Select --":
+                    st.error("❌ Please select production staff")
+                else:
+                    self._execute_issue(
+                        order['id'],
+                        emp_options[issued_by],
+                        emp_options[received_by],
+                        notes
+                    )
         
         with col2:
-            if st.button("🔄 Reset Quantities", use_container_width=True, 
-                        key="reset_btn"):
-                st.session_state.pop('issue_quantities', None)
-                st.session_state.pop('issue_order_id', None)
-                st.session_state.pop('alternative_quantities', None)
+            if st.button("❌ Cancel", use_container_width=True):
+                st.session_state['confirm_issue'] = False
                 st.rerun()
-        
-        # Confirmation dialog
-        if st.session_state.get('confirm_issue', False):
-            st.markdown("---")
-            st.warning("⚠️ **Confirm Issue Materials**")
-            st.info(f"Order: **{order['order_no']}** - {order['product_name']}")
-            
-            st.markdown("**Materials to issue:**")
-            alt_quantities = st.session_state.get('alternative_quantities', {})
-            
-            has_any_material = False
-            
-            for _, row in availability.iterrows():
-                material_id = row['material_id']
-                issue_qty = st.session_state['issue_quantities'].get(material_id, 0)
-                
-                if issue_qty > 0:
-                    st.write(f"• 📦 {row['material_name']}: **{format_number(issue_qty, 4)}** {row['uom']}")
-                    has_any_material = True
-                
-                # Show alternatives being used
-                alternatives = row.get('alternative_details', [])
-                if alternatives:
-                    for alt in alternatives:
-                        alt_key = f"{material_id}_{alt['alternative_material_id']}"
-                        alt_qty = alt_quantities.get(alt_key, 0)
-                        if alt_qty > 0:
-                            st.write(f"  ↳ 🔄 {alt['name']}: **{format_number(alt_qty, 4)}** {alt.get('uom', row['uom'])}")
-                            has_any_material = True
-            
-            if not has_any_material:
-                st.error("❌ No materials selected to issue")
-                if st.button("↩️ Go Back", key="back_no_materials"):
-                    st.session_state['confirm_issue'] = False
-                    st.rerun()
-                return
-            
-            # Employee selection
-            employees = self.queries.get_employees()
-            
-            if employees.empty:
-                st.error("❌ No active employees found")
-                return
-            
-            emp_options = {
-                f"{row['full_name']} ({row['position_name'] or 'N/A'})": row['id']
-                for _, row in employees.iterrows()
-            }
-            emp_list = ["-- Select --"] + list(emp_options.keys())
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                issued_by = st.selectbox("Issued By (Warehouse)", emp_list, key="issue_issued_by")
-            with col2:
-                received_by = st.selectbox("Received By (Production)", emp_list, key="issue_received_by")
-            
-            notes = st.text_area("Notes (Optional)", height=80, key="issue_notes")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("✅ Yes, Issue Now", type="primary", 
-                           use_container_width=True, key="confirm_yes"):
-                    if issued_by == "-- Select --":
-                        st.error("❌ Please select warehouse staff")
-                    elif received_by == "-- Select --":
-                        st.error("❌ Please select production staff")
-                    else:
-                        self._execute_issue(
-                            order['id'],
-                            emp_options[issued_by],
-                            emp_options[received_by],
-                            notes
-                        )
-            
-            with col2:
-                if st.button("❌ Cancel", use_container_width=True, key="confirm_no"):
-                    st.session_state['confirm_issue'] = False
-                    st.rerun()
     
     def _execute_issue(self, order_id: int, issued_by: int, 
                       received_by: int, notes: str):
@@ -458,7 +450,6 @@ class IssueForms:
             use_alternatives = {}
             for key, qty in alternative_quantities.items():
                 if qty > 0:
-                    # Extract material_id from key (format: "material_id_alt_id")
                     parts = key.split('_')
                     if len(parts) >= 2:
                         material_id = int(parts[0])
@@ -480,8 +471,10 @@ class IssueForms:
             # Clear session state
             st.session_state['confirm_issue'] = False
             st.session_state.pop('issue_quantities', None)
-            st.session_state.pop('issue_order_id', None)
             st.session_state.pop('alternative_quantities', None)
+            st.session_state.pop('saved_quantities', None)
+            st.session_state.pop('saved_alt_quantities', None)
+            st.session_state.pop('issue_order_id', None)
             
             # Show success with PDF option
             from .dialogs import show_success_dialog
