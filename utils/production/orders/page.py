@@ -399,15 +399,9 @@ def render_orders_tab():
     
     # Render components
     render_dashboard()
-    
-    st.markdown("---")
-    
+
     filters = _render_filter_bar(queries)
-    
-    st.markdown("---")
-    
+
     _render_action_bar(queries, filters)
-    
-    st.markdown("---")
-    
+
     _render_order_list(queries, filters)

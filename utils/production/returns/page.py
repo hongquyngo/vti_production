@@ -328,18 +328,12 @@ def render_returns_tab():
     
     # Dashboard
     render_dashboard()
-    
-    st.markdown("---")
-    
+
     # Filters
     filters = _render_filter_bar()
-    
-    st.markdown("---")
-    
+
     # Action bar
     _render_action_bar(queries, filters)
-    
-    st.markdown("---")
-    
+
     # Return list
     _render_return_history(queries, filters)

@@ -310,18 +310,12 @@ def render_issues_tab():
     
     # Dashboard
     render_dashboard()
-    
-    st.markdown("---")
-    
+
     # Filters
     filters = _render_filter_bar()
-    
-    st.markdown("---")
-    
+
     # Action bar
     _render_action_bar(queries, filters)
-    
-    st.markdown("---")
-    
+
     # Issue list
     _render_issue_history(queries, filters)
