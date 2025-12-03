@@ -3,10 +3,16 @@
 Inventory Quality Dashboard
 Track and manage Good, Quarantine, and Defective inventory
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- Checkbox selection pattern like Production module
+- Action buttons appear when row selected
+- Detail popup dialog
+
 Features:
 - Summary metrics cards
-- Unified inventory table with single-row selection
+- Unified inventory table with single-row checkbox selection
+- Action buttons (View Details)
 - Detail popup dialog
 - Export to Excel
 - Filter by Category, Warehouse, Product
@@ -20,8 +26,6 @@ from datetime import datetime
 from utils.auth import AuthManager
 from utils.inventory_quality.common import (
     InventoryQualityConstants,
-    init_session_state,
-    clear_selection,
     format_quantity,
     format_currency,
     format_date,
@@ -49,7 +53,17 @@ auth.require_auth()
 
 # ==================== Initialize ====================
 
-init_session_state()
+def _init_session_state():
+    """Initialize session state for Inventory Quality page"""
+    defaults = {
+        'iq_selected_idx': None,
+        'iq_show_detail': False,
+        'iq_detail_data': None,
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+_init_session_state()
 data_loader = InventoryQualityData()
 
 # ==================== Header ====================
@@ -65,7 +79,7 @@ def render_header():
     with col2:
         if st.button("🔄 Refresh", use_container_width=True):
             st.cache_data.clear()
-            clear_selection()
+            st.session_state['iq_selected_idx'] = None
             st.rerun()
 
 
@@ -163,106 +177,142 @@ def render_filters():
             st.session_state['iq_category_filter'] = 'All'
             st.session_state['iq_warehouse_select'] = {'id': None, 'name': 'All Warehouses'}
             st.session_state['iq_product_search'] = ''
-            clear_selection()
+            st.session_state['iq_selected_idx'] = None
             st.rerun()
     
     return selected_category, warehouse_id, product_search
 
 
-# ==================== Data Table ====================
+# ==================== Category Indicator ====================
+
+def create_category_indicator(category: str) -> str:
+    """Create category indicator with icon"""
+    indicators = {
+        'GOOD': '📗 Good',
+        'QUARANTINE': '📙 Quarantine',
+        'DEFECTIVE': '📕 Defective'
+    }
+    return indicators.get(category, category)
+
+
+# ==================== Data Table with Checkbox Selection ====================
 
 def render_data_table(df: pd.DataFrame):
-    """Render inventory data table with single-row selection"""
+    """Render inventory data table with single-row checkbox selection"""
     if df.empty:
-        st.info("No inventory items found matching the selected filters.")
-        return
+        st.info("📭 No inventory items found matching the selected filters.")
+        return None
     
-    st.markdown(f"**Found {len(df):,} items**")
+    st.markdown(f"**Found {len(df):,} items** | 💡 Tick checkbox to select an item and view details")
     
-    # Prepare display dataframe
-    display_df = df.copy()
+    # Initialize selected index in session state
+    if 'iq_selected_idx' not in st.session_state:
+        st.session_state.iq_selected_idx = None
     
-    # Add row index for selection
-    display_df.insert(0, 'Select', False)
-    display_df.insert(1, '#', range(1, len(display_df) + 1))
+    # Prepare display dataframe - reset index for consistent positioning
+    display_df = df.reset_index(drop=True).copy()
     
-    # Category badge
-    display_df['Category'] = display_df['category'].apply(
-        lambda x: InventoryQualityConstants.CATEGORY_DISPLAY.get(x, x)
+    # Set Select column based on session state (single selection)
+    display_df['Select'] = False
+    if st.session_state.iq_selected_idx is not None and st.session_state.iq_selected_idx < len(display_df):
+        display_df.loc[st.session_state.iq_selected_idx, 'Select'] = True
+    
+    # Format columns for display
+    display_df['category_display'] = display_df['category'].apply(create_category_indicator)
+    display_df['qty_display'] = display_df.apply(
+        lambda x: f"{format_quantity(x['quantity'])} {x.get('uom', '')}", axis=1
     )
-    
-    # Format columns
-    display_df['Quantity'] = display_df['quantity'].apply(format_quantity)
-    display_df['Value'] = display_df['inventory_value_usd'].apply(
+    display_df['value_display'] = display_df['inventory_value_usd'].apply(
         lambda x: format_currency(x) if pd.notna(x) else '-'
     )
-    display_df['Days'] = display_df['days_in_warehouse'].apply(format_days)
+    display_df['days_display'] = display_df['days_in_warehouse'].apply(format_days)
     
-    # Select columns to display
-    columns_to_show = [
-        '#', 'Category', 'product_name', 'pt_code', 'batch_number',
-        'Quantity', 'uom', 'warehouse_name', 'source_type', 'Days', 'Value'
-    ]
-    
-    # Filter existing columns
-    columns_to_show = [c for c in columns_to_show if c in display_df.columns]
-    
-    # Column configuration
-    column_config = {
-        '#': st.column_config.NumberColumn('#', width='small'),
-        'Category': st.column_config.TextColumn('Category', width='medium'),
-        'product_name': st.column_config.TextColumn('Product', width='large'),
-        'pt_code': st.column_config.TextColumn('PT Code', width='medium'),
-        'batch_number': st.column_config.TextColumn('Batch', width='medium'),
-        'Quantity': st.column_config.TextColumn('Qty', width='small'),
-        'uom': st.column_config.TextColumn('UOM', width='small'),
-        'warehouse_name': st.column_config.TextColumn('Warehouse', width='medium'),
-        'source_type': st.column_config.TextColumn('Source', width='medium'),
-        'Days': st.column_config.TextColumn('Age', width='small'),
-        'Value': st.column_config.TextColumn('Value', width='small')
-    }
-    
-    # Single row selection using radio buttons
-    st.markdown("##### Select an item to view details:")
-    
-    # Create selection options
-    selection_options = []
-    for idx, row in df.iterrows():
-        category_icon = {'GOOD': '📗', 'QUARANTINE': '📙', 'DEFECTIVE': '📕'}.get(row['category'], '📦')
-        label = f"{category_icon} {row['product_name']} | Batch: {row.get('batch_number', 'N/A')} | Qty: {format_quantity(row['quantity'])} | {row.get('warehouse_name', 'N/A')}"
-        selection_options.append((idx, label, row))
-    
-    # Display table
-    st.dataframe(
-        display_df[columns_to_show],
+    # Create editable dataframe with selection
+    edited_df = st.data_editor(
+        display_df[[
+            'Select', 'category_display', 'product_name', 'pt_code', 'batch_number',
+            'qty_display', 'warehouse_name', 'source_type', 'days_display', 'value_display'
+        ]].rename(columns={
+            'category_display': 'Category',
+            'product_name': 'Product',
+            'pt_code': 'PT Code',
+            'batch_number': 'Batch',
+            'qty_display': 'Quantity',
+            'warehouse_name': 'Warehouse',
+            'source_type': 'Source',
+            'days_display': 'Age',
+            'value_display': 'Value'
+        }),
         use_container_width=True,
         hide_index=True,
-        height=400,
-        column_config=column_config
+        height=450,
+        disabled=['Category', 'Product', 'PT Code', 'Batch', 'Quantity', 'Warehouse', 'Source', 'Age', 'Value'],
+        column_config={
+            'Select': st.column_config.CheckboxColumn(
+                '✓',
+                help='Select row to view details',
+                default=False,
+                width='small'
+            ),
+            'Category': st.column_config.TextColumn('Category', width='medium'),
+            'Product': st.column_config.TextColumn('Product', width='large'),
+            'PT Code': st.column_config.TextColumn('PT Code', width='medium'),
+            'Batch': st.column_config.TextColumn('Batch', width='medium'),
+            'Quantity': st.column_config.TextColumn('Qty', width='small'),
+            'Warehouse': st.column_config.TextColumn('Warehouse', width='medium'),
+            'Source': st.column_config.TextColumn('Source', width='medium'),
+            'Age': st.column_config.TextColumn('Age', width='small'),
+            'Value': st.column_config.TextColumn('Value', width='small')
+        },
+        key="iq_table_editor"
     )
     
-    # Selection via selectbox below table
-    st.markdown("---")
-    col1, col2 = st.columns([3, 1])
+    # Handle single selection - find newly selected row
+    selected_indices = edited_df[edited_df['Select'] == True].index.tolist()
     
-    with col1:
-        selected_idx = st.selectbox(
-            "Select item to view details",
-            options=range(len(df)),
-            format_func=lambda i: f"Row {i+1}: {df.iloc[i]['product_name']} - {df.iloc[i].get('batch_number', 'N/A')}",
-            key="iq_row_selector",
-            index=None,
-            placeholder="Click to select an item..."
-        )
-    
-    with col2:
-        st.write("")
-        st.write("")
-        if selected_idx is not None:
-            if st.button("🔍 View Details", type="primary", use_container_width=True):
-                st.session_state['iq_selected_row'] = df.iloc[selected_idx].to_dict()
-                st.session_state['iq_show_detail_dialog'] = True
+    if selected_indices:
+        # If multiple selected (user clicked new one), keep only the newest
+        if len(selected_indices) > 1:
+            # Find the new selection (not the previously stored one)
+            new_selection = [idx for idx in selected_indices if idx != st.session_state.iq_selected_idx]
+            if new_selection:
+                st.session_state.iq_selected_idx = new_selection[0]
                 st.rerun()
+        else:
+            st.session_state.iq_selected_idx = selected_indices[0]
+    else:
+        st.session_state.iq_selected_idx = None
+    
+    # Action buttons - only show when row is selected
+    if st.session_state.iq_selected_idx is not None and st.session_state.iq_selected_idx < len(display_df):
+        selected_item = display_df.iloc[st.session_state.iq_selected_idx]
+        category = selected_item.get('category', '')
+        product_name = selected_item.get('product_name', 'Unknown')
+        batch = selected_item.get('batch_number', 'N/A')
+        qty = format_quantity(selected_item.get('quantity', 0))
+        
+        st.markdown("---")
+        st.markdown(f"**Selected:** {create_category_indicator(category)} | `{product_name}` | Batch: `{batch}` | Qty: {qty}")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if st.button("🔍 View Details", type="primary", use_container_width=True, key="btn_view_detail"):
+                st.session_state['iq_detail_data'] = selected_item.to_dict()
+                st.session_state['iq_show_detail'] = True
+                st.rerun()
+        
+        with col2:
+            # Placeholder for future actions
+            st.button("📋 Actions", use_container_width=True, disabled=True, 
+                     help="Coming soon: QC Approve, Repair, Scrap", key="btn_actions")
+        
+        with col3:
+            if st.button("❌ Deselect", use_container_width=True, key="btn_deselect"):
+                st.session_state['iq_selected_idx'] = None
+                st.rerun()
+    else:
+        st.info("💡 Tick checkbox to select an item and perform actions")
     
     return df
 
@@ -270,7 +320,7 @@ def render_data_table(df: pd.DataFrame):
 # ==================== Detail Dialog ====================
 
 @st.dialog("📋 Inventory Item Details", width="large")
-def render_detail_dialog(item: dict):
+def show_detail_dialog(item: dict):
     """Render detail popup dialog for selected item"""
     category = item.get('category', 'UNKNOWN')
     
@@ -296,87 +346,78 @@ def render_detail_dialog(item: dict):
     st.markdown("---")
     
     # Location Section
-    st.markdown("#### 🏭 Location")
+    st.markdown("#### 🏭 Location & Source")
     col1, col2 = st.columns(2)
     
     with col1:
         st.markdown(f"**Warehouse:** {safe_get(item, 'warehouse_name', '-')}")
+        st.markdown(f"**Days in Warehouse:** {format_days(safe_get(item, 'days_in_warehouse'))}")
     
     with col2:
         st.markdown(f"**Source:** {safe_get(item, 'source_type', '-')}")
+        st.markdown(f"**Age Category:** {safe_get(item, 'age_category', '-')}")
     
     st.markdown("---")
     
     # Category-specific details
     if category == 'GOOD':
-        render_good_details(item)
+        _render_good_details(item)
     elif category == 'QUARANTINE':
-        render_quarantine_details(item)
+        _render_quarantine_details(item)
     elif category == 'DEFECTIVE':
-        render_defective_details(item)
+        _render_defective_details(item)
     
     # Close button
     st.markdown("---")
-    if st.button("✖️ Close", use_container_width=True):
-        st.session_state['iq_show_detail_dialog'] = False
-        st.session_state['iq_selected_row'] = None
-        st.rerun()
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("✖️ Close", use_container_width=True, key="btn_close_dialog"):
+            st.session_state['iq_show_detail'] = False
+            st.session_state['iq_detail_data'] = None
+            st.rerun()
 
 
-def render_good_details(item: dict):
+def _render_good_details(item: dict):
     """Render details specific to GOOD inventory"""
     st.markdown("#### 📊 Stock Details")
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown(f"**Days in Warehouse:** {format_days(safe_get(item, 'days_in_warehouse'))}")
-        st.markdown(f"**Age Category:** {safe_get(item, 'age_category', '-')}")
-    
-    with col2:
         st.markdown(f"**Expiry Status:** {safe_get(item, 'expiry_status', '-')}")
         st.markdown(f"**Value (USD):** {format_currency(safe_get(item, 'inventory_value_usd'))}")
     
-    with col3:
+    with col2:
         st.markdown(f"**PO Number:** {safe_get(item, 'po_number', '-')}")
         st.markdown(f"**Vendor:** {safe_get(item, 'vendor_name', '-')}")
     
-    # Arrival info if available
-    if safe_get(item, 'arrival_date'):
-        st.markdown("---")
-        st.markdown("#### 🚚 Arrival Information")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown(f"**Arrival Date:** {format_date(safe_get(item, 'arrival_date'))}")
-            st.markdown(f"**Arrival Note:** {safe_get(item, 'arrival_note_number', '-')}")
-        
-        with col2:
-            st.markdown(f"**Landed Cost:** {format_currency(safe_get(item, 'arrival_landed_cost'))}")
+    with col3:
+        st.markdown(f"**Arrival Date:** {format_date(safe_get(item, 'arrival_date'))}")
+        st.markdown(f"**Landed Cost:** {format_currency(safe_get(item, 'arrival_landed_cost'))}")
 
 
-def render_quarantine_details(item: dict):
+def _render_quarantine_details(item: dict):
     """Render details specific to QUARANTINE inventory"""
     st.markdown("#### ⏳ QC Pending Details")
     
     col1, col2 = st.columns(2)
     
     with col1:
+        st.markdown(f"**Status:** QC Pending")
         st.markdown(f"**Days Pending:** {format_days(safe_get(item, 'days_in_warehouse'))}")
-        st.markdown(f"**Manufacturing Order:** {safe_get(item, 'related_order_no', '-')}")
     
     with col2:
-        st.markdown(f"**Defect Type:** {safe_get(item, 'defect_type', '-')}")
+        st.markdown(f"**Manufacturing Order:** {safe_get(item, 'related_order_no', '-')}")
     
     # Notes
     notes = safe_get(item, 'notes')
     if notes:
         st.markdown("---")
         st.markdown("#### 📝 Notes")
-        st.text_area("", value=notes, disabled=True, height=100, label_visibility="collapsed")
+        st.text_area("", value=notes, disabled=True, height=80, label_visibility="collapsed")
 
 
-def render_defective_details(item: dict):
+def _render_defective_details(item: dict):
     """Render details specific to DEFECTIVE inventory"""
     st.markdown("#### ⚠️ Defect Details")
     
@@ -397,19 +438,17 @@ def render_defective_details(item: dict):
     if notes:
         st.markdown("---")
         st.markdown("#### 📝 Notes / Reason")
-        st.text_area("", value=notes, disabled=True, height=100, label_visibility="collapsed")
+        st.text_area("", value=notes, disabled=True, height=80, label_visibility="collapsed")
 
 
-# ==================== Export ====================
+# ==================== Export Section ====================
 
 def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int):
     """Render export to Excel section"""
-    st.markdown("---")
-    
-    col1, col2, col3 = st.columns([2, 2, 4])
+    col1, col2 = st.columns([1, 4])
     
     with col1:
-        if st.button("📥 Export to Excel", use_container_width=True):
+        if st.button("📥 Export to Excel", use_container_width=True, key="btn_export"):
             try:
                 export_df = data_loader.get_export_data(
                     category=category if category != 'All' else None,
@@ -427,7 +466,7 @@ def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int):
                         data=excel_data,
                         file_name=filename,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
+                        key="download_excel"
                     )
                 else:
                     st.warning("No data to export")
@@ -435,9 +474,6 @@ def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int):
             except Exception as e:
                 st.error(f"Export failed: {str(e)}")
                 logger.error(f"Export error: {e}", exc_info=True)
-    
-    with col2:
-        st.caption(f"Total: {len(df):,} items")
 
 
 # ==================== Main Application ====================
@@ -464,16 +500,17 @@ def main():
                 product_search=product_search if product_search else None
             )
         
-        # Data Table
+        # Data Table with selection
         render_data_table(df)
         
         # Export Section
         if not df.empty:
+            st.markdown("---")
             render_export_section(df, category, warehouse_id)
         
-        # Detail Dialog
-        if st.session_state.get('iq_show_detail_dialog') and st.session_state.get('iq_selected_row'):
-            render_detail_dialog(st.session_state['iq_selected_row'])
+        # Show Detail Dialog if triggered
+        if st.session_state.get('iq_show_detail') and st.session_state.get('iq_detail_data'):
+            show_detail_dialog(st.session_state['iq_detail_data'])
     
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
@@ -481,12 +518,12 @@ def main():
         
         if st.button("🔄 Reload"):
             st.cache_data.clear()
-            clear_selection()
+            st.session_state['iq_selected_idx'] = None
             st.rerun()
     
     # Footer
     st.markdown("---")
-    st.caption("Inventory Quality Dashboard v1.0")
+    st.caption("Inventory Quality Dashboard v1.1")
 
 
 if __name__ == "__main__":
