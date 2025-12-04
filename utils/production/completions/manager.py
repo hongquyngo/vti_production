@@ -3,9 +3,11 @@
 Completion Manager - Business logic for Production Completions
 Complete production orders with receipt creation and inventory updates
 
-Version: 2.0.0
+Version: 2.0.1
 Changes:
-- Added update_quality_status_partial() for partial QC results
+- v2.0.1: Fixed SQL error - removed updated_by/updated_date from production_receipts UPDATE
+  (table doesn't have these columns)
+- v2.0.0: Added update_quality_status_partial() for partial QC results
 - Supports splitting receipt when some items pass and some fail
 - PASSED qty → GOOD inventory, FAILED qty → DEFECTIVE (separate receipt)
 
@@ -386,16 +388,13 @@ class CompletionManager:
             UPDATE production_receipts
             SET quantity = :passed_qty,
                 quality_status = 'PASSED',
-                notes = :notes,
-                updated_by = :user_id,
-                updated_date = NOW()
+                notes = :notes
             WHERE id = :receipt_id
         """)
         
         conn.execute(update_passed_query, {
             'passed_qty': passed_qty,
             'notes': notes,
-            'user_id': user_id,
             'receipt_id': receipt_id
         })
         
@@ -456,31 +455,25 @@ class CompletionManager:
                 UPDATE production_receipts
                 SET quality_status = :new_status,
                     defect_type = :defect_type,
-                    notes = :notes,
-                    updated_by = :user_id,
-                    updated_date = NOW()
+                    notes = :notes
                 WHERE id = :receipt_id
             """)
             conn.execute(update_query, {
                 'new_status': new_status,
                 'defect_type': defect_type,
                 'notes': notes,
-                'user_id': user_id,
                 'receipt_id': receipt_id
             })
         else:
             update_query = text("""
                 UPDATE production_receipts
                 SET quality_status = :new_status,
-                    notes = :notes,
-                    updated_by = :user_id,
-                    updated_date = NOW()
+                    notes = :notes
                 WHERE id = :receipt_id
             """)
             conn.execute(update_query, {
                 'new_status': new_status,
                 'notes': notes,
-                'user_id': user_id,
                 'receipt_id': receipt_id
             })
     
