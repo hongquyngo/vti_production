@@ -227,14 +227,18 @@ def render_data_table(df: pd.DataFrame):
     )
     display_df['days_display'] = display_df['days_in_warehouse'].apply(format_days)
     
+    # Handle package_size - fill empty with '-'
+    display_df['package_size_display'] = display_df['package_size'].fillna('-').replace('', '-')
+    
     # Create editable dataframe with selection
     edited_df = st.data_editor(
         display_df[[
-            'Select', 'category_display', 'product_name', 'pt_code', 'batch_number',
+            'Select', 'category_display', 'product_name', 'package_size_display', 'pt_code', 'batch_number',
             'qty_display', 'warehouse_name', 'source_type', 'days_display', 'value_display'
         ]].rename(columns={
             'category_display': 'Category',
             'product_name': 'Product',
+            'package_size_display': 'Pkg Size',
             'pt_code': 'PT Code',
             'batch_number': 'Batch',
             'qty_display': 'Quantity',
@@ -246,7 +250,7 @@ def render_data_table(df: pd.DataFrame):
         use_container_width=True,
         hide_index=True,
         height=450,
-        disabled=['Category', 'Product', 'PT Code', 'Batch', 'Quantity', 'Warehouse', 'Source', 'Age', 'Value'],
+        disabled=['Category', 'Product', 'Pkg Size', 'PT Code', 'Batch', 'Quantity', 'Warehouse', 'Source', 'Age', 'Value'],
         column_config={
             'Select': st.column_config.CheckboxColumn(
                 '✓',
@@ -256,6 +260,7 @@ def render_data_table(df: pd.DataFrame):
             ),
             'Category': st.column_config.TextColumn('Category', width='medium'),
             'Product': st.column_config.TextColumn('Product', width='large'),
+            'Pkg Size': st.column_config.TextColumn('Pkg Size', width='small'),
             'PT Code': st.column_config.TextColumn('PT Code', width='medium'),
             'Batch': st.column_config.TextColumn('Batch', width='medium'),
             'Quantity': st.column_config.TextColumn('Qty', width='small'),
@@ -336,6 +341,7 @@ def show_detail_dialog(item: dict):
     with col1:
         st.markdown(f"**Product:** {safe_get(item, 'product_name', '-')}")
         st.markdown(f"**PT Code:** {safe_get(item, 'pt_code', '-')}")
+        st.markdown(f"**Package Size:** {safe_get(item, 'package_size', '-')}")
         st.markdown(f"**Brand:** {safe_get(item, 'brand', '-')}")
     
     with col2:

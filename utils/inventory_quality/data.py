@@ -58,7 +58,7 @@ class InventoryQualityData:
                 params['warehouse_id'] = warehouse_id
             
             if product_search:
-                query += " AND (product_name LIKE :search OR pt_code LIKE :search)"
+                query += " AND (product_name LIKE :search OR pt_code LIKE :search OR package_size LIKE :search)"
                 params['search'] = f"%{product_search}%"
             
             query += " ORDER BY category, product_name, batch_number"
@@ -342,6 +342,7 @@ class InventoryQualityData:
             'category': 'Category',
             'product_name': 'Product Name',
             'pt_code': 'PT Code',
+            'package_size': 'Package Size',
             'brand': 'Brand',
             'batch_number': 'Batch Number',
             'expiry_date': 'Expiry Date',

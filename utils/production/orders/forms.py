@@ -91,6 +91,10 @@ class OrderForms:
                 'target_warehouse': None,
                 'notes': ''
             }
+            # Clear material check state when BOM changes
+            st.session_state.pop('create_order_materials_checked', None)
+            st.session_state.pop('create_order_availability', None)
+            st.session_state.pop('create_order_warehouse_ids', None)
         
         # Get warehouses
         warehouses = self.queries.get_warehouses()
@@ -192,6 +196,10 @@ class OrderForms:
                 'target_warehouse': warehouse_list[min(1, len(warehouse_list) - 1)],
                 'notes': ''
             }
+            # Clear material check state
+            st.session_state.pop('create_order_materials_checked', None)
+            st.session_state.pop('create_order_availability', None)
+            st.session_state.pop('create_order_warehouse_ids', None)
             st.rerun()
         
         if check_materials_btn:
@@ -208,14 +216,28 @@ class OrderForms:
             source_warehouse_id = warehouse_options[source_warehouse]
             target_warehouse_id = warehouse_options[target_warehouse]
             
-            # Step 3: Material Availability Check
-            st.markdown("---")
-            st.markdown("### 3️⃣ Material Availability Check")
-            
+            # Check material availability and store in session state
             with st.spinner("Checking material availability..."):
                 availability = self.queries.check_material_availability(
                     selected_bom_id, planned_qty, source_warehouse_id
                 )
+            
+            # Store availability result in session state
+            st.session_state['create_order_materials_checked'] = True
+            st.session_state['create_order_availability'] = availability
+            st.session_state['create_order_warehouse_ids'] = {
+                'source': source_warehouse_id,
+                'target': target_warehouse_id
+            }
+            st.rerun()  # Rerun to show Step 3
+        
+        # Step 3: Show Material Check Results (based on session state, not button click)
+        if st.session_state.get('create_order_materials_checked'):
+            availability = st.session_state.get('create_order_availability', pd.DataFrame())
+            warehouse_ids = st.session_state.get('create_order_warehouse_ids', {})
+            
+            st.markdown("---")
+            st.markdown("### 3️⃣ Material Availability Check")
             
             if not availability.empty:
                 # Summary metrics
@@ -263,26 +285,31 @@ class OrderForms:
             
             st.markdown("---")
             
-            # Confirm creation buttons
+            # Confirm creation buttons (NOW they persist across reruns!)
             col1, col2 = st.columns(2)
             
             with col1:
                 if st.button("✅ Create Order", type="primary", use_container_width=True, 
                             key="btn_confirm_create_order"):
+                    # Get form data from session state
+                    form_data = st.session_state.get('create_order_form_data', {})
                     self._handle_create_order(
                         bom_info=bom_info,
-                        planned_qty=planned_qty,
-                        scheduled_date=scheduled_date,
-                        priority=priority,
-                        source_warehouse_id=source_warehouse_id,
-                        target_warehouse_id=target_warehouse_id,
-                        notes=notes
+                        planned_qty=form_data.get('planned_qty', 1.0),
+                        scheduled_date=form_data.get('scheduled_date', get_vietnam_today()),
+                        priority=form_data.get('priority', 'NORMAL'),
+                        source_warehouse_id=warehouse_ids.get('source'),
+                        target_warehouse_id=warehouse_ids.get('target'),
+                        notes=form_data.get('notes', '')
                     )
             
             with col2:
                 if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
                     st.session_state.pop('create_order_form_data', None)
                     st.session_state.pop('create_order_bom_id', None)
+                    st.session_state.pop('create_order_materials_checked', None)
+                    st.session_state.pop('create_order_availability', None)
+                    st.session_state.pop('create_order_warehouse_ids', None)
                     st.rerun()
     
     def _handle_create_order(self, bom_info: Dict, planned_qty: float,
@@ -314,9 +341,12 @@ class OrderForms:
             with st.spinner("Creating order..."):
                 order_no = self.manager.create_order(order_data)
             
-            # Clear form data
+            # Clear all form data
             st.session_state.pop('create_order_form_data', None)
             st.session_state.pop('create_order_bom_id', None)
+            st.session_state.pop('create_order_materials_checked', None)
+            st.session_state.pop('create_order_availability', None)
+            st.session_state.pop('create_order_warehouse_ids', None)
             
             # Set success state and go back to list
             st.session_state['order_created_success'] = order_no
