@@ -3,7 +3,11 @@
 Dialog components for Completions domain
 Receipt detail, quality update, PDF export dialogs
 
-Version: 1.1.0
+Version: 2.0.0
+Changes:
+- Updated QC dialog to support partial results (passed_qty + failed_qty)
+- Added defect type selection for failed items
+- Preview section shows inventory impact
 """
 
 import logging
@@ -150,12 +154,23 @@ def show_receipt_details_dialog(receipt_id: int):
             st.rerun()
 
 
-# ==================== Update Quality Dialog ====================
+# ==================== Update Quality Dialog (Partial QC Support) ====================
 
-@st.dialog("✏️ Update Quality Status", width="medium")
+# Defect types for failed items
+DEFECT_TYPES = [
+    ('VISUAL', '🔍 Visual Defect - Lỗi ngoại quan'),
+    ('DIMENSIONAL', '📏 Dimensional - Sai kích thước'),
+    ('FUNCTIONAL', '⚙️ Functional - Lỗi chức năng'),
+    ('CONTAMINATION', '🧪 Contamination - Nhiễm bẩn'),
+    ('PACKAGING', '📦 Packaging - Lỗi đóng gói'),
+    ('OTHER', '❓ Other - Khác'),
+]
+
+@st.dialog("🔬 Update Quality Status", width="large")
 def show_update_quality_dialog(receipt_id: int):
     """
-    Show quality update dialog
+    Show quality update dialog with partial QC support
+    Allows specifying passed_qty and failed_qty separately
     
     Args:
         receipt_id: Receipt ID to update
@@ -167,78 +182,193 @@ def show_update_quality_dialog(receipt_id: int):
         st.error("❌ Receipt not found")
         return
     
+    total_qty = float(receipt['quantity'])
+    current_status = receipt['quality_status']
+    
+    # Header
     st.markdown(f"### Receipt: {receipt['receipt_no']}")
     
+    # Receipt info cards
     col1, col2 = st.columns(2)
     with col1:
         st.info(f"**Product:** {receipt['product_name']}")
-        st.info(f"**Quantity:** {format_number(receipt['quantity'], 2)} {receipt['uom']}")
+        st.info(f"**Total Qty:** {format_number(total_qty, 2)} {receipt['uom']}")
     with col2:
         st.info(f"**Batch:** {receipt['batch_no']}")
-        st.info(f"**Current Status:** {create_status_indicator(receipt['quality_status'])}")
+        st.info(f"**Current Status:** {create_status_indicator(current_status)}")
     
     st.markdown("---")
     
-    # Quality status selection
-    quality_options = [q[0] for q in CompletionConstants.QUALITY_STATUSES]
-    quality_labels = {q[0]: q[1] for q in CompletionConstants.QUALITY_STATUSES}
+    # QC Result Section
+    st.markdown("### 📊 QC Result Breakdown")
+    st.caption("Enter the quantity that passed and failed QC. Total must equal the receipt quantity.")
     
-    current_index = quality_options.index(receipt['quality_status']) if receipt['quality_status'] in quality_options else 0
-    
-    new_status = st.selectbox(
-        "New Quality Status",
-        options=quality_options,
-        format_func=lambda x: quality_labels.get(x, x),
-        index=current_index,
-        key="new_quality_status"
-    )
-    
-    notes = st.text_area(
-        "Quality Notes",
-        value=receipt.get('notes') or "",
-        height=150,
-        key="quality_notes"
-    )
-    
-    # Warning for status changes
-    if receipt['quality_status'] == 'PASSED' and new_status != 'PASSED':
-        st.warning("⚠️ Changing from PASSED to another status will remove inventory")
-    elif receipt['quality_status'] != 'PASSED' and new_status == 'PASSED':
-        st.info("ℹ️ Changing to PASSED will add inventory")
-    
-    st.markdown("---")
+    # Initialize session state for QC values
+    if 'qc_passed_qty' not in st.session_state:
+        if current_status == 'PASSED':
+            st.session_state.qc_passed_qty = total_qty
+            st.session_state.qc_failed_qty = 0.0
+        elif current_status == 'FAILED':
+            st.session_state.qc_passed_qty = 0.0
+            st.session_state.qc_failed_qty = total_qty
+        else:  # PENDING
+            st.session_state.qc_passed_qty = total_qty
+            st.session_state.qc_failed_qty = 0.0
     
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("✅ Update", type="primary", use_container_width=True,
-                    key="quality_update_btn"):
+        st.markdown("##### ✅ Passed Quantity")
+        passed_qty = st.number_input(
+            "Passed",
+            min_value=0.0,
+            max_value=total_qty,
+            value=float(st.session_state.qc_passed_qty),
+            step=1.0,
+            format="%.2f",
+            key="input_passed_qty",
+            label_visibility="collapsed"
+        )
+    
+    with col2:
+        st.markdown("##### ❌ Failed Quantity")
+        failed_qty = st.number_input(
+            "Failed",
+            min_value=0.0,
+            max_value=total_qty,
+            value=float(st.session_state.qc_failed_qty),
+            step=1.0,
+            format="%.2f",
+            key="input_failed_qty",
+            label_visibility="collapsed"
+        )
+    
+    # Validation
+    remaining = total_qty - passed_qty - failed_qty
+    
+    if abs(remaining) < 0.001:  # Allow small floating point differences
+        st.success(f"✅ **Total matches:** {format_number(passed_qty + failed_qty, 2)} = {format_number(total_qty, 2)} {receipt['uom']}")
+        is_valid = True
+    elif remaining > 0:
+        st.warning(f"⚠️ **Remaining:** {format_number(remaining, 2)} {receipt['uom']} not assigned")
+        is_valid = False
+    else:
+        st.error(f"❌ **Over-assigned:** {format_number(abs(remaining), 2)} {receipt['uom']} exceeds total")
+        is_valid = False
+    
+    st.markdown("---")
+    
+    # Defect Type (only if failed_qty > 0)
+    defect_type = None
+    if failed_qty > 0:
+        st.markdown("### ⚠️ Defect Information")
+        
+        defect_options = [d[0] for d in DEFECT_TYPES]
+        defect_labels = {d[0]: d[1] for d in DEFECT_TYPES}
+        
+        defect_type = st.selectbox(
+            "Defect Type *",
+            options=defect_options,
+            format_func=lambda x: defect_labels.get(x, x),
+            key="select_defect_type"
+        )
+    
+    # QC Notes
+    st.markdown("### 📝 QC Notes")
+    notes = st.text_area(
+        "Notes",
+        value=receipt.get('notes') or "",
+        height=100,
+        placeholder="Enter QC findings, observations, or reasons for failure...",
+        key="qc_notes",
+        label_visibility="collapsed"
+    )
+    
+    st.markdown("---")
+    
+    # Preview Section
+    st.markdown("### 📋 Preview - Inventory Impact")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if passed_qty > 0:
+            st.success(f"📗 **{format_number(passed_qty, 2)} {receipt['uom']}** → GOOD Inventory")
+        else:
+            st.info("📗 No items will be added to GOOD inventory")
+    
+    with col2:
+        if failed_qty > 0:
+            st.error(f"📕 **{format_number(failed_qty, 2)} {receipt['uom']}** → DEFECTIVE Inventory")
+        else:
+            st.info("📕 No items will be marked as DEFECTIVE")
+    
+    # Special case warnings
+    if current_status == 'PASSED' and failed_qty > 0:
+        st.warning(
+            f"⚠️ **Attention:** This receipt was previously PASSED. "
+            f"Marking {format_number(failed_qty, 2)} {receipt['uom']} as FAILED will remove them from GOOD inventory."
+        )
+    
+    st.markdown("---")
+    
+    # Action Buttons
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        update_disabled = not is_valid or (failed_qty > 0 and not defect_type)
+        
+        if update_disabled and failed_qty > 0 and not defect_type:
+            st.caption("⚠️ Please select defect type")
+        
+        if st.button("✅ Update QC Result", type="primary", use_container_width=True,
+                    disabled=update_disabled, key="qc_update_btn"):
             try:
                 audit_info = get_user_audit_info()
                 manager = CompletionManager()
                 
                 with st.spinner("Updating quality status..."):
-                    success = manager.update_quality_status(
+                    result = manager.update_quality_status_partial(
                         receipt_id=receipt_id,
-                        new_status=new_status,
+                        passed_qty=passed_qty,
+                        failed_qty=failed_qty,
+                        defect_type=defect_type,
                         notes=notes,
                         user_id=audit_info['user_id'],
                         keycloak_id=audit_info['keycloak_id']
                     )
                 
-                if success:
-                    st.success(f"✅ Quality status updated to {new_status}")
-                    time.sleep(1)
+                if result.get('success'):
+                    # Clear session state
+                    st.session_state.pop('qc_passed_qty', None)
+                    st.session_state.pop('qc_failed_qty', None)
+                    
+                    # Show success message
+                    msg_parts = []
+                    if passed_qty > 0:
+                        msg_parts.append(f"✅ {format_number(passed_qty, 2)} PASSED")
+                    if failed_qty > 0:
+                        msg_parts.append(f"❌ {format_number(failed_qty, 2)} FAILED")
+                    
+                    st.success(f"QC Updated: {' | '.join(msg_parts)}")
+                    
+                    if result.get('new_receipt_no'):
+                        st.info(f"📝 New receipt created for failed items: {result['new_receipt_no']}")
+                    
+                    time.sleep(1.5)
                     st.rerun()
                 else:
-                    st.error("❌ Failed to update quality status")
+                    st.error(f"❌ Failed to update: {result.get('error', 'Unknown error')}")
                     
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
                 logger.error(f"Quality update failed: {e}", exc_info=True)
     
     with col2:
-        if st.button("❌ Cancel", use_container_width=True, key="quality_cancel_btn"):
+        if st.button("❌ Cancel", use_container_width=True, key="qc_cancel_btn"):
+            # Clear session state
+            st.session_state.pop('qc_passed_qty', None)
+            st.session_state.pop('qc_failed_qty', None)
             st.rerun()
 
 

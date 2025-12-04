@@ -57,23 +57,31 @@ class InventoryQualityConstants:
         'DEFECTIVE': '#dc3545'
     }
     
-    # Defect types
+    # Defect types - includes new partial QC defect types
     DEFECT_TYPES = {
+        # Legacy defect types
         'QC_PENDING': 'QC Pending',
         'QC_FAILED': 'QC Failed',
         'DAMAGED': 'Damaged',
         'EXPIRED': 'Expired',
         'CONTAMINATED': 'Contaminated',
-        'OTHER': 'Other'
+        # New partial QC defect types
+        'VISUAL': '🔍 Visual Defect',
+        'DIMENSIONAL': '📏 Dimensional',
+        'FUNCTIONAL': '⚙️ Functional',
+        'CONTAMINATION': '🧪 Contamination',
+        'PACKAGING': '📦 Packaging',
+        'OTHER': '❓ Other'
     }
     
-    # Source types
+    # Source types - includes partial QC source
     SOURCE_TYPES = {
         'Opening Balance': 'Opening Balance',
         'Production': 'Production',
         'Production Return': 'Production Return',
         'Production (Pending QC)': 'Production (Pending QC)',
         'Production (Failed QC)': 'Production (Failed QC)',
+        'Production (Partial QC Failed)': 'Production (Partial QC Failed)',  # NEW
         'Material Return (Damaged)': 'Material Return (Damaged)',
         'Direct Stock-In': 'Direct Stock-In'
     }
