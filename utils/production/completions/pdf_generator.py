@@ -3,7 +3,9 @@
 PDF Generator for Production Receipts
 Generates receipt PDF with production details and quality status
 
-Version: 1.0.0
+Version: 1.0.1
+Changes:
+- Fixed MST display: Changed from tax_number to registration_code
 """
 
 import logging
@@ -107,7 +109,7 @@ class ReceiptPDFGenerator:
         query = """
             SELECT 
                 c.id, c.english_name, c.local_name,
-                c.street as address, c.tax_number,
+                c.street as address, c.registration_code,
                 m.path as logo_path
             FROM warehouses w
             JOIN companies c ON w.company_id = c.id
@@ -127,7 +129,7 @@ class ReceiptPDFGenerator:
             'english_name': 'PROSTECH VIETNAM',
             'local_name': 'CÔNG TY TNHH PROSTECH VIỆT NAM',
             'address': 'Vietnam',
-            'tax_number': '',
+            'registration_code': '',
             'logo_path': None
         }
     
@@ -200,7 +202,7 @@ class ReceiptPDFGenerator:
         
         company_name = company_info.get('local_name', company_info.get('english_name', ''))
         company_address = company_info.get('address', '')
-        tax_number = company_info.get('tax_number', '')
+        tax_number = company_info.get('registration_code', '')
         
         if logo_img:
             header_data = [[

@@ -108,7 +108,7 @@ class IssuePDFGenerator:
         query = """
             SELECT 
                 c.id, c.english_name, c.local_name,
-                c.street as address, c.tax_number,
+                c.street as address, c.registration_code,
                 m.path as logo_path
             FROM warehouses w
             JOIN companies c ON w.company_id = c.id
@@ -128,7 +128,7 @@ class IssuePDFGenerator:
             'english_name': 'PROSTECH VIETNAM',
             'local_name': 'CÔNG TY TNHH PROSTECH VIỆT NAM',
             'address': 'Vietnam',
-            'tax_number': '',
+            'registration_code': '',
             'logo_path': None
         }
     
@@ -201,7 +201,7 @@ class IssuePDFGenerator:
         
         company_name = company_info.get('local_name', company_info.get('english_name', ''))
         company_address = company_info.get('address', '')
-        tax_number = company_info.get('tax_number', '')
+        tax_number = company_info.get('registration_code', '')
         
         if logo_img:
             header_data = [[
