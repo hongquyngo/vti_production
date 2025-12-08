@@ -472,6 +472,78 @@ def get_product_by_id(product_id: int) -> Optional[dict]:
         logger.error(f"Error getting product {product_id}: {e}")
         return None
 
+# ==================== Internal Companies Query ====================
+# Add this section to utils/bom/common.py after the Product Queries section
+
+def get_internal_companies() -> pd.DataFrame:
+    """
+    Get list of internal companies for BOM export selection
+    
+    Internal companies are identified by company_type.name = 'Internal'
+    
+    Returns:
+        DataFrame with columns: id, english_name, local_name, company_code, address, registration_code, logo_path
+    """
+    engine = get_db_engine()
+    
+    query = """
+        SELECT DISTINCT
+            c.id,
+            c.english_name,
+            c.local_name,
+            c.company_code,
+            c.street as address,
+            c.registration_code,
+            m.path as logo_path
+        FROM companies c
+        JOIN companies_company_types cct ON c.id = cct.companies_id
+        JOIN company_types ct ON cct.company_type_id = ct.id
+        LEFT JOIN medias m ON c.logo_id = m.id
+        WHERE ct.name = 'Internal'
+        AND c.delete_flag = 0
+        ORDER BY c.english_name
+    """
+    
+    try:
+        return pd.read_sql(query, engine)
+    except Exception as e:
+        logger.error(f"Error getting internal companies: {e}")
+        return pd.DataFrame()
+
+
+def format_company_display(english_name: str, 
+                          local_name: Optional[str] = None,
+                          company_code: Optional[str] = None) -> str:
+    """
+    Format company display string for dropdown
+    
+    Args:
+        english_name: Company English name
+        local_name: Company local name (Vietnamese)
+        company_code: Company code
+    
+    Returns:
+        Formatted string like: "PROSTECH ASIA (PTA) - CÔNG TY TNHH PROSTECH"
+    
+    Examples:
+        "PROSTECH ASIA (PTA) - CÔNG TY TNHH PROSTECH VIỆT NAM"
+        "ABC COMPANY (ABC)"
+    """
+    result = english_name
+    
+    if company_code and str(company_code).strip():
+        result += f" ({company_code})"
+    
+    if local_name and str(local_name).strip():
+        result += f" - {local_name}"
+    
+    return result
+
+
+@st.cache_data(ttl=300)
+def get_internal_companies_cached() -> pd.DataFrame:
+    """Cached version of get_internal_companies for UI performance"""
+    return get_internal_companies()
 
 # ==================== Validation Helpers ====================
 

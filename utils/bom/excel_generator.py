@@ -3,7 +3,12 @@
 Professional Excel Generator for BOM
 Creates styled Excel workbooks with multiple sheets
 
-Version: 1.0.0
+VERSION: 2.0.0
+
+CHANGES in v2.0.0:
+- Added company_id and company_info parameters
+- Company information displayed in Summary and Metadata sheets
+- User selects company at export time (BOM can be shared across entities)
 """
 
 import logging
@@ -32,6 +37,7 @@ SUBHEADER_BG = PatternFill(start_color="85929E", end_color="85929E", fill_type="
 ALT_ROW_BG = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
 TITLE_BG = PatternFill(start_color="1ABC9C", end_color="1ABC9C", fill_type="solid")
 INFO_BG = PatternFill(start_color="EBF5FB", end_color="EBF5FB", fill_type="solid")
+COMPANY_BG = PatternFill(start_color="D5F5E3", end_color="D5F5E3", fill_type="solid")
 
 # Fonts
 TITLE_FONT = Font(name='Arial', size=16, bold=True, color="FFFFFF")
@@ -41,6 +47,7 @@ LABEL_FONT = Font(name='Arial', size=10, bold=True, color="2C3E50")
 VALUE_FONT = Font(name='Arial', size=10, color="000000")
 NORMAL_FONT = Font(name='Arial', size=9, color="000000")
 SMALL_FONT = Font(name='Arial', size=8, color="7F8C8D")
+COMPANY_FONT = Font(name='Arial', size=11, bold=True, color="1E8449")
 
 # Borders
 THIN_BORDER = Border(
@@ -68,10 +75,13 @@ class BOMExcelGenerator:
     
     def __init__(self):
         self.wb = None
+        self.company_info = None
     
     def generate(self, bom_info: Dict[str, Any],
                  materials: pd.DataFrame,
-                 alternatives_data: Dict[int, pd.DataFrame]) -> bytes:
+                 alternatives_data: Dict[int, pd.DataFrame],
+                 company_id: Optional[int] = None,
+                 company_info: Optional[Dict] = None) -> bytes:
         """
         Generate Excel workbook for BOM
         
@@ -79,11 +89,14 @@ class BOMExcelGenerator:
             bom_info: BOM header information
             materials: DataFrame of BOM materials
             alternatives_data: Dict mapping detail_id to alternatives DataFrame
+            company_id: Selected company ID (for reference)
+            company_info: Pre-fetched company info from export dialog
             
         Returns:
             Excel file as bytes
         """
         self.wb = Workbook()
+        self.company_info = company_info or {}
         
         # Remove default sheet
         default_sheet = self.wb.active
@@ -103,7 +116,7 @@ class BOMExcelGenerator:
         return buffer.getvalue()
     
     def _create_summary_sheet(self, bom_info: Dict, materials: pd.DataFrame):
-        """Create summary sheet with BOM overview"""
+        """Create summary sheet with company info and BOM overview"""
         ws = self.wb.create_sheet("Summary", 0)
         
         # Set column widths
@@ -115,7 +128,32 @@ class BOMExcelGenerator:
         
         row = 1
         
-        # Title row
+        # ==================== Company Header ====================
+        if self.company_info:
+            company_name = self.company_info.get('english_name', '')
+            local_name = self.company_info.get('local_name', '')
+            
+            # Company name row
+            ws.merge_cells(f'B{row}:E{row}')
+            company_cell = ws.cell(row=row, column=2, value=company_name)
+            company_cell.font = COMPANY_FONT
+            company_cell.fill = COMPANY_BG
+            company_cell.alignment = CENTER_ALIGN
+            ws.row_dimensions[row].height = 25
+            row += 1
+            
+            # Local name row
+            if local_name:
+                ws.merge_cells(f'B{row}:E{row}')
+                local_cell = ws.cell(row=row, column=2, value=local_name)
+                local_cell.font = Font(name='Arial', size=10, italic=True, color="1E8449")
+                local_cell.fill = COMPANY_BG
+                local_cell.alignment = CENTER_ALIGN
+                row += 1
+            
+            row += 1  # Empty row after company header
+        
+        # ==================== Title Row ====================
         ws.merge_cells(f'B{row}:E{row}')
         title_cell = ws.cell(row=row, column=2, value="BILL OF MATERIALS (BOM)")
         title_cell.font = TITLE_FONT
@@ -130,7 +168,7 @@ class BOMExcelGenerator:
         ws.cell(row=row, column=2).alignment = CENTER_ALIGN
         row += 2
         
-        # BOM Information Section
+        # ==================== BOM Information Section ====================
         ws.merge_cells(f'B{row}:E{row}')
         section_cell = ws.cell(row=row, column=2, value="📋 BOM Information")
         section_cell.font = Font(size=12, bold=True, color="2C3E50")
@@ -179,7 +217,7 @@ class BOMExcelGenerator:
         
         row += 1
         
-        # Materials Summary Section
+        # ==================== Materials Summary Section ====================
         ws.merge_cells(f'B{row}:E{row}')
         section_cell = ws.cell(row=row, column=2, value="🧱 Materials Summary")
         section_cell.font = Font(size=12, bold=True, color="2C3E50")
@@ -202,32 +240,20 @@ class BOMExcelGenerator:
                     ws.cell(row=row, column=2, value=label1).font = LABEL_FONT
                     ws.cell(row=row, column=2).fill = INFO_BG
                     ws.cell(row=row, column=2).border = THIN_BORDER
-                    ws.cell(row=row, column=3, value=value1).font = VALUE_FONT
-                    ws.cell(row=row, column=3).border = THIN_BORDER
-                    
+                    ws.cell(row=row, column=3, value=value1).border = THIN_BORDER
+                
                 if label2:
                     ws.cell(row=row, column=4, value=label2).font = LABEL_FONT
                     ws.cell(row=row, column=4).fill = INFO_BG
                     ws.cell(row=row, column=4).border = THIN_BORDER
-                    ws.cell(row=row, column=5, value=value2).font = VALUE_FONT
-                    ws.cell(row=row, column=5).border = THIN_BORDER
+                    ws.cell(row=row, column=5, value=value2).border = THIN_BORDER
                 
                 row += 1
         else:
-            ws.cell(row=row, column=2, value="No materials in this BOM").font = SMALL_FONT
-            row += 1
-        
-        row += 2
-        
-        # Footer
-        ws.merge_cells(f'B{row}:E{row}')
-        footer_cell = ws.cell(row=row, column=2, 
-                              value=f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-        footer_cell.font = SMALL_FONT
-        footer_cell.alignment = CENTER_ALIGN
+            ws.cell(row=row, column=2, value="No materials in this BOM")
     
     def _create_materials_sheet(self, materials: pd.DataFrame):
-        """Create materials sheet with detailed list"""
+        """Create materials detail sheet"""
         ws = self.wb.create_sheet("Materials")
         
         if materials.empty:
@@ -360,13 +386,14 @@ class BOMExcelGenerator:
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(all_alts) + 1}"
     
     def _create_metadata_sheet(self, bom_info: Dict):
-        """Create metadata sheet with export information"""
+        """Create metadata sheet with export information including company"""
         ws = self.wb.create_sheet("Metadata")
         
         # Set column widths
         ws.column_dimensions['A'].width = 25
         ws.column_dimensions['B'].width = 50
         
+        # Build metadata including company info
         metadata = [
             ('Document Type', 'Bill of Materials (BOM)'),
             ('BOM Code', bom_info.get('bom_code', '')),
@@ -374,28 +401,52 @@ class BOMExcelGenerator:
             ('Export Date', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
             ('Export Format', 'Microsoft Excel (XLSX)'),
             ('', ''),
+        ]
+        
+        # Add company info section if available
+        if self.company_info:
+            metadata.extend([
+                ('--- Company Information ---', ''),
+                ('Company (English)', self.company_info.get('english_name', 'N/A')),
+                ('Company (Local)', self.company_info.get('local_name', '') or 'N/A'),
+                ('Address', self.company_info.get('address', '') or 'N/A'),
+                ('', ''),
+            ])
+        
+        # Continue with BOM metadata
+        metadata.extend([
+            ('--- BOM Creator ---', ''),
             ('Created By', bom_info.get('creator_name', 'Unknown')),
             ('Created Date', self._format_datetime(bom_info.get('created_date'))),
             ('Last Updated By', bom_info.get('updater_name', '') or 'N/A'),
             ('Last Updated', self._format_datetime(bom_info.get('updated_date')) or 'N/A'),
             ('', ''),
+            ('--- BOM Details ---', ''),
             ('BOM Status', bom_info.get('status', '')),
             ('BOM Version', bom_info.get('version', 1)),
             ('Effective Date', str(bom_info.get('effective_date', 'N/A'))),
             ('', ''),
+            ('--- Output ---', ''),
             ('Output Product', f"{bom_info.get('product_code', '')} - {bom_info.get('product_name', '')}"),
             ('Output Quantity', f"{bom_info.get('output_qty', 0):,.2f} {bom_info.get('uom', '')}"),
             ('Material Count', bom_info.get('material_count', 0)),
             ('Total Alternatives', bom_info.get('total_alternatives', 0)),
             ('', ''),
+            ('--- Notes ---', ''),
             ('Notes', bom_info.get('notes', '') or 'N/A'),
-        ]
+        ])
         
         for row, (label, value) in enumerate(metadata, 1):
             if label:
                 cell_label = ws.cell(row=row, column=1, value=label)
-                cell_label.font = LABEL_FONT
-                cell_label.fill = INFO_BG
+                
+                # Section headers
+                if label.startswith('---'):
+                    cell_label.font = Font(name='Arial', size=10, bold=True, color="2C3E50")
+                    cell_label.fill = PatternFill(start_color="D5DBDB", end_color="D5DBDB", fill_type="solid")
+                else:
+                    cell_label.font = LABEL_FONT
+                    cell_label.fill = INFO_BG
                 cell_label.border = THIN_BORDER
                 
                 cell_value = ws.cell(row=row, column=2, value=value)
@@ -415,7 +466,9 @@ class BOMExcelGenerator:
 
 def generate_bom_excel(bom_info: Dict[str, Any],
                        materials: pd.DataFrame,
-                       alternatives_data: Dict[int, pd.DataFrame]) -> bytes:
+                       alternatives_data: Dict[int, pd.DataFrame],
+                       company_id: Optional[int] = None,
+                       company_info: Optional[Dict] = None) -> bytes:
     """
     Convenience function to generate BOM Excel
     
@@ -423,9 +476,15 @@ def generate_bom_excel(bom_info: Dict[str, Any],
         bom_info: BOM header information
         materials: DataFrame of BOM materials
         alternatives_data: Dict mapping detail_id to alternatives DataFrame
+        company_id: Selected company ID (for reference)
+        company_info: Pre-fetched company info from export dialog
         
     Returns:
         Excel file as bytes
     """
     generator = BOMExcelGenerator()
-    return generator.generate(bom_info, materials, alternatives_data)
+    return generator.generate(
+        bom_info, materials, alternatives_data,
+        company_id=company_id,
+        company_info=company_info
+    )

@@ -2,6 +2,11 @@
 """
 BOM Export Dialog - Export to PDF or Excel
 Supports exporting single BOM with materials and alternatives
+
+VERSION 2.1 - Added Internal Company Selection
+- User can select which internal company to display on exported documents
+- Company logo and name will be shown on PDF header
+- Company info added to Excel metadata
 """
 
 import logging
@@ -17,7 +22,9 @@ from utils.bom.state import StateManager
 from utils.bom.common import (
     create_status_indicator,
     format_number,
-    format_product_display
+    format_product_display,
+    get_internal_companies_cached,
+    format_company_display
 )
 from utils.bom.pdf_generator import generate_bom_pdf
 from utils.bom.excel_generator import generate_bom_excel
@@ -27,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 @st.dialog("📥 Export BOM", width="large")
 def show_export_dialog(bom_id: int):
-    """Export BOM dialog - Choose PDF or Excel format"""
+    """Export BOM dialog - Choose company, format (PDF/Excel), and options"""
     state = StateManager()
     manager = BOMManager()
     
@@ -49,7 +56,72 @@ def show_export_dialog(bom_id: int):
         
         st.markdown("---")
         
-        # Export options
+        # ==================== Company Selection ====================
+        st.markdown("### 🏢 Select Company")
+        st.caption("Choose the internal company to display on the exported document")
+        
+        # Load internal companies
+        internal_companies = get_internal_companies_cached()
+        
+        if internal_companies.empty:
+            st.warning("⚠️ No internal companies found. Using default company info.")
+            selected_company_id = None
+            selected_company_info = None
+        else:
+            # Build company options
+            company_options = {}
+            for _, row in internal_companies.iterrows():
+                display_text = format_company_display(
+                    english_name=row['english_name'],
+                    local_name=row.get('local_name'),
+                    company_code=row.get('company_code')
+                )
+                company_options[display_text] = {
+                    'id': row['id'],
+                    'english_name': row['english_name'],
+                    'local_name': row.get('local_name'),
+                    'address': row.get('address'),
+                    'registration_code': row.get('registration_code'),
+                    'logo_path': row.get('logo_path')
+                }
+            
+            # Default selection - try to get from session state or first company
+            default_company_display = list(company_options.keys())[0]
+            
+            # Check if user has a preferred company from session
+            session_company_id = st.session_state.get('company_id')
+            if session_company_id:
+                for display, info in company_options.items():
+                    if info['id'] == session_company_id:
+                        default_company_display = display
+                        break
+            
+            selected_company = st.selectbox(
+                "Company / Công ty",
+                options=list(company_options.keys()),
+                index=list(company_options.keys()).index(default_company_display),
+                key="export_company_select"
+            )
+            
+            selected_company_info = company_options.get(selected_company)
+            selected_company_id = selected_company_info['id'] if selected_company_info else None
+            
+            # Show selected company preview
+            if selected_company_info:
+                with st.expander("👁️ Company Preview", expanded=False):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**English Name:** {selected_company_info['english_name']}")
+                        st.write(f"**Local Name:** {selected_company_info.get('local_name') or 'N/A'}")
+                        st.write(f"**MST:** {selected_company_info.get('registration_code') or 'N/A'}")
+                    with col2:
+                        st.write(f"**Address:** {selected_company_info.get('address') or 'N/A'}")
+                        has_logo = "✅ Yes" if selected_company_info.get('logo_path') else "❌ No"
+                        st.write(f"**Has Logo:** {has_logo}")
+        
+        st.markdown("---")
+        
+        # ==================== Export Options ====================
         st.markdown("### ⚙️ Export Options")
         
         col1, col2 = st.columns(2)
@@ -72,7 +144,7 @@ def show_export_dialog(bom_id: int):
         
         st.markdown("---")
         
-        # Export format selection
+        # ==================== Export Format Selection ====================
         st.markdown("### 📤 Select Export Format")
         
         col1, col2 = st.columns(2)
@@ -84,7 +156,7 @@ def show_export_dialog(bom_id: int):
                 type="primary",
                 key="export_pdf_btn"
             )
-            st.caption("Professional document format with materials and alternatives")
+            st.caption("Professional document format with company header, materials and alternatives")
         
         with col2:
             excel_selected = st.button(
@@ -93,18 +165,21 @@ def show_export_dialog(bom_id: int):
                 type="secondary",
                 key="export_excel_btn"
             )
-            st.caption("Spreadsheet format for data analysis")
+            st.caption("Spreadsheet format with company info for data analysis")
         
         st.markdown("---")
         
         # Handle export actions
         if pdf_selected:
-            _export_as_pdf(bom_id, bom_info, bom_details, manager, language, layout)
+            _export_as_pdf(bom_id, bom_info, bom_details, manager, 
+                          selected_company_id, selected_company_info,
+                          language, layout)
         
         if excel_selected:
-            _export_as_excel(bom_info, bom_details, manager)
+            _export_as_excel(bom_info, bom_details, manager, 
+                           selected_company_id, selected_company_info)
         
-        # Preview section
+        # ==================== Preview Section ====================
         st.markdown("### 👁️ BOM Preview")
         
         with st.expander("📋 BOM Information", expanded=True):
@@ -148,8 +223,10 @@ def show_export_dialog(bom_id: int):
 
 
 def _export_as_pdf(bom_id: int, bom_info: Dict, bom_details: pd.DataFrame, 
-                   manager: BOMManager, language: str = 'vi', layout: str = 'portrait'):
-    """Generate and provide PDF download"""
+                   manager: BOMManager, 
+                   company_id: Optional[int], company_info: Optional[Dict],
+                   language: str = 'vi', layout: str = 'portrait'):
+    """Generate and provide PDF download with selected company"""
     try:
         with st.spinner("Generating PDF..."):
             # Load alternatives for each material
@@ -159,21 +236,35 @@ def _export_as_pdf(bom_id: int, bom_info: Dict, bom_details: pd.DataFrame,
                 alternatives = manager.get_material_alternatives(detail_id)
                 alternatives_data[detail_id] = alternatives
             
-            # Generate PDF with language and layout
+            # Get current user name for exported_by
+            exported_by = st.session_state.get('user_name') or st.session_state.get('username') or 'Unknown'
+            
+            # Generate PDF with company_id and other options
             pdf_bytes = generate_bom_pdf(
                 bom_info=bom_info,
                 materials=bom_details,
                 alternatives_data=alternatives_data,
+                company_id=company_id,
+                company_info=company_info,
                 language=language,
-                layout=layout
+                layout=layout,
+                exported_by=exported_by
             )
             
             if pdf_bytes is None:
                 st.error("❌ Failed to generate PDF. Check logs for details.")
                 return
             
-            # Create filename
-            filename = f"BOM_{bom_info['bom_code']}_{datetime.now().strftime('%Y%m%d')}.pdf"
+            # Create filename with company code and language suffix
+            company_suffix = ""
+            if company_info and company_info.get('english_name'):
+                # Use first word or abbreviation
+                company_suffix = f"_{company_info['english_name'].split()[0]}"
+            
+            # Language suffix
+            lang_suffix = "_VN" if language == 'vi' else "_EN"
+            
+            filename = f"BOM_{bom_info['bom_code']}{company_suffix}{lang_suffix}_{datetime.now().strftime('%Y%m%d')}.pdf"
             
             # Download button
             st.success("✅ PDF generated successfully!")
@@ -192,8 +283,9 @@ def _export_as_pdf(bom_id: int, bom_info: Dict, bom_details: pd.DataFrame,
         st.error(f"❌ Error generating PDF: {str(e)}")
 
 
-def _export_as_excel(bom_info: Dict, bom_details: pd.DataFrame, manager: BOMManager):
-    """Generate and provide Excel download with professional formatting"""
+def _export_as_excel(bom_info: Dict, bom_details: pd.DataFrame, manager: BOMManager,
+                     company_id: Optional[int], company_info: Optional[Dict]):
+    """Generate and provide Excel download with company info"""
     try:
         with st.spinner("Generating Excel..."):
             # Load alternatives for each material
@@ -203,15 +295,21 @@ def _export_as_excel(bom_info: Dict, bom_details: pd.DataFrame, manager: BOMMana
                 alternatives = manager.get_material_alternatives(detail_id)
                 alternatives_data[detail_id] = alternatives
             
-            # Generate professional Excel
+            # Generate professional Excel with company info
             excel_bytes = generate_bom_excel(
                 bom_info=bom_info,
                 materials=bom_details,
-                alternatives_data=alternatives_data
+                alternatives_data=alternatives_data,
+                company_id=company_id,
+                company_info=company_info
             )
             
-            # Create filename
-            filename = f"BOM_{bom_info['bom_code']}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+            # Create filename with company code if available
+            company_suffix = ""
+            if company_info and company_info.get('english_name'):
+                company_suffix = f"_{company_info['english_name'].split()[0]}"
+            
+            filename = f"BOM_{bom_info['bom_code']}{company_suffix}_{datetime.now().strftime('%Y%m%d')}.xlsx"
             
             # Download button
             st.success("✅ Excel generated successfully!")
@@ -233,7 +331,9 @@ def _export_as_excel(bom_info: Dict, bom_details: pd.DataFrame, manager: BOMMana
 # ==================== Quick Export Functions ====================
 
 def quick_export_pdf(bom_id: int, manager: BOMManager, 
-                     language: str = 'vi', layout: str = 'landscape') -> Optional[bytes]:
+                     company_id: Optional[int] = None,
+                     language: str = 'vi', layout: str = 'landscape',
+                     exported_by: Optional[str] = None) -> Optional[bytes]:
     """
     Quick export BOM to PDF without dialog
     Returns PDF bytes or None on error
@@ -252,12 +352,18 @@ def quick_export_pdf(bom_id: int, manager: BOMManager,
             alternatives = manager.get_material_alternatives(detail_id)
             alternatives_data[detail_id] = alternatives
         
+        # Get exported_by from session if not provided
+        if not exported_by:
+            exported_by = st.session_state.get('user_name') or st.session_state.get('username')
+        
         return generate_bom_pdf(
             bom_info=bom_info,
             materials=bom_details,
             alternatives_data=alternatives_data,
+            company_id=company_id,
             language=language,
-            layout=layout
+            layout=layout,
+            exported_by=exported_by
         )
     
     except Exception as e:
@@ -265,7 +371,8 @@ def quick_export_pdf(bom_id: int, manager: BOMManager,
         return None
 
 
-def quick_export_excel(bom_id: int, manager: BOMManager) -> Optional[bytes]:
+def quick_export_excel(bom_id: int, manager: BOMManager,
+                       company_id: Optional[int] = None) -> Optional[bytes]:
     """
     Quick export BOM to Excel without dialog
     Returns Excel bytes or None on error
@@ -287,7 +394,8 @@ def quick_export_excel(bom_id: int, manager: BOMManager) -> Optional[bytes]:
         return generate_bom_excel(
             bom_info=bom_info,
             materials=bom_details,
-            alternatives_data=alternatives_data
+            alternatives_data=alternatives_data,
+            company_id=company_id
         )
     
     except Exception as e:
