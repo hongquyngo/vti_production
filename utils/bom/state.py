@@ -1,9 +1,11 @@
 # utils/bom/state.py
 """
-Centralized State Management for BOM Module - ENHANCED VERSION
+Centralized State Management for BOM Module - VERSION 2.1
 Manages all UI state, dialog states, and user interactions
-Added support for Clone dialog and optimized state handling
-FIXED: clear_cache now properly clears all_boms and filtered_boms
+
+Changes in v2.1:
+- Added DIALOG_EXPORT for export functionality
+- Maintained all existing dialog support
 """
 
 import logging
@@ -35,7 +37,8 @@ class StateManager:
     DIALOG_DELETE = 'delete'
     DIALOG_STATUS = 'status'
     DIALOG_WHERE_USED = 'where_used'
-    DIALOG_CLONE = 'clone'  # New dialog for cloning
+    DIALOG_CLONE = 'clone'
+    DIALOG_EXPORT = 'export'  # New export dialog
     
     def __init__(self):
         """Initialize state manager"""
@@ -81,6 +84,9 @@ class StateManager:
                     'step': 1,
                     'header_data': {},
                     'materials': []
+                },
+                self.DIALOG_EXPORT: {
+                    'format': None  # 'pdf' or 'excel'
                 }
             }
         
@@ -96,13 +102,13 @@ class StateManager:
         # Last action info
         if self.LAST_ACTION not in st.session_state:
             st.session_state[self.LAST_ACTION] = {
-                'type': None,  # 'create', 'update', 'delete', 'clone', etc.
+                'type': None,  # 'create', 'update', 'delete', 'clone', 'export', etc.
                 'bom_id': None,
                 'bom_code': None,
                 'timestamp': None
             }
         
-        # Cache for frequently used data (new)
+        # Cache for frequently used data
         if 'bom_cache' not in st.session_state:
             st.session_state['bom_cache'] = {
                 'products': None,
@@ -217,23 +223,18 @@ class StateManager:
             dialog_name: Name of dialog
             updates: Fields to update
         """
-        if self.DIALOG_DATA not in st.session_state:
-            st.session_state[self.DIALOG_DATA] = {}
-        
-        if dialog_name not in st.session_state[self.DIALOG_DATA]:
-            st.session_state[self.DIALOG_DATA][dialog_name] = {}
-        
-        st.session_state[self.DIALOG_DATA][dialog_name].update(updates)
-        logger.debug(f"Dialog state updated: {dialog_name} with {updates}")
+        current = self.get_dialog_state(dialog_name)
+        current.update(updates)
+        self.set_dialog_state(dialog_name, current)
     
     def clear_dialog_state(self, dialog_name: str):
         """
-        Reset dialog state to defaults
+        Clear/reset state for a specific dialog
         
         Args:
-            dialog_name: Name of dialog
+            dialog_name: Name of dialog to clear
         """
-        defaults = {
+        default_states = {
             self.DIALOG_CREATE: {
                 'step': 1,
                 'header_data': {},
@@ -260,12 +261,14 @@ class StateManager:
                 'step': 1,
                 'header_data': {},
                 'materials': []
+            },
+            self.DIALOG_EXPORT: {
+                'format': None
             }
         }
         
-        if dialog_name in defaults:
-            self.set_dialog_state(dialog_name, defaults[dialog_name])
-            logger.debug(f"Dialog state cleared: {dialog_name}")
+        if dialog_name in default_states:
+            self.set_dialog_state(dialog_name, default_states[dialog_name])
     
     # ==================== Create Dialog State ====================
     
@@ -278,11 +281,11 @@ class StateManager:
         self.update_dialog_state(self.DIALOG_CREATE, {'step': step})
     
     def get_create_header_data(self) -> Dict[str, Any]:
-        """Get header data from create wizard step 1"""
+        """Get header data from create wizard"""
         return self.get_dialog_state(self.DIALOG_CREATE).get('header_data', {})
     
     def set_create_header_data(self, data: Dict[str, Any]):
-        """Set header data for create wizard"""
+        """Set header data in create wizard"""
         self.update_dialog_state(self.DIALOG_CREATE, {'header_data': data})
     
     def get_create_materials(self) -> List[Dict[str, Any]]:
@@ -302,7 +305,7 @@ class StateManager:
             materials.pop(index)
             self.update_dialog_state(self.DIALOG_CREATE, {'materials': materials})
     
-    # ==================== Clone Dialog State (NEW) ====================
+    # ==================== Clone Dialog State ====================
     
     def get_clone_source(self) -> Optional[int]:
         """Get source BOM ID for cloning"""
@@ -372,6 +375,16 @@ class StateManager:
         """Set where used search results"""
         self.update_dialog_state(self.DIALOG_WHERE_USED, {'results': results})
     
+    # ==================== Export Dialog State ====================
+    
+    def get_export_format(self) -> Optional[str]:
+        """Get selected export format"""
+        return self.get_dialog_state(self.DIALOG_EXPORT).get('format')
+    
+    def set_export_format(self, format_type: str):
+        """Set export format ('pdf' or 'excel')"""
+        self.update_dialog_state(self.DIALOG_EXPORT, {'format': format_type})
+    
     # ==================== UI Flags Management ====================
     
     def set_loading(self, loading: bool = True):
@@ -436,7 +449,7 @@ class StateManager:
         Record last action for undo/history
         
         Args:
-            action_type: Type of action (create, update, delete, clone, etc.)
+            action_type: Type of action (create, update, delete, clone, export, etc.)
             bom_id: BOM ID affected
             bom_code: BOM code affected
         """
@@ -452,7 +465,7 @@ class StateManager:
         """Get last action info"""
         return st.session_state.get(self.LAST_ACTION, {})
     
-    # ==================== Cache Management (FIXED) ====================
+    # ==================== Cache Management ====================
     
     def get_cached_products(self):
         """Get cached products list"""
@@ -477,7 +490,7 @@ class StateManager:
         st.session_state['bom_cache']['products_timestamp'] = datetime.now()
     
     def clear_cache(self):
-        """Clear all cached data including BOM lists - FIXED VERSION"""
+        """Clear all cached data including BOM lists"""
         # Clear products cache
         if 'bom_cache' in st.session_state:
             st.session_state['bom_cache'] = {
@@ -486,7 +499,7 @@ class StateManager:
                 'cache_ttl': 300
             }
         
-        # FIXED: Also clear BOM list caches
+        # Clear BOM list caches
         if 'all_boms' in st.session_state:
             del st.session_state['all_boms']
         

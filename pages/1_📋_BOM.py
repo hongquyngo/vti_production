@@ -36,6 +36,7 @@ from utils.bom.dialogs.delete import show_delete_dialog
 from utils.bom.dialogs.status import show_status_dialog
 from utils.bom.dialogs.where_used import show_where_used_dialog
 from utils.bom.dialogs.clone import show_clone_dialog
+from utils.bom.dialogs.export import show_export_dialog
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +308,8 @@ def render_bom_table():
         # But for button display, we can use a simplified check
         edit_level = _get_simplified_edit_level(selected_bom)
         
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        # First row of buttons
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             if st.button("👁️ View", use_container_width=True, key=f"view_btn_{selected_bom_id}"):
@@ -335,17 +337,25 @@ def render_bom_table():
                 st.rerun()
         
         with col4:
+            if st.button("📥 Export", use_container_width=True, key=f"export_btn_{selected_bom_id}"):
+                state.open_dialog(state.DIALOG_EXPORT, selected_bom_id)
+                st.rerun()
+        
+        # Second row of buttons
+        col5, col6, col7, col8 = st.columns(4)
+        
+        with col5:
             if st.button("📊 Status", use_container_width=True, key=f"status_btn_{selected_bom_id}"):
                 state.open_dialog(state.DIALOG_STATUS, selected_bom_id)
                 st.rerun()
         
-        with col5:
+        with col6:
             if st.button("🔍 Where Used", use_container_width=True, key=f"where_btn_{selected_bom_id}"):
                 state.set_where_used_product(selected_bom['product_id'])
                 state.open_dialog(state.DIALOG_WHERE_USED)
                 st.rerun()
         
-        with col6:
+        with col7:
             # Delete only for non-active BOMs with no usage
             disabled = selected_bom['status'] == 'ACTIVE' or selected_bom['usage_count'] > 0
             if st.button(
@@ -358,6 +368,9 @@ def render_bom_table():
             ):
                 state.open_dialog(state.DIALOG_DELETE, selected_bom_id)
                 st.rerun()
+        
+        with col8:
+            pass  # Spacer for alignment
 
 
 def _get_simplified_edit_level(bom_row: pd.Series) -> int:
@@ -443,6 +456,9 @@ def render_active_dialog():
         
         elif open_dialog == state.DIALOG_CLONE and bom_id:
             show_clone_dialog(bom_id)
+        
+        elif open_dialog == state.DIALOG_EXPORT and bom_id:
+            show_export_dialog(bom_id)
     
     except Exception as e:
         logger.error(f"Error rendering dialog {open_dialog}: {e}")

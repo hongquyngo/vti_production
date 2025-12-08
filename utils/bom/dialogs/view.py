@@ -1,7 +1,10 @@
 # utils/bom/dialogs/view.py
 """
-View BOM Details Dialog with Alternatives Display
+View BOM Details Dialog with Alternatives Display - VERSION 2.1
 Read-only display of BOM information with alternatives
+
+Changes in v2.1:
+- Added Export button in action buttons
 """
 
 import logging
@@ -72,7 +75,7 @@ def show_view_dialog(bom_id: int):
 
 def _render_action_buttons(bom_id: int, bom_info: dict, state: StateManager):
     """Render action buttons at top of dialog"""
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         if st.button("✏️ Edit", use_container_width=True, key=f"view_edit_{bom_id}"):
@@ -81,22 +84,28 @@ def _render_action_buttons(bom_id: int, bom_info: dict, state: StateManager):
             st.rerun()
     
     with col2:
-        if st.button("🔄 Change Status", use_container_width=True, key=f"view_status_{bom_id}"):
+        if st.button("🔄 Clone", use_container_width=True, key=f"view_clone_{bom_id}"):
+            state.close_dialog()
+            state.open_dialog(state.DIALOG_CLONE, bom_id)
+            st.rerun()
+    
+    with col3:
+        if st.button("📥 Export", use_container_width=True, key=f"view_export_{bom_id}"):
+            state.close_dialog()
+            state.open_dialog(state.DIALOG_EXPORT, bom_id)
+            st.rerun()
+    
+    with col4:
+        if st.button("📊 Status", use_container_width=True, key=f"view_status_{bom_id}"):
             state.close_dialog()
             state.open_dialog(state.DIALOG_STATUS, bom_id)
             st.rerun()
     
-    with col3:
+    with col5:
         if st.button("🔍 Where Used", use_container_width=True, key=f"view_whereused_{bom_id}"):
             state.set_where_used_product(bom_info['product_id'])
             state.close_dialog()
             state.open_dialog(state.DIALOG_WHERE_USED)
-            st.rerun()
-    
-    with col4:
-        if st.button("🗑️ Delete", use_container_width=True, type="secondary", key=f"view_delete_{bom_id}"):
-            state.close_dialog()
-            state.open_dialog(state.DIALOG_DELETE, bom_id)
             st.rerun()
 
 
