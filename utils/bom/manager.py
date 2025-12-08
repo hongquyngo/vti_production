@@ -1,8 +1,11 @@
 # utils/bom/manager.py
 """
-Bill of Materials (BOM) Management - FIXED V2 FOR MYSQL
-Complete CRUD operations with proper type handling for MySQL
-Fixed numpy.int64 and parameter binding issues
+Bill of Materials (BOM) Management - VERSION 2.1
+Complete CRUD operations with creator info support
+
+Changes in v2.1:
+- Added creator info (created_by, creator_name) to all queries
+- Support for employee lookup via users table
 """
 
 import logging
@@ -63,7 +66,7 @@ class BOMManager:
     def get_boms(self, bom_type: Optional[str] = None,
                  status: Optional[str] = None,
                  search: Optional[str] = None) -> pd.DataFrame:
-        """Get BOMs with filters and full product info"""
+        """Get BOMs with filters, full product info and creator info"""
         query = """
             SELECT 
                 h.id,
@@ -88,11 +91,21 @@ class BOMManager:
                      AND mo.delete_flag = 0), 
                     0
                 ) as usage_count,
-                h.created_date
+                h.created_by,
+                h.created_date,
+                h.updated_by,
+                h.updated_date,
+                COALESCE(
+                    CONCAT(e.first_name, ' ', e.last_name),
+                    u.username,
+                    'Unknown'
+                ) as creator_name
             FROM bom_headers h
             JOIN products p ON h.product_id = p.id
             LEFT JOIN brands b ON p.brand_id = b.id
             LEFT JOIN bom_details d ON d.bom_header_id = h.id
+            LEFT JOIN users u ON h.created_by = u.id
+            LEFT JOIN employees e ON u.employee_id = e.id
             WHERE h.delete_flag = 0
         """
         
@@ -119,7 +132,8 @@ class BOMManager:
             GROUP BY h.id, h.bom_code, h.bom_name, h.bom_type, h.product_id,
                      p.name, p.pt_code, p.package_size, b.brand_name,
                      h.output_qty, h.uom, h.status, h.version, 
-                     h.effective_date, h.notes, h.created_date
+                     h.effective_date, h.notes, h.created_by, h.created_date,
+                     h.updated_by, h.updated_date, e.first_name, e.last_name, u.username
             ORDER BY h.created_date DESC
         """
         
@@ -133,7 +147,7 @@ class BOMManager:
             raise BOMException(f"Failed to get BOMs: {str(e)}")
     
     def get_bom_info(self, bom_id: int) -> Optional[dict]:
-        """Get BOM header information"""
+        """Get BOM header information with creator info"""
         # Convert numpy types to native Python types
         bom_id = convert_to_native(bom_id)
         
@@ -152,6 +166,20 @@ class BOMManager:
                 h.version,
                 h.effective_date,
                 h.notes,
+                h.created_by,
+                h.created_date,
+                h.updated_by,
+                h.updated_date,
+                COALESCE(
+                    CONCAT(e.first_name, ' ', e.last_name),
+                    u.username,
+                    'Unknown'
+                ) as creator_name,
+                COALESCE(
+                    CONCAT(e2.first_name, ' ', e2.last_name),
+                    u2.username,
+                    ''
+                ) as updater_name,
                 COUNT(DISTINCT d.id) as material_count,
                 COALESCE(SUM(a.id IS NOT NULL), 0) as total_alternatives,
                 COALESCE(
@@ -171,10 +199,17 @@ class BOMManager:
             JOIN products p ON h.product_id = p.id
             LEFT JOIN bom_details d ON d.bom_header_id = h.id
             LEFT JOIN bom_material_alternatives a ON a.bom_detail_id = d.id
+            LEFT JOIN users u ON h.created_by = u.id
+            LEFT JOIN employees e ON u.employee_id = e.id
+            LEFT JOIN users u2 ON h.updated_by = u2.id
+            LEFT JOIN employees e2 ON u2.employee_id = e2.id
             WHERE h.id = %s AND h.delete_flag = 0
             GROUP BY h.id, h.bom_code, h.bom_name, h.bom_type, 
                      h.product_id, p.name, p.pt_code, h.output_qty,
-                     h.uom, h.status, h.version, h.effective_date, h.notes
+                     h.uom, h.status, h.version, h.effective_date, h.notes,
+                     h.created_by, h.created_date, h.updated_by, h.updated_date,
+                     e.first_name, e.last_name, u.username,
+                     e2.first_name, e2.last_name, u2.username
         """
         
         try:
@@ -205,17 +240,23 @@ class BOMManager:
                     (SELECT SUM(inv.remain) 
                      FROM inventory_histories inv 
                      WHERE inv.product_id = d.material_id 
+                     AND inv.remain > 0
                      AND inv.delete_flag = 0), 
                     0
                 ) as current_stock,
-                COUNT(DISTINCT a.id) as alternatives_count
+                (SELECT COUNT(*) 
+                 FROM bom_material_alternatives alt 
+                 WHERE alt.bom_detail_id = d.id) as alternatives_count
             FROM bom_details d
             JOIN products p ON d.material_id = p.id
-            LEFT JOIN bom_material_alternatives a ON a.bom_detail_id = d.id
             WHERE d.bom_header_id = %s
-            GROUP BY d.id, d.material_id, p.name, p.pt_code, 
-                     d.material_type, d.quantity, d.uom, d.scrap_rate
-            ORDER BY d.material_type, p.pt_code
+            ORDER BY 
+                CASE d.material_type 
+                    WHEN 'RAW_MATERIAL' THEN 1 
+                    WHEN 'PACKAGING' THEN 2 
+                    ELSE 3 
+                END,
+                d.id
         """
         
         try:
@@ -225,13 +266,13 @@ class BOMManager:
             raise BOMException(f"Failed to get BOM details: {str(e)}")
     
     def get_material_alternatives(self, detail_id: int) -> pd.DataFrame:
-        """Get alternatives for a BOM material"""
-        # Convert numpy types to native Python types
+        """Get alternatives for a specific material"""
         detail_id = convert_to_native(detail_id)
         
         query = """
             SELECT 
                 a.id,
+                a.bom_detail_id,
                 a.alternative_material_id as material_id,
                 p.name as material_name,
                 p.pt_code as material_code,
@@ -246,181 +287,46 @@ class BOMManager:
                     (SELECT SUM(inv.remain) 
                      FROM inventory_histories inv 
                      WHERE inv.product_id = a.alternative_material_id 
+                     AND inv.remain > 0
                      AND inv.delete_flag = 0), 
                     0
                 ) as current_stock
             FROM bom_material_alternatives a
             JOIN products p ON a.alternative_material_id = p.id
             WHERE a.bom_detail_id = %s
-            ORDER BY a.priority, p.pt_code
+            ORDER BY a.priority
         """
         
         try:
             return pd.read_sql(query, self.engine, params=(detail_id,))
         except Exception as e:
-            logger.error(f"Error getting material alternatives: {e}")
-            return pd.DataFrame()
-    
-    def get_where_used(self, product_id: int) -> pd.DataFrame:
-        """Get BOMs where product is used (as primary or alternative)"""
-        # Convert numpy types to native Python types
-        product_id = convert_to_native(product_id)
-        
-        query = """
-            -- Primary material usage
-            SELECT 
-                h.id as bom_id,
-                h.bom_code,
-                h.bom_name,
-                h.bom_type,
-                h.status as bom_status,
-                p.name as output_product_name,
-                d.material_type,
-                d.quantity,
-                p2.uom,
-                d.scrap_rate,
-                'PRIMARY' as usage_type
-            FROM bom_details d
-            JOIN bom_headers h ON d.bom_header_id = h.id
-            JOIN products p ON h.product_id = p.id
-            JOIN products p2 ON d.material_id = p2.id
-            WHERE d.material_id = %s
-            AND h.delete_flag = 0
-            
-            UNION ALL
-            
-            -- Alternative material usage
-            SELECT 
-                h.id as bom_id,
-                h.bom_code,
-                h.bom_name,
-                h.bom_type,
-                h.status as bom_status,
-                p.name as output_product_name,
-                d.material_type,
-                a.quantity,
-                p2.uom,
-                a.scrap_rate,
-                CONCAT('ALTERNATIVE P', a.priority) as usage_type
-            FROM bom_material_alternatives a
-            JOIN bom_details d ON a.bom_detail_id = d.id
-            JOIN bom_headers h ON d.bom_header_id = h.id
-            JOIN products p ON h.product_id = p.id
-            JOIN products p2 ON a.alternative_material_id = p2.id
-            WHERE a.alternative_material_id = %s
-            AND h.delete_flag = 0
-            
-            ORDER BY bom_code
-        """
-        
-        try:
-            return pd.read_sql(query, self.engine, params=(product_id, product_id))
-        except Exception as e:
-            logger.error(f"Error getting where used: {e}")
-            raise BOMException(f"Failed to get where used: {str(e)}")
-    
-    def get_bom_complete_data(self, bom_id: int) -> Dict:
-        """Get complete BOM data for cloning"""
-        try:
-            # Convert numpy types
-            bom_id = convert_to_native(bom_id)
-            
-            # Get header info
-            bom_info = self.get_bom_info(bom_id)
-            if not bom_info:
-                raise BOMNotFoundError(f"BOM with ID {bom_id} not found")
-            
-            # Get materials
-            bom_details = self.get_bom_details(bom_id)
-            
-            # Build materials list with alternatives
-            materials = []
-            for _, detail in bom_details.iterrows():
-                # Get alternatives for this material
-                detail_id = convert_to_native(detail['id'])
-                alternatives = self.get_material_alternatives(detail_id)
-                
-                alt_list = []
-                for _, alt in alternatives.iterrows():
-                    alt_list.append({
-                        'alternative_material_id': convert_to_native(alt['material_id']),
-                        'quantity': float(alt['quantity']),
-                        'uom': str(alt['uom']),
-                        'scrap_rate': float(alt['scrap_rate']),
-                        'priority': convert_to_native(alt['priority']),
-                        'is_active': convert_to_native(alt['is_active']),
-                        'notes': str(alt.get('notes', ''))
-                    })
-                
-                materials.append({
-                    'material_id': convert_to_native(detail['material_id']),
-                    'material_type': str(detail['material_type']),
-                    'quantity': float(detail['quantity']),
-                    'uom': str(detail['uom']),
-                    'scrap_rate': float(detail['scrap_rate']),
-                    'alternatives': alt_list
-                })
-            
-            return {
-                'header': bom_info,
-                'materials': materials
-            }
-        
-        except Exception as e:
-            logger.error(f"Error getting complete BOM data: {e}")
-            raise BOMException(f"Failed to get complete BOM data: {str(e)}")
+            logger.error(f"Error getting alternatives: {e}")
+            raise BOMException(f"Failed to get alternatives: {str(e)}")
     
     # ==================== CREATE Operations ====================
     
-    def generate_bom_code(self) -> str:
-        """Generate next BOM code with format BOM-YYYYMM-XXX"""
-        try:
-            current_month = datetime.now().strftime('%Y%m')
-            
-            # Get max code for current month
-            query = """
-                SELECT MAX(CAST(SUBSTRING(bom_code, 13, 3) AS UNSIGNED)) as max_seq
-                FROM bom_headers
-                WHERE bom_code LIKE %s
-            """
-            
-            pattern = f'BOM-{current_month}-%'
-            result = pd.read_sql(query, self.engine, params=(pattern,))
-            
-            max_seq = result['max_seq'].iloc[0] if not pd.isna(result['max_seq'].iloc[0]) else 0
-            next_seq = int(max_seq) + 1
-            
-            return f"BOM-{current_month}-{next_seq:03d}"
-        
-        except Exception as e:
-            logger.error(f"Error generating BOM code: {e}")
-            # Fallback to timestamp-based code
-            return f"BOM-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    
-    def create_bom(self, bom_data: Dict) -> str:
+    def create_bom(self, bom_data: Dict, materials: List[Dict], user_id: int) -> int:
         """Create new BOM with materials and alternatives"""
         conn = self.engine.connect()
         trans = conn.begin()
         
         try:
-            # Generate BOM code
-            bom_code = self.generate_bom_code()
-            
-            # Convert all numpy types in bom_data
+            user_id = convert_to_native(user_id)
             product_id = convert_to_native(bom_data['product_id'])
-            output_qty = float(bom_data['output_qty'])
-            created_by = convert_to_native(bom_data['created_by'])
             
-            # Insert BOM header
+            # Generate BOM code
+            bom_code = self._generate_bom_code(conn, bom_data['bom_type'])
+            
+            # Insert header
             header_query = text("""
                 INSERT INTO bom_headers (
-                    bom_code, bom_name, bom_type, product_id,
-                    output_qty, uom, status, version,
-                    effective_date, notes, created_by, created_date
+                    bom_code, bom_name, bom_type, product_id, output_qty,
+                    uom, status, version, effective_date, notes,
+                    created_by, created_date
                 ) VALUES (
-                    :bom_code, :bom_name, :bom_type, :product_id,
-                    :output_qty, :uom, 'DRAFT', 1,
-                    :effective_date, :notes, :created_by, NOW()
+                    :bom_code, :bom_name, :bom_type, :product_id, :output_qty,
+                    :uom, :status, :version, :effective_date, :notes,
+                    :created_by, NOW()
                 )
             """)
             
@@ -429,25 +335,27 @@ class BOMManager:
                 'bom_name': str(bom_data['bom_name']),
                 'bom_type': str(bom_data['bom_type']),
                 'product_id': product_id,
-                'output_qty': output_qty,
+                'output_qty': float(bom_data['output_qty']),
                 'uom': str(bom_data['uom']),
-                'effective_date': bom_data.get('effective_date', date.today()),
-                'notes': str(bom_data.get('notes', '')),
-                'created_by': created_by
+                'status': str(bom_data.get('status', 'DRAFT')),
+                'version': 1,
+                'effective_date': bom_data.get('effective_date'),
+                'notes': str(bom_data.get('notes', '') or ''),
+                'created_by': user_id
             })
             
             bom_id = result.lastrowid
             
-            # Insert materials and alternatives
-            for material in bom_data['materials']:
+            # Insert materials
+            for material in materials:
                 material_id = convert_to_native(material['material_id'])
                 
                 # Get UOM from product
-                uom_query = "SELECT uom FROM products WHERE id = %s"
-                uom_result = pd.read_sql(uom_query, self.engine, params=(material_id,))
-                material_uom = uom_result['uom'].iloc[0] if not uom_result.empty else material.get('uom', 'PCS')
+                uom_query = text("SELECT uom FROM products WHERE id = :material_id")
+                uom_result = conn.execute(uom_query, {'material_id': material_id})
+                uom_row = uom_result.fetchone()
+                material_uom = uom_row[0] if uom_row else 'PCS'
                 
-                # Insert material
                 detail_query = text("""
                     INSERT INTO bom_details (
                         bom_header_id, material_id, material_type,
@@ -470,17 +378,19 @@ class BOMManager:
                 detail_id = detail_result.lastrowid
                 
                 # Insert alternatives if any
-                for alt in material.get('alternatives', []):
-                    alt_material_id = convert_to_native(alt['alternative_material_id'])
+                alternatives = material.get('alternatives', [])
+                for alt in alternatives:
+                    alt_material_id = convert_to_native(alt['material_id'])
                     
                     # Get UOM for alternative
-                    alt_uom_result = pd.read_sql(uom_query, self.engine, params=(alt_material_id,))
-                    alt_uom = alt_uom_result['uom'].iloc[0] if not alt_uom_result.empty else alt.get('uom', 'PCS')
+                    alt_uom_result = conn.execute(uom_query, {'material_id': alt_material_id})
+                    alt_uom_row = alt_uom_result.fetchone()
+                    alt_uom = alt_uom_row[0] if alt_uom_row else 'PCS'
                     
                     alt_query = text("""
                         INSERT INTO bom_material_alternatives (
                             bom_detail_id, alternative_material_id,
-                            material_type, quantity, uom, scrap_rate, 
+                            material_type, quantity, uom, scrap_rate,
                             priority, is_active, notes, created_date
                         ) VALUES (
                             :bom_detail_id, :alternative_material_id,
@@ -497,13 +407,13 @@ class BOMManager:
                         'uom': str(alt_uom),
                         'scrap_rate': float(alt.get('scrap_rate', 0)),
                         'priority': convert_to_native(alt.get('priority', 1)),
-                        'is_active': convert_to_native(alt.get('is_active', 1)),
-                        'notes': str(alt.get('notes', ''))
+                        'is_active': 1,
+                        'notes': str(alt.get('notes', '') or '')
                     })
             
             trans.commit()
-            logger.info(f"BOM created successfully: {bom_code}")
-            return bom_code
+            logger.info(f"BOM created: {bom_code} (ID: {bom_id})")
+            return bom_id
         
         except Exception as e:
             trans.rollback()
@@ -512,72 +422,31 @@ class BOMManager:
         finally:
             conn.close()
     
-    def clone_bom(self, source_bom_id: int, clone_data: Dict) -> str:
-        """Clone existing BOM with new header information"""
-        try:
-            # Convert numpy types
-            source_bom_id = convert_to_native(source_bom_id)
-            
-            # Get complete source BOM data
-            source_data = self.get_bom_complete_data(source_bom_id)
-            
-            # Prepare new BOM data
-            new_bom_data = {
-                'bom_name': str(clone_data.get('bom_name', f"{source_data['header']['bom_name']} - Copy")),
-                'bom_type': str(clone_data.get('bom_type', source_data['header']['bom_type'])),
-                'product_id': convert_to_native(clone_data.get('product_id', source_data['header']['product_id'])),
-                'output_qty': float(clone_data.get('output_qty', source_data['header']['output_qty'])),
-                'uom': str(clone_data.get('uom', source_data['header']['uom'])),
-                'effective_date': clone_data.get('effective_date', date.today()),
-                'notes': str(clone_data.get('notes', f"Cloned from {source_data['header']['bom_code']}")),
-                'materials': source_data['materials'],
-                'created_by': convert_to_native(clone_data['created_by'])
-            }
-            
-            # Create the new BOM
-            new_bom_code = self.create_bom(new_bom_data)
-            
-            logger.info(f"BOM cloned successfully: {source_data['header']['bom_code']} → {new_bom_code}")
-            return new_bom_code
+    def _generate_bom_code(self, conn, bom_type: str) -> str:
+        """Generate unique BOM code"""
+        today = date.today()
+        prefix = f"BOM-{today.strftime('%Y%m')}-"
         
-        except Exception as e:
-            logger.error(f"Error cloning BOM: {e}")
-            raise BOMException(f"Failed to clone BOM: {str(e)}")
+        query = text("""
+            SELECT bom_code FROM bom_headers 
+            WHERE bom_code LIKE :prefix
+            ORDER BY bom_code DESC 
+            LIMIT 1
+        """)
+        
+        result = conn.execute(query, {'prefix': f"{prefix}%"})
+        row = result.fetchone()
+        
+        if row:
+            last_code = row[0]
+            last_num = int(last_code.split('-')[-1])
+            new_num = last_num + 1
+        else:
+            new_num = 1
+        
+        return f"{prefix}{new_num:03d}"
     
     # ==================== UPDATE Operations ====================
-    
-    def update_bom_header(self, bom_id: int, update_data: Dict):
-        """Update BOM header information"""
-        try:
-            bom_id = convert_to_native(bom_id)
-            
-            query = text("""
-                UPDATE bom_headers
-                SET bom_name = :bom_name,
-                    output_qty = :output_qty,
-                    effective_date = :effective_date,
-                    notes = :notes,
-                    updated_by = :updated_by,
-                    updated_date = NOW()
-                WHERE id = :bom_id
-            """)
-            
-            with self.engine.connect() as conn:
-                conn.execute(query, {
-                    'bom_id': bom_id,
-                    'bom_name': str(update_data['bom_name']),
-                    'output_qty': float(update_data['output_qty']),
-                    'effective_date': update_data['effective_date'],
-                    'notes': str(update_data.get('notes', '')),
-                    'updated_by': convert_to_native(update_data['updated_by'])
-                })
-                conn.commit()
-            
-            logger.info(f"BOM header updated: {bom_id}")
-        
-        except Exception as e:
-            logger.error(f"Error updating BOM header: {e}")
-            raise BOMException(f"Failed to update BOM header: {str(e)}")
     
     def update_bom_status(self, bom_id: int, new_status: str, user_id: int):
         """Update BOM status"""
@@ -588,7 +457,7 @@ class BOMManager:
             query = text("""
                 UPDATE bom_headers
                 SET status = :status,
-                    updated_by = :updated_by,
+                    updated_by = :user_id,
                     updated_date = NOW()
                 WHERE id = :bom_id
             """)
@@ -597,17 +466,49 @@ class BOMManager:
                 conn.execute(query, {
                     'bom_id': bom_id,
                     'status': str(new_status),
-                    'updated_by': user_id
+                    'user_id': user_id
                 })
                 conn.commit()
             
-            logger.info(f"BOM status updated: {bom_id} → {new_status}")
+            logger.info(f"BOM status updated: {bom_id} -> {new_status}")
         
         except Exception as e:
             logger.error(f"Error updating BOM status: {e}")
-            raise BOMException(f"Failed to update BOM status: {str(e)}")
+            raise BOMException(f"Failed to update status: {str(e)}")
     
-    def update_bom_material(self, detail_id: int, update_data: Dict):
+    def update_bom_header(self, bom_id: int, update_data: Dict, user_id: int):
+        """Update BOM header fields"""
+        try:
+            bom_id = convert_to_native(bom_id)
+            user_id = convert_to_native(user_id)
+            
+            query = text("""
+                UPDATE bom_headers
+                SET bom_name = :bom_name,
+                    effective_date = :effective_date,
+                    notes = :notes,
+                    updated_by = :user_id,
+                    updated_date = NOW()
+                WHERE id = :bom_id
+            """)
+            
+            with self.engine.connect() as conn:
+                conn.execute(query, {
+                    'bom_id': bom_id,
+                    'bom_name': str(update_data['bom_name']),
+                    'effective_date': update_data.get('effective_date'),
+                    'notes': str(update_data.get('notes', '') or ''),
+                    'user_id': user_id
+                })
+                conn.commit()
+            
+            logger.info(f"BOM header updated: {bom_id}")
+        
+        except Exception as e:
+            logger.error(f"Error updating BOM header: {e}")
+            raise BOMException(f"Failed to update BOM: {str(e)}")
+    
+    def update_bom_material(self, detail_id: int, update_data: Dict, user_id: int):
         """Update BOM material"""
         try:
             detail_id = convert_to_native(detail_id)
@@ -735,6 +636,38 @@ class BOMManager:
             logger.error(f"Error adding alternative: {e}")
             raise BOMException(f"Failed to add alternative: {str(e)}")
     
+    def update_material_alternative(self, alternative_id: int, update_data: Dict):
+        """Update alternative material"""
+        try:
+            alternative_id = convert_to_native(alternative_id)
+            
+            query = text("""
+                UPDATE bom_material_alternatives
+                SET quantity = :quantity,
+                    scrap_rate = :scrap_rate,
+                    priority = :priority,
+                    is_active = :is_active,
+                    notes = :notes
+                WHERE id = :alternative_id
+            """)
+            
+            with self.engine.connect() as conn:
+                conn.execute(query, {
+                    'alternative_id': alternative_id,
+                    'quantity': float(update_data['quantity']),
+                    'scrap_rate': float(update_data['scrap_rate']),
+                    'priority': convert_to_native(update_data['priority']),
+                    'is_active': convert_to_native(update_data.get('is_active', 1)),
+                    'notes': str(update_data.get('notes', ''))
+                })
+                conn.commit()
+            
+            logger.info(f"Alternative updated: {alternative_id}")
+        
+        except Exception as e:
+            logger.error(f"Error updating alternative: {e}")
+            raise BOMException(f"Failed to update alternative: {str(e)}")
+    
     # ==================== DELETE Operations ====================
     
     def delete_bom(self, bom_id: int, user_id: int):
@@ -815,3 +748,111 @@ class BOMManager:
         except Exception as e:
             logger.error(f"Error deleting alternative: {e}")
             raise BOMException(f"Failed to delete alternative: {str(e)}")
+    
+    # ==================== CLONE Operations ====================
+    
+    def clone_bom(self, source_bom_id: int, new_bom_data: Dict, 
+                  materials: List[Dict], user_id: int) -> int:
+        """Clone existing BOM with modifications"""
+        conn = self.engine.connect()
+        trans = conn.begin()
+        
+        try:
+            user_id = convert_to_native(user_id)
+            source_bom_id = convert_to_native(source_bom_id)
+            product_id = convert_to_native(new_bom_data['product_id'])
+            
+            # Generate new BOM code
+            bom_code = self._generate_bom_code(conn, new_bom_data['bom_type'])
+            
+            # Insert new header
+            header_query = text("""
+                INSERT INTO bom_headers (
+                    bom_code, bom_name, bom_type, product_id, output_qty,
+                    uom, status, version, effective_date, notes,
+                    created_by, created_date
+                ) VALUES (
+                    :bom_code, :bom_name, :bom_type, :product_id, :output_qty,
+                    :uom, 'DRAFT', 1, :effective_date, :notes,
+                    :created_by, NOW()
+                )
+            """)
+            
+            result = conn.execute(header_query, {
+                'bom_code': bom_code,
+                'bom_name': str(new_bom_data['bom_name']),
+                'bom_type': str(new_bom_data['bom_type']),
+                'product_id': product_id,
+                'output_qty': float(new_bom_data['output_qty']),
+                'uom': str(new_bom_data['uom']),
+                'effective_date': new_bom_data.get('effective_date'),
+                'notes': str(new_bom_data.get('notes', '') or ''),
+                'created_by': user_id
+            })
+            
+            new_bom_id = result.lastrowid
+            
+            # Clone materials
+            for material in materials:
+                material_id = convert_to_native(material['material_id'])
+                
+                detail_query = text("""
+                    INSERT INTO bom_details (
+                        bom_header_id, material_id, material_type,
+                        quantity, uom, scrap_rate
+                    ) VALUES (
+                        :bom_header_id, :material_id, :material_type,
+                        :quantity, :uom, :scrap_rate
+                    )
+                """)
+                
+                detail_result = conn.execute(detail_query, {
+                    'bom_header_id': new_bom_id,
+                    'material_id': material_id,
+                    'material_type': str(material['material_type']),
+                    'quantity': float(material['quantity']),
+                    'uom': str(material['uom']),
+                    'scrap_rate': float(material.get('scrap_rate', 0))
+                })
+                
+                new_detail_id = detail_result.lastrowid
+                
+                # Clone alternatives
+                alternatives = material.get('alternatives', [])
+                for alt in alternatives:
+                    alt_material_id = convert_to_native(alt['material_id'])
+                    
+                    alt_query = text("""
+                        INSERT INTO bom_material_alternatives (
+                            bom_detail_id, alternative_material_id,
+                            material_type, quantity, uom, scrap_rate,
+                            priority, is_active, notes, created_date
+                        ) VALUES (
+                            :bom_detail_id, :alternative_material_id,
+                            :material_type, :quantity, :uom, :scrap_rate,
+                            :priority, :is_active, :notes, NOW()
+                        )
+                    """)
+                    
+                    conn.execute(alt_query, {
+                        'bom_detail_id': new_detail_id,
+                        'alternative_material_id': alt_material_id,
+                        'material_type': str(alt.get('material_type', material['material_type'])),
+                        'quantity': float(alt['quantity']),
+                        'uom': str(alt['uom']),
+                        'scrap_rate': float(alt.get('scrap_rate', 0)),
+                        'priority': convert_to_native(alt.get('priority', 1)),
+                        'is_active': convert_to_native(alt.get('is_active', 1)),
+                        'notes': str(alt.get('notes', '') or '')
+                    })
+            
+            trans.commit()
+            logger.info(f"BOM cloned: {source_bom_id} -> {new_bom_id} ({bom_code})")
+            return new_bom_id
+        
+        except Exception as e:
+            trans.rollback()
+            logger.error(f"Error cloning BOM: {e}")
+            raise BOMException(f"Failed to clone BOM: {str(e)}")
+        finally:
+            conn.close()

@@ -254,11 +254,20 @@ def render_bom_table():
         lambda x: f"🏭 {int(x)}" if x > 0 else "-"
     )
     
+    # Creator display - format date nicely
+    display_df['creator_display'] = display_df.apply(
+        lambda row: f"{row.get('creator_name', 'Unknown')}", 
+        axis=1
+    )
+    display_df['created_display'] = display_df['created_date'].apply(
+        lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else '-'
+    )
+    
     # Select columns to display
     display_columns = [
         'bom_code', 'bom_name', 'bom_type', 'product_display',
         'output_display', 'status_display', 'materials_display', 
-        'usage_display', 'effective_date'
+        'usage_display', 'creator_display', 'created_display'
     ]
     
     # Column configuration
@@ -271,7 +280,8 @@ def render_bom_table():
         "status_display": st.column_config.TextColumn("Status", width="small"),
         "materials_display": st.column_config.TextColumn("Materials", width="small"),
         "usage_display": st.column_config.TextColumn("Usage", width="small"),
-        "effective_date": st.column_config.DateColumn("Effective", width="small"),
+        "creator_display": st.column_config.TextColumn("Created By", width="small"),
+        "created_display": st.column_config.TextColumn("Date", width="small"),
     }
     
     # Display dataframe with selection

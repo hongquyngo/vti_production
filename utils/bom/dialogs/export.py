@@ -17,10 +17,10 @@ from utils.bom.state import StateManager
 from utils.bom.common import (
     create_status_indicator,
     format_number,
-    format_product_display,
-    export_to_excel
+    format_product_display
 )
 from utils.bom.pdf_generator import generate_bom_pdf
+from utils.bom.excel_generator import generate_bom_excel
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,29 @@ def show_export_dialog(bom_id: int):
         # Header
         st.markdown(f"### 📋 {bom_info['bom_code']} - {bom_info['bom_name']}")
         st.markdown(f"**Status:** {create_status_indicator(bom_info['status'])} | **Materials:** {len(bom_details)}")
+        
+        st.markdown("---")
+        
+        # Export options
+        st.markdown("### ⚙️ Export Options")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            language = st.selectbox(
+                "Language / Ngôn ngữ",
+                options=['vi', 'en'],
+                format_func=lambda x: '🇻🇳 Tiếng Việt' if x == 'vi' else '🇬🇧 English',
+                key="export_language"
+            )
+        
+        with col2:
+            layout = st.selectbox(
+                "Layout / Bố cục",
+                options=['landscape', 'portrait'],
+                format_func=lambda x: '📄 Landscape (Ngang)' if x == 'landscape' else '📄 Portrait (Dọc)',
+                key="export_layout"
+            )
         
         st.markdown("---")
         
@@ -76,7 +99,7 @@ def show_export_dialog(bom_id: int):
         
         # Handle export actions
         if pdf_selected:
-            _export_as_pdf(bom_id, bom_info, bom_details, manager)
+            _export_as_pdf(bom_id, bom_info, bom_details, manager, language, layout)
         
         if excel_selected:
             _export_as_excel(bom_info, bom_details, manager)
@@ -124,7 +147,8 @@ def show_export_dialog(bom_id: int):
             st.rerun()
 
 
-def _export_as_pdf(bom_id: int, bom_info: Dict, bom_details: pd.DataFrame, manager: BOMManager):
+def _export_as_pdf(bom_id: int, bom_info: Dict, bom_details: pd.DataFrame, 
+                   manager: BOMManager, language: str = 'vi', layout: str = 'portrait'):
     """Generate and provide PDF download"""
     try:
         with st.spinner("Generating PDF..."):
@@ -135,16 +159,18 @@ def _export_as_pdf(bom_id: int, bom_info: Dict, bom_details: pd.DataFrame, manag
                 alternatives = manager.get_material_alternatives(detail_id)
                 alternatives_data[detail_id] = alternatives
             
-            # Get company name from session or use default
-            company_name = st.session_state.get('company_name', 'Prostech Asia')
-            
-            # Generate PDF
+            # Generate PDF with language and layout
             pdf_bytes = generate_bom_pdf(
                 bom_info=bom_info,
                 materials=bom_details,
                 alternatives_data=alternatives_data,
-                company_name=company_name
+                language=language,
+                layout=layout
             )
+            
+            if pdf_bytes is None:
+                st.error("❌ Failed to generate PDF. Check logs for details.")
+                return
             
             # Create filename
             filename = f"BOM_{bom_info['bom_code']}_{datetime.now().strftime('%Y%m%d')}.pdf"
@@ -167,82 +193,22 @@ def _export_as_pdf(bom_id: int, bom_info: Dict, bom_details: pd.DataFrame, manag
 
 
 def _export_as_excel(bom_info: Dict, bom_details: pd.DataFrame, manager: BOMManager):
-    """Generate and provide Excel download"""
+    """Generate and provide Excel download with professional formatting"""
     try:
         with st.spinner("Generating Excel..."):
-            # Prepare BOM info sheet
-            info_data = {
-                'Field': ['BOM Code', 'BOM Name', 'BOM Type', 'Status', 
-                          'Product Code', 'Product Name', 'Output Qty', 'UOM',
-                          'Effective Date', 'Version', 'Notes'],
-                'Value': [
-                    bom_info.get('bom_code', ''),
-                    bom_info.get('bom_name', ''),
-                    bom_info.get('bom_type', ''),
-                    bom_info.get('status', ''),
-                    bom_info.get('product_code', ''),
-                    bom_info.get('product_name', ''),
-                    bom_info.get('output_qty', 0),
-                    bom_info.get('uom', ''),
-                    str(bom_info.get('effective_date', '')),
-                    bom_info.get('version', 1),
-                    bom_info.get('notes', '')
-                ]
-            }
-            info_df = pd.DataFrame(info_data)
-            
-            # Prepare materials sheet
-            if not bom_details.empty:
-                materials_df = bom_details[[
-                    'material_code', 'material_name', 'material_type',
-                    'quantity', 'uom', 'scrap_rate', 'current_stock', 'alternatives_count'
-                ]].copy()
-                materials_df.columns = [
-                    'Material Code', 'Material Name', 'Type',
-                    'Quantity', 'UOM', 'Scrap %', 'Current Stock', 'Alternatives'
-                ]
-            else:
-                materials_df = pd.DataFrame(columns=[
-                    'Material Code', 'Material Name', 'Type',
-                    'Quantity', 'UOM', 'Scrap %', 'Current Stock', 'Alternatives'
-                ])
-            
-            # Prepare alternatives sheet
-            all_alternatives = []
+            # Load alternatives for each material
+            alternatives_data = {}
             for _, mat in bom_details.iterrows():
                 detail_id = int(mat['id'])
                 alternatives = manager.get_material_alternatives(detail_id)
-                
-                if not alternatives.empty:
-                    for _, alt in alternatives.iterrows():
-                        all_alternatives.append({
-                            'Primary Material': mat['material_code'],
-                            'Primary Name': mat['material_name'],
-                            'Alt Priority': alt['priority'],
-                            'Alt Material Code': alt['material_code'],
-                            'Alt Material Name': alt['material_name'],
-                            'Alt Quantity': alt['quantity'],
-                            'Alt UOM': alt['uom'],
-                            'Alt Scrap %': alt['scrap_rate'],
-                            'Status': 'Active' if alt['is_active'] else 'Inactive',
-                            'Notes': alt.get('notes', '')
-                        })
+                alternatives_data[detail_id] = alternatives
             
-            if all_alternatives:
-                alternatives_df = pd.DataFrame(all_alternatives)
-            else:
-                alternatives_df = pd.DataFrame(columns=[
-                    'Primary Material', 'Primary Name', 'Alt Priority',
-                    'Alt Material Code', 'Alt Material Name', 'Alt Quantity',
-                    'Alt UOM', 'Alt Scrap %', 'Status', 'Notes'
-                ])
-            
-            # Create Excel with multiple sheets
-            excel_bytes = export_to_excel({
-                'BOM Info': info_df,
-                'Materials': materials_df,
-                'Alternatives': alternatives_df
-            })
+            # Generate professional Excel
+            excel_bytes = generate_bom_excel(
+                bom_info=bom_info,
+                materials=bom_details,
+                alternatives_data=alternatives_data
+            )
             
             # Create filename
             filename = f"BOM_{bom_info['bom_code']}_{datetime.now().strftime('%Y%m%d')}.xlsx"
@@ -266,7 +232,8 @@ def _export_as_excel(bom_info: Dict, bom_details: pd.DataFrame, manager: BOMMana
 
 # ==================== Quick Export Functions ====================
 
-def quick_export_pdf(bom_id: int, manager: BOMManager) -> Optional[bytes]:
+def quick_export_pdf(bom_id: int, manager: BOMManager, 
+                     language: str = 'vi', layout: str = 'landscape') -> Optional[bytes]:
     """
     Quick export BOM to PDF without dialog
     Returns PDF bytes or None on error
@@ -285,13 +252,12 @@ def quick_export_pdf(bom_id: int, manager: BOMManager) -> Optional[bytes]:
             alternatives = manager.get_material_alternatives(detail_id)
             alternatives_data[detail_id] = alternatives
         
-        company_name = st.session_state.get('company_name', 'Prostech Asia')
-        
         return generate_bom_pdf(
             bom_info=bom_info,
             materials=bom_details,
             alternatives_data=alternatives_data,
-            company_name=company_name
+            language=language,
+            layout=layout
         )
     
     except Exception as e:
@@ -311,42 +277,18 @@ def quick_export_excel(bom_id: int, manager: BOMManager) -> Optional[bytes]:
         if not bom_info:
             return None
         
-        # Similar logic to _export_as_excel but returns bytes
-        info_data = {
-            'Field': ['BOM Code', 'BOM Name', 'BOM Type', 'Status', 
-                      'Product Code', 'Product Name', 'Output Qty', 'UOM',
-                      'Effective Date', 'Version'],
-            'Value': [
-                bom_info.get('bom_code', ''),
-                bom_info.get('bom_name', ''),
-                bom_info.get('bom_type', ''),
-                bom_info.get('status', ''),
-                bom_info.get('product_code', ''),
-                bom_info.get('product_name', ''),
-                bom_info.get('output_qty', 0),
-                bom_info.get('uom', ''),
-                str(bom_info.get('effective_date', '')),
-                bom_info.get('version', 1)
-            ]
-        }
-        info_df = pd.DataFrame(info_data)
+        # Load alternatives
+        alternatives_data = {}
+        for _, mat in bom_details.iterrows():
+            detail_id = int(mat['id'])
+            alternatives = manager.get_material_alternatives(detail_id)
+            alternatives_data[detail_id] = alternatives
         
-        if not bom_details.empty:
-            materials_df = bom_details[[
-                'material_code', 'material_name', 'material_type',
-                'quantity', 'uom', 'scrap_rate', 'current_stock', 'alternatives_count'
-            ]].copy()
-            materials_df.columns = [
-                'Material Code', 'Material Name', 'Type',
-                'Quantity', 'UOM', 'Scrap %', 'Current Stock', 'Alternatives'
-            ]
-        else:
-            materials_df = pd.DataFrame()
-        
-        return export_to_excel({
-            'BOM Info': info_df,
-            'Materials': materials_df
-        })
+        return generate_bom_excel(
+            bom_info=bom_info,
+            materials=bom_details,
+            alternatives_data=alternatives_data
+        )
     
     except Exception as e:
         logger.error(f"Error in quick Excel export: {e}")

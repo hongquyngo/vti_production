@@ -1,430 +1,686 @@
 # utils/bom/pdf_generator.py
 """
-BOM PDF Generator - Professional PDF export using ReportLab
-Generates detailed BOM documents with materials and alternatives
+PDF Generator for BOM - Following Issue Material template
+Generates BOM PDF with materials list, company logo, and professional layout
+
+Version: 2.0.0
+Based on: IssuePDFGenerator v5.3
 """
 
 import logging
-from io import BytesIO
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Optional, Any, List
+from io import BytesIO
+from pathlib import Path
+from decimal import Decimal
+
 import pandas as pd
 
+# ReportLab imports
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import mm, cm
-from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+from reportlab.lib.units import mm
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, Image, HRFlowable
+    SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
+# Import database and S3 utilities
+try:
+    from utils.db import get_db_engine
+    from utils.s3_utils import get_company_logo_from_s3_enhanced
+    S3_AVAILABLE = True
+except ImportError:
+    try:
+        from ..db import get_db_engine
+        from ..s3_utils import get_company_logo_from_s3_enhanced
+        S3_AVAILABLE = True
+    except ImportError:
+        S3_AVAILABLE = False
+        def get_company_logo_from_s3_enhanced(company_id, logo_path):
+            return None
+
 logger = logging.getLogger(__name__)
 
-# ==================== Font Registration ====================
-
-def register_fonts():
-    """Register Unicode fonts for Vietnamese support"""
-    font_paths = [
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-    ]
-    
-    try:
-        pdfmetrics.registerFont(TTFont('DejaVuSans', font_paths[0]))
-        pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', font_paths[1]))
-        return True
-    except Exception as e:
-        logger.warning(f"Could not register DejaVu fonts: {e}")
-        return False
-
-
-# Register fonts on module load
-FONTS_REGISTERED = register_fonts()
-FONT_NAME = 'DejaVuSans' if FONTS_REGISTERED else 'Helvetica'
-FONT_NAME_BOLD = 'DejaVuSans-Bold' if FONTS_REGISTERED else 'Helvetica-Bold'
-
-
-# ==================== Styles ====================
-
-def get_custom_styles():
-    """Get custom paragraph styles"""
-    styles = getSampleStyleSheet()
-    
-    # Title style
-    styles.add(ParagraphStyle(
-        name='BOMTitle',
-        fontName=FONT_NAME_BOLD,
-        fontSize=18,
-        leading=22,
-        alignment=TA_CENTER,
-        spaceAfter=12
-    ))
-    
-    # Subtitle style
-    styles.add(ParagraphStyle(
-        name='BOMSubtitle',
-        fontName=FONT_NAME,
-        fontSize=11,
-        leading=14,
-        alignment=TA_CENTER,
-        textColor=colors.grey,
-        spaceAfter=20
-    ))
-    
-    # Section header
-    styles.add(ParagraphStyle(
-        name='SectionHeader',
-        fontName=FONT_NAME_BOLD,
-        fontSize=12,
-        leading=16,
-        spaceBefore=12,
-        spaceAfter=8,
-        textColor=colors.HexColor('#1a5276')
-    ))
-    
-    # Normal text
-    styles.add(ParagraphStyle(
-        name='BOMNormal',
-        fontName=FONT_NAME,
-        fontSize=9,
-        leading=12
-    ))
-    
-    # Small text
-    styles.add(ParagraphStyle(
-        name='BOMSmall',
-        fontName=FONT_NAME,
-        fontSize=8,
-        leading=10,
-        textColor=colors.grey
-    ))
-    
-    # Field label
-    styles.add(ParagraphStyle(
-        name='FieldLabel',
-        fontName=FONT_NAME_BOLD,
-        fontSize=9,
-        leading=11,
-        textColor=colors.HexColor('#566573')
-    ))
-    
-    # Field value
-    styles.add(ParagraphStyle(
-        name='FieldValue',
-        fontName=FONT_NAME,
-        fontSize=10,
-        leading=13
-    ))
-    
-    return styles
-
-
-# ==================== Table Styles ====================
-
-def get_header_table_style():
-    """Style for header info tables"""
-    return TableStyle([
-        ('FONTNAME', (0, 0), (-1, -1), FONT_NAME),
-        ('FONTSIZE', (0, 0), (-1, -1), 9),
-        ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor('#566573')),
-        ('FONTNAME', (0, 0), (0, -1), FONT_NAME_BOLD),
-        ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
-        ('ALIGN', (1, 0), (1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('TOPPADDING', (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (0, -1), 8),
-    ])
-
-
-def get_materials_table_style():
-    """Style for materials table"""
-    return TableStyle([
-        # Header row
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c3e50')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), FONT_NAME_BOLD),
-        ('FONTSIZE', (0, 0), (-1, 0), 9),
-        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-        
-        # Data rows
-        ('FONTNAME', (0, 1), (-1, -1), FONT_NAME),
-        ('FONTSIZE', (0, 1), (-1, -1), 8),
-        ('ALIGN', (0, 1), (0, -1), 'CENTER'),  # No
-        ('ALIGN', (2, 1), (2, -1), 'CENTER'),  # Type
-        ('ALIGN', (3, 1), (3, -1), 'RIGHT'),   # Qty
-        ('ALIGN', (4, 1), (4, -1), 'CENTER'),  # UOM
-        ('ALIGN', (5, 1), (5, -1), 'RIGHT'),   # Scrap
-        ('ALIGN', (6, 1), (6, -1), 'RIGHT'),   # Stock
-        ('ALIGN', (7, 1), (7, -1), 'CENTER'),  # Alternatives
-        
-        # Grid
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
-        ('LINEBELOW', (0, 0), (-1, 0), 1.5, colors.HexColor('#2c3e50')),
-        
-        # Padding
-        ('TOPPADDING', (0, 0), (-1, -1), 5),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        
-        # Alternating row colors
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')]),
-        
-        # Vertical alignment
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-    ])
-
-
-def get_alternatives_table_style():
-    """Style for alternatives sub-table"""
-    return TableStyle([
-        # Header
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#85929e')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), FONT_NAME_BOLD),
-        ('FONTSIZE', (0, 0), (-1, 0), 8),
-        
-        # Data
-        ('FONTNAME', (0, 1), (-1, -1), FONT_NAME),
-        ('FONTSIZE', (0, 1), (-1, -1), 7),
-        ('ALIGN', (0, 1), (0, -1), 'CENTER'),  # Priority
-        ('ALIGN', (2, 1), (2, -1), 'RIGHT'),   # Qty
-        ('ALIGN', (3, 1), (3, -1), 'CENTER'),  # UOM
-        ('ALIGN', (4, 1), (4, -1), 'RIGHT'),   # Scrap
-        ('ALIGN', (5, 1), (5, -1), 'CENTER'),  # Status
-        
-        # Grid
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#d5d8dc')),
-        
-        # Padding
-        ('TOPPADDING', (0, 0), (-1, -1), 3),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-        ('LEFTPADDING', (0, 0), (-1, -1), 3),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-        
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-    ])
-
-
-# ==================== PDF Generator Class ====================
 
 class BOMPDFGenerator:
-    """Generate professional PDF documents for BOMs"""
+    """Generate PDF for Bill of Materials"""
     
     def __init__(self):
-        self.styles = get_custom_styles()
-        self.page_width, self.page_height = A4
+        self.engine = get_db_engine()
+        self._registered_fonts = set()
+        self.font_available = self._setup_fonts()
     
-    def generate(self, bom_info: Dict[str, Any], 
-                 materials: pd.DataFrame,
-                 alternatives_data: Dict[int, pd.DataFrame],
-                 company_name: str = "Prostech Asia") -> bytes:
-        """
-        Generate BOM PDF document
-        
-        Args:
-            bom_info: BOM header information
-            materials: DataFrame of BOM materials
-            alternatives_data: Dict mapping detail_id to alternatives DataFrame
-            company_name: Company name for header
+    def _get_project_root(self) -> Path:
+        """Get project root directory"""
+        current_file = Path(__file__).resolve()
+        # utils/bom/pdf_generator.py -> project root
+        project_root = current_file.parent.parent.parent
+        return project_root
+    
+    def _setup_fonts(self) -> bool:
+        """Setup DejaVu fonts for Vietnamese text support"""
+        try:
+            project_root = self._get_project_root()
+            fonts_dir = project_root / 'fonts'
             
-        Returns:
-            PDF as bytes
+            if not fonts_dir.exists():
+                logger.warning(f"Fonts directory not found: {fonts_dir}")
+                return False
+            
+            dejavu_regular = fonts_dir / 'DejaVuSans.ttf'
+            dejavu_bold = fonts_dir / 'DejaVuSans-Bold.ttf'
+            
+            if not dejavu_regular.exists():
+                logger.warning(f"DejaVuSans.ttf not found in {fonts_dir}")
+                return False
+            
+            # Register regular font
+            try:
+                if 'DejaVuSans' not in self._registered_fonts:
+                    pdfmetrics.registerFont(TTFont('DejaVuSans', str(dejavu_regular)))
+                    self._registered_fonts.add('DejaVuSans')
+                    logger.info("DejaVuSans font registered")
+            except Exception as e:
+                if 'already registered' not in str(e).lower():
+                    raise
+                self._registered_fonts.add('DejaVuSans')
+            
+            # Register bold font
+            try:
+                if dejavu_bold.exists() and 'DejaVuSans-Bold' not in self._registered_fonts:
+                    pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', str(dejavu_bold)))
+                    self._registered_fonts.add('DejaVuSans-Bold')
+                    logger.info("DejaVuSans-Bold font registered")
+            except Exception as e:
+                if 'already registered' not in str(e).lower():
+                    raise
+                self._registered_fonts.add('DejaVuSans-Bold')
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Font setup error: {e}")
+            return False
+    
+    def get_company_info(self, company_id: int = None, created_by: int = None) -> Dict[str, Any]:
         """
-        buffer = BytesIO()
+        Get company information
+        Priority:
+        1. company_id if provided
+        2. From created_by user's employee → company
+        3. From session state
+        4. Fallback to default
+        """
+        import streamlit as st
         
-        doc = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            rightMargin=15*mm,
-            leftMargin=15*mm,
-            topMargin=15*mm,
-            bottomMargin=15*mm
-        )
+        # Priority 1: Direct company_id
+        if company_id:
+            return self._fetch_company_by_id(company_id)
         
-        story = []
+        # Priority 2: From BOM creator's company
+        if created_by:
+            company = self._fetch_company_by_user(created_by)
+            if company:
+                return company
         
-        # Build document sections
-        story.extend(self._build_header(bom_info, company_name))
-        story.extend(self._build_bom_info(bom_info))
-        story.extend(self._build_materials_section(materials, alternatives_data))
-        story.extend(self._build_footer(bom_info))
+        # Priority 3: From session state (logged in user)
+        session_company_id = st.session_state.get('company_id')
+        if session_company_id:
+            return self._fetch_company_by_id(session_company_id)
         
-        # Build PDF
-        doc.build(story, onFirstPage=self._add_page_number, 
-                  onLaterPages=self._add_page_number)
+        # Try to get from current user's employee
+        keycloak_id = st.session_state.get('keycloak_id')
+        if keycloak_id:
+            company = self._fetch_company_by_keycloak(keycloak_id)
+            if company:
+                return company
         
-        buffer.seek(0)
-        return buffer.getvalue()
+        # Priority 4: Fallback default
+        return {
+            'id': 1,
+            'english_name': 'PROSTECH ASIA',
+            'local_name': 'CÔNG TY TNHH PROSTECH VIỆT NAM',
+            'address': 'Vietnam',
+            'registration_code': '',
+            'logo_path': None
+        }
     
-    def _build_header(self, bom_info: Dict, company_name: str) -> List:
-        """Build document header"""
-        elements = []
-        
-        # Company name
-        elements.append(Paragraph(company_name, self.styles['BOMSubtitle']))
-        
-        # Title
-        elements.append(Paragraph(
-            f"BILL OF MATERIALS",
-            self.styles['BOMTitle']
-        ))
-        
-        # BOM Code subtitle
-        elements.append(Paragraph(
-            f"{bom_info['bom_code']}",
-            self.styles['BOMSubtitle']
-        ))
-        
-        # Horizontal line
-        elements.append(HRFlowable(
-            width="100%",
-            thickness=1,
-            color=colors.HexColor('#2c3e50'),
-            spaceBefore=5,
-            spaceAfter=15
-        ))
-        
-        return elements
+    def _fetch_company_by_id(self, company_id: int) -> Dict[str, Any]:
+        """Fetch company by ID"""
+        query = """
+            SELECT 
+                c.id, c.english_name, c.local_name,
+                c.street as address, c.registration_code,
+                m.path as logo_path
+            FROM companies c
+            LEFT JOIN medias m ON c.logo_id = m.id
+            WHERE c.id = %s AND c.delete_flag = 0
+        """
+        try:
+            df = pd.read_sql(query, self.engine, params=(company_id,))
+            if not df.empty:
+                return df.iloc[0].to_dict()
+        except Exception as e:
+            logger.error(f"Error fetching company by ID: {e}")
+        return None
     
-    def _build_bom_info(self, bom_info: Dict) -> List:
-        """Build BOM information section"""
-        elements = []
+    def _fetch_company_by_user(self, user_id: int) -> Dict[str, Any]:
+        """Fetch company from user's employee record"""
+        query = """
+            SELECT 
+                c.id, c.english_name, c.local_name,
+                c.street as address, c.registration_code,
+                m.path as logo_path
+            FROM users u
+            JOIN employees e ON u.employee_id = e.id
+            JOIN companies c ON e.company_id = c.id
+            LEFT JOIN medias m ON c.logo_id = m.id
+            WHERE u.id = %s AND c.delete_flag = 0
+        """
+        try:
+            df = pd.read_sql(query, self.engine, params=(user_id,))
+            if not df.empty:
+                return df.iloc[0].to_dict()
+        except Exception as e:
+            logger.error(f"Error fetching company by user: {e}")
+        return None
+    
+    def _fetch_company_by_keycloak(self, keycloak_id: str) -> Dict[str, Any]:
+        """Fetch company from employee's keycloak_id"""
+        query = """
+            SELECT 
+                c.id, c.english_name, c.local_name,
+                c.street as address, c.registration_code,
+                m.path as logo_path
+            FROM employees e
+            JOIN companies c ON e.company_id = c.id
+            LEFT JOIN medias m ON c.logo_id = m.id
+            WHERE e.keycloak_id = %s AND c.delete_flag = 0
+        """
+        try:
+            df = pd.read_sql(query, self.engine, params=(keycloak_id,))
+            if not df.empty:
+                return df.iloc[0].to_dict()
+        except Exception as e:
+            logger.error(f"Error fetching company by keycloak: {e}")
+        return None
+    
+    def get_custom_styles(self) -> Dict[str, Any]:
+        """Create custom paragraph styles"""
+        styles = getSampleStyleSheet()
+        base_font = 'DejaVuSans' if self.font_available else 'Helvetica'
+        bold_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
         
-        elements.append(Paragraph("BOM Information", self.styles['SectionHeader']))
+        # Title style
+        styles.add(ParagraphStyle(
+            name='TitleViet', parent=styles['Title'],
+            fontName=bold_font, fontSize=16, alignment=TA_CENTER,
+            spaceAfter=6, textColor=colors.HexColor('#1a1a1a')
+        ))
         
-        # Create info table with 2 columns
-        col_width = (self.page_width - 30*mm) / 2
+        # Normal Vietnamese text
+        styles.add(ParagraphStyle(
+            name='NormalViet', parent=styles['Normal'],
+            fontName=base_font, fontSize=10, leading=12
+        ))
         
-        left_data = [
-            ['BOM Code:', bom_info.get('bom_code', 'N/A')],
-            ['BOM Name:', bom_info.get('bom_name', 'N/A')],
-            ['BOM Type:', bom_info.get('bom_type', 'N/A')],
-            ['Status:', bom_info.get('status', 'N/A')],
-        ]
+        # Company info style
+        styles.add(ParagraphStyle(
+            name='CompanyInfo', parent=styles['Normal'],
+            fontName=base_font, fontSize=10, alignment=TA_CENTER
+        ))
         
-        right_data = [
-            ['Output Product:', f"{bom_info.get('product_code', '')} - {bom_info.get('product_name', 'N/A')}"],
-            ['Output Quantity:', f"{bom_info.get('output_qty', 0):,.2f} {bom_info.get('uom', 'PCS')}"],
-            ['Effective Date:', str(bom_info.get('effective_date', 'N/A'))],
-            ['Version:', str(bom_info.get('version', 1))],
-        ]
+        # Table cell styles
+        styles.add(ParagraphStyle(
+            name='TableCell', parent=styles['Normal'],
+            fontName=base_font, fontSize=9, leading=11, alignment=TA_LEFT
+        ))
         
-        # Left table
-        left_table = Table(left_data, colWidths=[35*mm, col_width - 40*mm])
-        left_table.setStyle(get_header_table_style())
+        styles.add(ParagraphStyle(
+            name='TableCellCenter', parent=styles['Normal'],
+            fontName=base_font, fontSize=9, leading=11, alignment=TA_CENTER
+        ))
         
-        # Right table
-        right_table = Table(right_data, colWidths=[40*mm, col_width - 45*mm])
-        right_table.setStyle(get_header_table_style())
+        styles.add(ParagraphStyle(
+            name='TableCellRight', parent=styles['Normal'],
+            fontName=base_font, fontSize=9, leading=11, alignment=TA_RIGHT
+        ))
         
-        # Combine in a wrapper table
-        wrapper = Table([[left_table, right_table]], colWidths=[col_width, col_width])
-        wrapper.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        styles.add(ParagraphStyle(
+            name='TableHeader', parent=styles['Normal'],
+            fontName=bold_font, fontSize=9, leading=11,
+            alignment=TA_CENTER, textColor=colors.whitesmoke
+        ))
+        
+        # Footer style
+        styles.add(ParagraphStyle(
+            name='Footer', parent=styles['Normal'],
+            fontName=base_font, fontSize=8, alignment=TA_CENTER,
+            textColor=colors.grey
+        ))
+        
+        # Section header
+        styles.add(ParagraphStyle(
+            name='SectionHeader', parent=styles['Normal'],
+            fontName=bold_font, fontSize=11, leading=14,
+            textColor=colors.HexColor('#2c3e50'), spaceBefore=6, spaceAfter=4
+        ))
+        
+        return styles
+    
+    def create_header(self, story: list, bom_info: Dict, styles: Any,
+                     language: str = 'vi', layout: str = 'landscape'):
+        """Create PDF header with company info and logo"""
+        # Get company from BOM creator
+        created_by = bom_info.get('created_by')
+        company_info = self.get_company_info(created_by=created_by)
+        
+        page_width = 277*mm if layout == 'landscape' else 190*mm
+        
+        # Try to get logo from S3
+        logo_img = None
+        if S3_AVAILABLE:
+            try:
+                logo_bytes = get_company_logo_from_s3_enhanced(
+                    company_info['id'], company_info.get('logo_path')
+                )
+                if logo_bytes:
+                    logo_buffer = BytesIO(logo_bytes)
+                    logo_img = Image(logo_buffer, width=50*mm, height=15*mm, kind='proportional')
+                    logger.info("Logo loaded from S3")
+            except Exception as e:
+                logger.warning(f"Could not load logo: {e}")
+        
+        # Company name and document title
+        company_name = company_info.get('english_name', 'PROSTECH ASIA')
+        local_name = company_info.get('local_name', '')
+        
+        if language == 'vi':
+            doc_title = "ĐỊNH MỨC SẢN XUẤT"
+            doc_subtitle = "BILL OF MATERIALS"
+        else:
+            doc_title = "BILL OF MATERIALS"
+            doc_subtitle = ""
+        
+        # Build header table
+        if logo_img:
+            # With logo: Logo | Company Info | Empty (for balance)
+            company_text = f"""
+                <b>{company_name}</b><br/>
+                <font size="8">{local_name}</font>
+            """
+            
+            header_data = [[
+                logo_img,
+                Paragraph(company_text, styles['CompanyInfo']),
+                ''
+            ]]
+            
+            col_widths = [55*mm, page_width - 110*mm, 55*mm]
+        else:
+            # Without logo: Centered company info
+            company_text = f"""
+                <b>{company_name}</b><br/>
+                <font size="8">{local_name}</font>
+            """
+            
+            header_data = [[Paragraph(company_text, styles['CompanyInfo'])]]
+            col_widths = [page_width]
+        
+        header_table = Table(header_data, colWidths=col_widths)
+        header_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         
-        elements.append(wrapper)
+        story.append(header_table)
+        story.append(Spacer(1, 8*mm))
         
-        # Notes if any
-        if bom_info.get('notes'):
-            elements.append(Spacer(1, 8))
-            elements.append(Paragraph(
-                f"<b>Notes:</b> {bom_info['notes']}", 
-                self.styles['BOMNormal']
-            ))
+        # Document title
+        story.append(Paragraph(f"<b>{doc_title}</b>", styles['TitleViet']))
+        if doc_subtitle:
+            story.append(Paragraph(doc_subtitle, styles['CompanyInfo']))
         
-        elements.append(Spacer(1, 15))
-        
-        return elements
+        # BOM Code as subtitle
+        story.append(Spacer(1, 2*mm))
+        story.append(Paragraph(f"<b>{bom_info.get('bom_code', '')}</b>", styles['CompanyInfo']))
+        story.append(Spacer(1, 6*mm))
     
-    def _build_materials_section(self, materials: pd.DataFrame,
-                                  alternatives_data: Dict[int, pd.DataFrame]) -> List:
-        """Build materials section with table"""
-        elements = []
+    def create_bom_info(self, story: list, bom_info: Dict, styles: Any,
+                       language: str = 'vi', layout: str = 'landscape'):
+        """Create BOM information section with creator info"""
+        bold_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
+        normal_font = 'DejaVuSans' if self.font_available else 'Helvetica'
         
-        elements.append(Paragraph(
-            f"Materials ({len(materials)} items)", 
-            self.styles['SectionHeader']
-        ))
+        page_width = 277*mm if layout == 'landscape' else 190*mm
         
-        if materials.empty:
-            elements.append(Paragraph(
-                "No materials defined for this BOM.",
-                self.styles['BOMNormal']
-            ))
-            return elements
+        # Labels based on language
+        if language == 'vi':
+            labels = {
+                'bom_code': 'Mã BOM',
+                'bom_name': 'Tên BOM',
+                'bom_type': 'Loại BOM',
+                'status': 'Trạng thái',
+                'product': 'Sản phẩm',
+                'output_qty': 'SL đầu ra',
+                'effective_date': 'Ngày hiệu lực',
+                'version': 'Phiên bản',
+                'creator': 'Người tạo',
+                'created_date': 'Ngày tạo'
+            }
+        else:
+            labels = {
+                'bom_code': 'BOM Code',
+                'bom_name': 'BOM Name',
+                'bom_type': 'BOM Type',
+                'status': 'Status',
+                'product': 'Output Product',
+                'output_qty': 'Output Qty',
+                'effective_date': 'Effective Date',
+                'version': 'Version',
+                'creator': 'Created By',
+                'created_date': 'Created Date'
+            }
+        
+        # Format output quantity
+        output_qty = bom_info.get('output_qty', 0)
+        uom = bom_info.get('uom', 'PCS')
+        qty_str = f"{float(output_qty):,.2f} {uom}"
+        
+        # Product display
+        product_display = f"{bom_info.get('product_code', '')} - {bom_info.get('product_name', '')}"
+        
+        # Effective date
+        eff_date = bom_info.get('effective_date', '')
+        if eff_date and hasattr(eff_date, 'strftime'):
+            eff_date = eff_date.strftime('%d/%m/%Y')
+        
+        # Created date
+        created_date = bom_info.get('created_date', '')
+        if created_date and hasattr(created_date, 'strftime'):
+            created_date = created_date.strftime('%d/%m/%Y %H:%M')
+        
+        # Creator name
+        creator_name = bom_info.get('creator_name', 'Unknown')
+        
+        # Left column data
+        left_data = [
+            [f"{labels['bom_code']}:", bom_info.get('bom_code', '')],
+            [f"{labels['bom_name']}:", bom_info.get('bom_name', '')],
+            [f"{labels['bom_type']}:", bom_info.get('bom_type', '')],
+            [f"{labels['status']}:", bom_info.get('status', '')],
+            [f"{labels['creator']}:", creator_name],
+        ]
+        
+        # Right column data
+        right_data = [
+            [f"{labels['product']}:", product_display],
+            [f"{labels['output_qty']}:", qty_str],
+            [f"{labels['effective_date']}:", str(eff_date) if eff_date else 'N/A'],
+            [f"{labels['version']}:", str(bom_info.get('version', 1))],
+            [f"{labels['created_date']}:", str(created_date) if created_date else 'N/A'],
+        ]
+        
+        # Column widths
+        left_lw = 25*mm  # Label width
+        left_vw = 65*mm  # Value width
+        right_lw = 30*mm
+        right_vw = 60*mm
+        
+        if layout == 'landscape':
+            left_vw = 85*mm
+            right_vw = 80*mm
+        
+        # Create left table
+        left_table = Table(left_data, colWidths=[left_lw, left_vw])
+        left_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), bold_font),
+            ('FONTNAME', (1, 0), (1, -1), normal_font),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
+            ('ALIGN', (1, 0), (1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        
+        # Create right table
+        right_table = Table(right_data, colWidths=[right_lw, right_vw])
+        right_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (0, -1), bold_font),
+            ('FONTNAME', (1, 0), (1, -1), normal_font),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
+            ('ALIGN', (1, 0), (1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        
+        # Combine into main table
+        main_table = Table([[left_table, right_table]], 
+                          colWidths=[left_lw + left_vw, right_lw + right_vw])
+        main_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+        
+        story.append(main_table)
+        story.append(Spacer(1, 8*mm))
+    
+    def create_materials_table(self, story: list, materials: pd.DataFrame, 
+                               alternatives_data: Dict[int, pd.DataFrame],
+                               styles: Any, language: str = 'vi', 
+                               layout: str = 'landscape'):
+        """Create materials table with proper alignment"""
+        header_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
+        normal_font = 'DejaVuSans' if self.font_available else 'Helvetica'
+        
+        # Calculate total table width
+        if layout == 'landscape':
+            # Total width ~267mm (A4 landscape - margins)
+            col_widths = [12*mm, 140*mm, 18*mm, 22*mm, 18*mm, 18*mm, 22*mm, 17*mm]
+        else:
+            # Total width ~180mm (A4 portrait - margins)
+            col_widths = [10*mm, 80*mm, 14*mm, 18*mm, 14*mm, 16*mm, 18*mm, 14*mm]
+        
+        total_width = sum(col_widths)
+        
+        # Section header with summary on same line
+        mat_count = len(materials) if not materials.empty else 0
+        if language == 'vi':
+            section_title = f"Danh sách vật tư ({mat_count} mục)"
+        else:
+            section_title = f"Materials ({mat_count} items)"
         
         # Summary by type
-        type_counts = materials['material_type'].value_counts()
+        type_counts = materials['material_type'].value_counts() if not materials.empty else {}
         summary_parts = []
-        if 'RAW_MATERIAL' in type_counts:
-            summary_parts.append(f"Raw Materials: {type_counts['RAW_MATERIAL']}")
-        if 'PACKAGING' in type_counts:
-            summary_parts.append(f"Packaging: {type_counts['PACKAGING']}")
-        if 'CONSUMABLE' in type_counts:
-            summary_parts.append(f"Consumables: {type_counts['CONSUMABLE']}")
         
-        if summary_parts:
-            elements.append(Paragraph(
-                " | ".join(summary_parts),
-                self.styles['BOMSmall']
-            ))
-            elements.append(Spacer(1, 8))
+        type_labels = {
+            'RAW_MATERIAL': 'Nguyên liệu' if language == 'vi' else 'Raw',
+            'PACKAGING': 'Bao bì' if language == 'vi' else 'Pkg',
+            'CONSUMABLE': 'Tiêu hao' if language == 'vi' else 'Con'
+        }
         
-        # Materials table
-        header = ['#', 'Material', 'Type', 'Qty', 'UOM', 'Scrap %', 'Stock', 'Alt']
+        for mat_type, label in type_labels.items():
+            if mat_type in type_counts:
+                summary_parts.append(f"{label}: {type_counts[mat_type]}")
         
-        table_data = [header]
+        summary_text = " | ".join(summary_parts) if summary_parts else ""
         
+        # Create section header table (title left, summary right)
+        section_header_data = [[
+            Paragraph(f"<b>{section_title}</b>", styles['SectionHeader']),
+            Paragraph(summary_text, styles['Footer'])
+        ]]
+        section_header_table = Table(
+            section_header_data, 
+            colWidths=[total_width * 0.6, total_width * 0.4]
+        )
+        section_header_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+            ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'BOTTOM'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+        
+        story.append(section_header_table)
+        story.append(Spacer(1, 2*mm))
+        
+        if materials.empty:
+            if language == 'vi':
+                story.append(Paragraph("Không có vật tư trong BOM này.", styles['NormalViet']))
+            else:
+                story.append(Paragraph("No materials in this BOM.", styles['NormalViet']))
+            return
+        
+        # Table headers
+        if language == 'vi':
+            headers = ['STT', 'Thông tin vật tư', 'Loại', 'SL', 'ĐVT', 'Hao hụt', 'Tồn kho', 'T.Thế']
+        else:
+            headers = ['No.', 'Material Info', 'Type', 'Qty', 'UOM', 'Scrap', 'Stock', 'Alt']
+        
+        header_row = [Paragraph(f"<b>{h}</b>", styles['TableHeader']) for h in headers]
+        table_data = [header_row]
+        
+        # Material rows
         for idx, (_, mat) in enumerate(materials.iterrows(), 1):
-            alt_count = int(mat.get('alternatives_count', 0))
+            # Material info with code and name - wrap text
+            mat_name = mat['material_name']
+            mat_code = mat['material_code']
+            
+            if language == 'vi':
+                mat_info = f"{mat_name}<br/><font size='7'>Mã: {mat_code}</font>"
+            else:
+                mat_info = f"{mat_name}<br/><font size='7'>Code: {mat_code}</font>"
+            
+            # Type abbreviation
+            type_abbr = {
+                'RAW_MATERIAL': 'RAW',
+                'PACKAGING': 'PKG',
+                'CONSUMABLE': 'CON'
+            }.get(mat['material_type'], mat['material_type'][:3])
+            
+            # Quantity - format nicely
+            qty = float(mat['quantity'])
+            if qty == int(qty):
+                qty_str = f"{int(qty):,}"
+            else:
+                qty_str = f"{qty:,.2f}".rstrip('0').rstrip('.')
+            
+            # Scrap rate
+            scrap = float(mat.get('scrap_rate', 0))
+            scrap_str = f"{scrap:.1f}%" if scrap > 0 else "-"
+            
+            # Stock
             stock = float(mat.get('current_stock', 0))
+            stock_str = f"{stock:,.0f}" if stock > 0 else "-"
+            
+            # Alternatives count
+            alt_count = int(mat.get('alternatives_count', 0))
+            alt_str = str(alt_count) if alt_count > 0 else "-"
             
             row = [
-                str(idx),
-                f"{mat['material_code']}\n{mat['material_name'][:40]}",
-                mat['material_type'][:3],  # RAW, PAC, CON
-                f"{float(mat['quantity']):,.4f}",
-                mat['uom'],
-                f"{float(mat['scrap_rate']):.1f}%",
-                f"{stock:,.0f}" if stock > 0 else "-",
-                str(alt_count) if alt_count > 0 else "-"
+                Paragraph(str(idx), styles['TableCellCenter']),
+                Paragraph(mat_info, styles['TableCell']),
+                Paragraph(type_abbr, styles['TableCellCenter']),
+                Paragraph(qty_str, styles['TableCellRight']),
+                Paragraph(str(mat['uom']), styles['TableCellCenter']),
+                Paragraph(scrap_str, styles['TableCellCenter']),
+                Paragraph(stock_str, styles['TableCellRight']),
+                Paragraph(alt_str, styles['TableCellCenter']),
             ]
             table_data.append(row)
         
-        # Column widths
-        col_widths = [8*mm, 55*mm, 12*mm, 20*mm, 12*mm, 15*mm, 18*mm, 10*mm]
-        
         materials_table = Table(table_data, colWidths=col_widths, repeatRows=1)
-        materials_table.setStyle(get_materials_table_style())
+        materials_table.setStyle(TableStyle([
+            # Header styling
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c3e50')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), header_font),
+            ('FONTSIZE', (0, 0), (-1, 0), 9),
+            ('FONTSIZE', (0, 1), (-1, -1), 8),
+            
+            # Alignment
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),  # Header center
+            ('ALIGN', (0, 1), (0, -1), 'CENTER'),  # STT center
+            ('ALIGN', (1, 1), (1, -1), 'LEFT'),    # Material info left
+            ('ALIGN', (2, 1), (2, -1), 'CENTER'),  # Type center
+            ('ALIGN', (3, 1), (3, -1), 'RIGHT'),   # Qty right
+            ('ALIGN', (4, 1), (4, -1), 'CENTER'),  # UOM center
+            ('ALIGN', (5, 1), (5, -1), 'CENTER'),  # Scrap center
+            ('ALIGN', (6, 1), (6, -1), 'RIGHT'),   # Stock right
+            ('ALIGN', (7, 1), (7, -1), 'CENTER'),  # Alt center
+            
+            # Alternating row colors
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')]),
+            
+            # Grid
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#bdc3c7')),
+            ('LINEBELOW', (0, 0), (-1, 0), 1.5, colors.HexColor('#2c3e50')),
+            
+            # Padding - increased for better readability
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, 0), 6),     # Header padding
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+            ('TOPPADDING', (0, 1), (-1, -1), 5),    # Data padding
+            ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+        ]))
         
-        elements.append(materials_table)
-        elements.append(Spacer(1, 15))
+        story.append(materials_table)
         
-        # Alternatives section
+        # Add alternatives section if any
         has_alternatives = any(
             not df.empty for df in alternatives_data.values()
         ) if alternatives_data else False
         
         if has_alternatives:
-            elements.extend(self._build_alternatives_section(
-                materials, alternatives_data
-            ))
-        
-        return elements
+            self._create_alternatives_section(
+                story, materials, alternatives_data, styles, language, layout
+            )
     
-    def _build_alternatives_section(self, materials: pd.DataFrame,
-                                     alternatives_data: Dict[int, pd.DataFrame]) -> List:
-        """Build alternatives detail section"""
-        elements = []
+    def _create_alternatives_section(self, story: list, materials: pd.DataFrame,
+                                     alternatives_data: Dict[int, pd.DataFrame],
+                                     styles: Any, language: str = 'vi',
+                                     layout: str = 'landscape'):
+        """Create alternatives detail section with proper alignment"""
+        header_font = 'DejaVuSans-Bold' if self.font_available else 'Helvetica-Bold'
+        normal_font = 'DejaVuSans' if self.font_available else 'Helvetica'
         
-        elements.append(Paragraph("Alternative Materials", self.styles['SectionHeader']))
+        # Calculate total table width (same as materials table)
+        if layout == 'landscape':
+            alt_col_widths = [15*mm, 155*mm, 22*mm, 18*mm, 20*mm, 37*mm]
+        else:
+            alt_col_widths = [12*mm, 90*mm, 18*mm, 14*mm, 18*mm, 28*mm]
+        
+        total_width = sum(alt_col_widths)
+        
+        story.append(Spacer(1, 6*mm))
+        
+        if language == 'vi':
+            section_title = "Vật tư thay thế"
+        else:
+            section_title = "Alternative Materials"
+        
+        # Section header aligned with table
+        section_header_data = [[
+            Paragraph(f"<b>{section_title}</b>", styles['SectionHeader']),
+            Paragraph("", styles['Footer'])
+        ]]
+        section_header_table = Table(
+            section_header_data, 
+            colWidths=[total_width * 0.6, total_width * 0.4]
+        )
+        section_header_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'BOTTOM'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+        story.append(section_header_table)
         
         for _, mat in materials.iterrows():
             detail_id = int(mat['id'])
@@ -433,78 +689,175 @@ class BOMPDFGenerator:
             if alternatives is None or alternatives.empty:
                 continue
             
-            # Material header
-            elements.append(Paragraph(
-                f"<b>{mat['material_code']}</b> - {mat['material_name']}",
-                self.styles['BOMNormal']
-            ))
-            elements.append(Spacer(1, 4))
+            # Material header - create a table with same width
+            mat_header_data = [[
+                Paragraph(
+                    f"<b>{mat['material_code']}</b> - {mat['material_name']}",
+                    styles['NormalViet']
+                )
+            ]]
+            mat_header_table = Table(mat_header_data, colWidths=[total_width])
+            mat_header_table.setStyle(TableStyle([
+                ('ALIGN', (0, 0), (0, 0), 'LEFT'),
+                ('TOPPADDING', (0, 0), (0, 0), 4),
+                ('BOTTOMPADDING', (0, 0), (0, 0), 2),
+            ]))
+            story.append(mat_header_table)
             
-            # Alternatives table
-            alt_header = ['P', 'Alternative Material', 'Qty', 'UOM', 'Scrap %', 'Status']
-            alt_data = [alt_header]
+            # Alternatives table headers
+            if language == 'vi':
+                alt_headers = ['ƯT', 'Vật tư thay thế', 'SL', 'ĐVT', 'Hao hụt', 'Trạng thái']
+            else:
+                alt_headers = ['P', 'Alternative Material', 'Qty', 'UOM', 'Scrap', 'Status']
+            
+            alt_header_row = [Paragraph(f"<b>{h}</b>", styles['TableHeader']) for h in alt_headers]
+            alt_table_data = [alt_header_row]
             
             for _, alt in alternatives.iterrows():
-                status = "✓ Active" if alt['is_active'] else "○ Inactive"
+                status_icon = "✓" if alt['is_active'] else "○"
+                if language == 'vi':
+                    status_text = f"{status_icon} Hoạt động" if alt['is_active'] else f"{status_icon} Ngừng"
+                else:
+                    status_text = f"{status_icon} Active" if alt['is_active'] else f"{status_icon} Inactive"
+                
+                qty = float(alt['quantity'])
+                if qty == int(qty):
+                    qty_str = f"{int(qty):,}"
+                else:
+                    qty_str = f"{qty:,.2f}".rstrip('0').rstrip('.')
+                
+                scrap = float(alt.get('scrap_rate', 0))
+                scrap_str = f"{scrap:.1f}%" if scrap > 0 else "-"
+                
                 alt_row = [
-                    str(alt['priority']),
-                    f"{alt['material_code']} - {alt['material_name'][:35]}",
-                    f"{float(alt['quantity']):,.4f}",
-                    alt['uom'],
-                    f"{float(alt['scrap_rate']):.1f}%",
-                    status
+                    Paragraph(str(alt['priority']), styles['TableCellCenter']),
+                    Paragraph(f"{alt['material_code']} - {alt['material_name']}", styles['TableCell']),
+                    Paragraph(qty_str, styles['TableCellRight']),
+                    Paragraph(str(alt['uom']), styles['TableCellCenter']),
+                    Paragraph(scrap_str, styles['TableCellCenter']),
+                    Paragraph(status_text, styles['TableCellCenter']),
                 ]
-                alt_data.append(alt_row)
+                alt_table_data.append(alt_row)
             
-            alt_col_widths = [8*mm, 70*mm, 20*mm, 12*mm, 15*mm, 18*mm]
-            alt_table = Table(alt_data, colWidths=alt_col_widths)
-            alt_table.setStyle(get_alternatives_table_style())
+            alt_table = Table(alt_table_data, colWidths=alt_col_widths, repeatRows=1)
+            alt_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#85929e')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('FONTNAME', (0, 0), (-1, 0), header_font),
+                ('FONTSIZE', (0, 0), (-1, 0), 8),
+                ('FONTSIZE', (0, 1), (-1, -1), 8),
+                
+                # Alignment
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),  # Header center
+                ('ALIGN', (0, 1), (0, -1), 'CENTER'),  # Priority center
+                ('ALIGN', (1, 1), (1, -1), 'LEFT'),    # Material left
+                ('ALIGN', (2, 1), (2, -1), 'RIGHT'),   # Qty right
+                ('ALIGN', (3, 1), (3, -1), 'CENTER'),  # UOM center
+                ('ALIGN', (4, 1), (4, -1), 'CENTER'),  # Scrap center
+                ('ALIGN', (5, 1), (5, -1), 'CENTER'),  # Status center
+                
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#d5d8dc')),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('TOPPADDING', (0, 0), (-1, 0), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
+                ('TOPPADDING', (0, 1), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+                ('LEFTPADDING', (0, 0), (-1, -1), 4),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+            ]))
             
-            elements.append(alt_table)
-            elements.append(Spacer(1, 10))
-        
-        return elements
+            story.append(alt_table)
+            story.append(Spacer(1, 4*mm))
     
-    def _build_footer(self, bom_info: Dict) -> List:
-        """Build document footer section"""
-        elements = []
+    def create_notes_section(self, story: list, bom_info: Dict, styles: Any,
+                            language: str = 'vi'):
+        """Create notes section if notes exist"""
+        notes = bom_info.get('notes', '')
+        if not notes:
+            return
         
-        elements.append(Spacer(1, 20))
-        elements.append(HRFlowable(
-            width="100%",
-            thickness=0.5,
-            color=colors.HexColor('#bdc3c7'),
-            spaceBefore=10,
-            spaceAfter=10
-        ))
+        story.append(Spacer(1, 5*mm))
+        
+        if language == 'vi':
+            label = "Ghi chú:"
+        else:
+            label = "Notes:"
+        
+        story.append(Paragraph(f"<b>{label}</b> {notes}", styles['NormalViet']))
+    
+    def create_footer(self, story: list, bom_info: Dict, styles: Any):
+        """Create document footer"""
+        story.append(Spacer(1, 10*mm))
+        
+        # Horizontal line
+        line_data = [['_' * 120]]
+        line_table = Table(line_data)
+        line_table.setStyle(TableStyle([
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor('#bdc3c7')),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTSIZE', (0, 0), (-1, -1), 6),
+        ]))
+        story.append(line_table)
+        story.append(Spacer(1, 3*mm))
         
         # Generation info
-        now = datetime.now()
-        footer_text = (
-            f"Generated: {now.strftime('%Y-%m-%d %H:%M:%S')} | "
-            f"BOM Version: {bom_info.get('version', 1)} | "
-            f"Status: {bom_info.get('status', 'N/A')}"
-        )
+        timestamp = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+        version = bom_info.get('version', 1)
+        status = bom_info.get('status', 'N/A')
         
-        elements.append(Paragraph(footer_text, self.styles['BOMSmall']))
-        
-        return elements
+        footer_text = f"Generated: {timestamp} | BOM Version: {version} | Status: {status}"
+        story.append(Paragraph(footer_text, styles['Footer']))
     
-    def _add_page_number(self, canvas, doc):
-        """Add page number to each page"""
-        canvas.saveState()
-        canvas.setFont(FONT_NAME, 8)
-        canvas.setFillColor(colors.grey)
+    def generate_pdf(self, bom_info: Dict[str, Any],
+                    materials: pd.DataFrame,
+                    alternatives_data: Dict[int, pd.DataFrame],
+                    language: str = 'vi',
+                    layout: str = 'landscape') -> Optional[bytes]:
+        """
+        Generate PDF for Bill of Materials
         
-        page_num = canvas.getPageNumber()
-        text = f"Page {page_num}"
-        
-        canvas.drawRightString(
-            self.page_width - 15*mm,
-            10*mm,
-            text
-        )
-        canvas.restoreState()
+        Args:
+            bom_info: BOM header information
+            materials: DataFrame of BOM materials
+            alternatives_data: Dict mapping detail_id to alternatives DataFrame
+            language: 'vi' for Vietnamese, 'en' for English
+            layout: 'landscape' (default) or 'portrait'
+            
+        Returns:
+            PDF as bytes or None on error
+        """
+        try:
+            page_size = landscape(A4) if layout == 'landscape' else A4
+            
+            buffer = BytesIO()
+            doc = SimpleDocTemplate(
+                buffer, pagesize=page_size,
+                rightMargin=10*mm, leftMargin=10*mm,
+                topMargin=10*mm, bottomMargin=10*mm
+            )
+            
+            story = []
+            styles = self.get_custom_styles()
+            
+            # Build document sections
+            self.create_header(story, bom_info, styles, language, layout)
+            self.create_bom_info(story, bom_info, styles, language, layout)
+            self.create_materials_table(story, materials, alternatives_data, styles, language, layout)
+            self.create_notes_section(story, bom_info, styles, language)
+            self.create_footer(story, bom_info, styles)
+            
+            # Build PDF
+            doc.build(story)
+            
+            pdf_content = buffer.getvalue()
+            buffer.close()
+            
+            logger.info(f"✅ BOM PDF generated: {bom_info.get('bom_code', 'N/A')}")
+            return pdf_content
+            
+        except Exception as e:
+            logger.error(f"❌ BOM PDF generation failed: {e}", exc_info=True)
+            return None
 
 
 # ==================== Helper Functions ====================
@@ -512,7 +865,8 @@ class BOMPDFGenerator:
 def generate_bom_pdf(bom_info: Dict[str, Any],
                      materials: pd.DataFrame,
                      alternatives_data: Dict[int, pd.DataFrame],
-                     company_name: str = "Prostech Asia") -> bytes:
+                     language: str = 'vi',
+                     layout: str = 'landscape') -> Optional[bytes]:
     """
     Convenience function to generate BOM PDF
     
@@ -520,10 +874,22 @@ def generate_bom_pdf(bom_info: Dict[str, Any],
         bom_info: BOM header information
         materials: DataFrame of BOM materials
         alternatives_data: Dict mapping detail_id to alternatives DataFrame
-        company_name: Company name for header
+        language: 'vi' for Vietnamese, 'en' for English
+        layout: 'landscape' (default) or 'portrait'
         
     Returns:
-        PDF as bytes
+        PDF as bytes or None on error
     """
     generator = BOMPDFGenerator()
-    return generator.generate(bom_info, materials, alternatives_data, company_name)
+    return generator.generate_pdf(bom_info, materials, alternatives_data, language, layout)
+
+
+# Singleton instance
+_pdf_generator = None
+
+def get_pdf_generator() -> BOMPDFGenerator:
+    """Get singleton PDF generator instance"""
+    global _pdf_generator
+    if _pdf_generator is None:
+        _pdf_generator = BOMPDFGenerator()
+    return _pdf_generator
