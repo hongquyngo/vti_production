@@ -305,12 +305,27 @@ class BOMManager:
     
     # ==================== CREATE Operations ====================
     
-    def create_bom(self, bom_data: Dict, materials: List[Dict], user_id: int) -> int:
-        """Create new BOM with materials and alternatives"""
+    def create_bom(self, bom_data: Dict, materials: List[Dict] = None, user_id: int = None) -> str:
+        """
+        Create new BOM with materials and alternatives
+        
+        Supports two calling conventions:
+        1. create_bom(bom_data) where bom_data contains 'materials' and 'created_by'
+        2. create_bom(bom_data, materials, user_id) with separate arguments
+        
+        Returns:
+            bom_code: The generated BOM code (e.g., 'BOM-202512-001')
+        """
         conn = self.engine.connect()
         trans = conn.begin()
         
         try:
+            # Support both calling conventions
+            if materials is None:
+                materials = bom_data.get('materials', [])
+            if user_id is None:
+                user_id = bom_data.get('created_by', 1)
+            
             user_id = convert_to_native(user_id)
             product_id = convert_to_native(bom_data['product_id'])
             
@@ -413,7 +428,7 @@ class BOMManager:
             
             trans.commit()
             logger.info(f"BOM created: {bom_code} (ID: {bom_id})")
-            return bom_id
+            return bom_code
         
         except Exception as e:
             trans.rollback()
@@ -751,16 +766,85 @@ class BOMManager:
     
     # ==================== CLONE Operations ====================
     
+    def _get_clone_materials(self, source_bom_id: int) -> List[Dict]:
+        """Get materials from source BOM for cloning"""
+        # Get materials
+        materials_query = """
+            SELECT 
+                d.material_id, d.material_type, d.quantity, d.uom, d.scrap_rate
+            FROM bom_details d
+            WHERE d.bom_header_id = %s
+        """
+        materials_df = pd.read_sql(materials_query, self.engine, params=(source_bom_id,))
+        
+        materials = []
+        for _, mat in materials_df.iterrows():
+            material_data = {
+                'material_id': int(mat['material_id']),
+                'material_type': str(mat['material_type']),
+                'quantity': float(mat['quantity']),
+                'uom': str(mat['uom']),
+                'scrap_rate': float(mat.get('scrap_rate', 0)),
+                'alternatives': []
+            }
+            
+            # Get alternatives for this material
+            alt_query = """
+                SELECT 
+                    a.alternative_material_id as material_id,
+                    a.material_type, a.quantity, a.uom, a.scrap_rate,
+                    a.priority, a.is_active, a.notes
+                FROM bom_material_alternatives a
+                JOIN bom_details d ON a.bom_detail_id = d.id
+                WHERE d.bom_header_id = %s AND d.material_id = %s
+                ORDER BY a.priority
+            """
+            alts_df = pd.read_sql(alt_query, self.engine, 
+                                  params=(source_bom_id, mat['material_id']))
+            
+            for _, alt in alts_df.iterrows():
+                material_data['alternatives'].append({
+                    'material_id': int(alt['material_id']),
+                    'material_type': str(alt['material_type']),
+                    'quantity': float(alt['quantity']),
+                    'uom': str(alt['uom']),
+                    'scrap_rate': float(alt.get('scrap_rate', 0)),
+                    'priority': int(alt.get('priority', 1)),
+                    'is_active': int(alt.get('is_active', 1)),
+                    'notes': str(alt.get('notes', '') or '')
+                })
+            
+            materials.append(material_data)
+        
+        return materials
+    
     def clone_bom(self, source_bom_id: int, new_bom_data: Dict, 
-                  materials: List[Dict], user_id: int) -> int:
-        """Clone existing BOM with modifications"""
+                  materials: List[Dict] = None, user_id: int = None) -> str:
+        """
+        Clone existing BOM with modifications
+        
+        Supports two calling conventions:
+        1. clone_bom(source_bom_id, new_bom_data) - materials loaded from source
+        2. clone_bom(source_bom_id, new_bom_data, materials, user_id) with separate arguments
+        
+        Returns:
+            bom_code: The generated BOM code for the new BOM
+        """
         conn = self.engine.connect()
         trans = conn.begin()
         
         try:
+            # Support flexible calling conventions
+            if user_id is None:
+                user_id = new_bom_data.get('created_by', 1)
+            
             user_id = convert_to_native(user_id)
             source_bom_id = convert_to_native(source_bom_id)
             product_id = convert_to_native(new_bom_data['product_id'])
+            
+            # If materials not provided, load from source BOM
+            if materials is None:
+                materials = self._get_clone_materials(source_bom_id)
             
             # Generate new BOM code
             bom_code = self._generate_bom_code(conn, new_bom_data['bom_type'])
@@ -848,7 +932,7 @@ class BOMManager:
             
             trans.commit()
             logger.info(f"BOM cloned: {source_bom_id} -> {new_bom_id} ({bom_code})")
-            return new_bom_id
+            return bom_code
         
         except Exception as e:
             trans.rollback()
