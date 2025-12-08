@@ -1,7 +1,16 @@
 # utils/bom/dialogs/status.py
 """
-Change BOM Status Dialog with Alternatives Awareness
-Status transition with validation considering alternatives
+Change BOM Status Dialog - VERSION 2.0
+
+Updated status transitions:
+- DRAFT → ACTIVE, INACTIVE
+- ACTIVE → INACTIVE, DRAFT (if no usage)
+- INACTIVE → ACTIVE, DRAFT (if no usage)
+
+New in v2.0:
+- Added ACTIVE/INACTIVE → DRAFT transition (only if total_usage == 0)
+- Enhanced validation with usage context
+- Clearer requirements display
 """
 
 import logging
@@ -9,14 +18,21 @@ import streamlit as st
 
 from utils.bom.manager import BOMManager, BOMException, BOMValidationError, BOMNotFoundError
 from utils.bom.state import StateManager
-from utils.bom.common import create_status_indicator, STATUS_WORKFLOW
+from utils.bom.common import (
+    create_status_indicator,
+    STATUS_WORKFLOW,
+    get_allowed_status_transitions,
+    validate_status_transition,
+    render_usage_context,
+    format_number
+)
 
 logger = logging.getLogger(__name__)
 
 
 @st.dialog("🔄 Change BOM Status", width="large")
 def show_status_dialog(bom_id: int):
-    """Change BOM status dialog"""
+    """Change BOM status dialog with usage-aware transitions"""
     state = StateManager()
     manager = BOMManager()
     
@@ -31,16 +47,7 @@ def show_status_dialog(bom_id: int):
             return
         
         # Display BOM info
-        st.markdown("### BOM Information")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write(f"**Code:** {bom_info['bom_code']}")
-            st.write(f"**Name:** {bom_info['bom_name']}")
-        
-        with col2:
-            st.write(f"**Type:** {bom_info['bom_type']}")
-            st.write(f"**Product:** {bom_info['product_name']}")
+        _render_bom_info(bom_info)
         
         st.markdown("---")
         
@@ -49,14 +56,16 @@ def show_status_dialog(bom_id: int):
         st.markdown("### Current Status")
         st.info(f"**{create_status_indicator(current_status)}**")
         
+        # Usage context
+        st.markdown("### 📊 Usage Context")
+        render_usage_context(bom_info)
+        
         st.markdown("---")
         
-        # New status selection
-        st.markdown("### Select New Status")
+        # Get allowed transitions with validation
+        transitions = get_allowed_status_transitions(bom_info)
         
-        allowed_statuses = STATUS_WORKFLOW.get(current_status, [])
-        
-        if not allowed_statuses:
+        if not transitions:
             st.warning(f"⚠️ No status transitions available from {current_status}")
             
             if st.button("Close", use_container_width=True, key=f"status_notransition_close_{bom_id}"):
@@ -64,26 +73,37 @@ def show_status_dialog(bom_id: int):
                 st.rerun()
             return
         
-        new_status = st.radio(
+        # New status selection
+        st.markdown("### Select New Status")
+        
+        # Build options with availability info
+        status_options = []
+        for new_status, (is_allowed, reason) in transitions.items():
+            status_options.append({
+                'status': new_status,
+                'allowed': is_allowed,
+                'reason': reason
+            })
+        
+        # Radio for status selection
+        selected_status = st.radio(
             "New Status",
-            options=allowed_statuses,
-            format_func=lambda x: create_status_indicator(x),
+            options=[opt['status'] for opt in status_options],
+            format_func=lambda x: _format_status_option(x, transitions),
             key=f"status_radio_{bom_id}"
         )
         
         # Show requirements for selected status
-        if new_status:
-            _render_status_requirements(new_status, bom_info, manager)
+        if selected_status:
+            _render_status_requirements(selected_status, bom_info, transitions, manager)
         
         st.markdown("---")
         
         # Validate transition
-        can_transition, error_msg = _validate_status_transition(
-            current_status, new_status, bom_info, manager
-        )
+        is_allowed, error_msg = transitions.get(selected_status, (False, "Invalid status"))
         
         # Show validation errors
-        if not can_transition:
+        if not is_allowed:
             st.error(f"❌ {error_msg}")
         
         # Action buttons
@@ -93,11 +113,11 @@ def show_status_dialog(bom_id: int):
             if st.button(
                 "✅ Update Status",
                 type="primary",
-                disabled=not can_transition,
+                disabled=not is_allowed,
                 use_container_width=True,
                 key=f"status_update_{bom_id}"
             ):
-                _handle_status_update(bom_id, new_status, bom_info, state, manager)
+                _handle_status_update(bom_id, selected_status, bom_info, state, manager)
         
         with col2:
             if st.button("❌ Cancel", use_container_width=True, key=f"status_cancel_{bom_id}"):
@@ -113,12 +133,44 @@ def show_status_dialog(bom_id: int):
             st.rerun()
 
 
-def _render_status_requirements(status: str, bom_info: dict, manager: BOMManager):
-    """Render requirements for selected status """
-    st.markdown("#### Requirements:")
+def _render_bom_info(bom_info: dict):
+    """Render BOM information header"""
+    st.markdown("### BOM Information")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.write(f"**Code:** {bom_info['bom_code']}")
+        st.write(f"**Name:** {bom_info['bom_name']}")
+    
+    with col2:
+        st.write(f"**Type:** {bom_info['bom_type']}")
+        st.write(f"**Product:** {bom_info['product_name']}")
+
+
+def _format_status_option(status: str, transitions: dict) -> str:
+    """Format status option with availability indicator"""
+    is_allowed, reason = transitions.get(status, (False, ""))
+    
+    indicator = create_status_indicator(status)
+    
+    if is_allowed:
+        return f"{indicator}"
+    else:
+        return f"{indicator} (🚫 Blocked)"
+
+
+def _render_status_requirements(status: str, bom_info: dict, transitions: dict, manager: BOMManager):
+    """Render requirements for selected status"""
+    st.markdown("#### Requirements & Impact:")
+    
+    is_allowed, reason = transitions.get(status, (False, "Unknown"))
+    
+    total_usage = int(bom_info.get('total_usage', 0))
+    active_orders = int(bom_info.get('active_orders', 0))
+    completed_orders = total_usage - active_orders
     
     if status == 'ACTIVE':
-        st.info("**To activate BOM, the following is required:**")
+        st.info("**To activate BOM:**")
         
         # Check materials
         bom_details = manager.get_bom_details(bom_info['id'])
@@ -136,61 +188,35 @@ def _render_status_requirements(status: str, bom_info: dict, manager: BOMManager
         has_output = bom_info.get('output_qty', 0) > 0
         output_icon = "✅" if has_output else "❌"
         st.write(f"{output_icon} Output quantity > 0")
-
-        st.caption("ℹ️ Stock availability will be validated at Manufacturing Order level")
         
+        st.caption("ℹ️ Stock availability will be validated at Manufacturing Order level")
     
     elif status == 'INACTIVE':
         st.info("**To deactivate BOM:**")
         
-        active_orders = bom_info.get('active_orders', 0)
         no_active_orders = active_orders == 0
-        
         orders_icon = "✅" if no_active_orders else "❌"
         st.write(f"{orders_icon} No active manufacturing orders (Current: {active_orders})")
         
         if active_orders > 0:
-            st.warning(
-                "⚠️ Complete or cancel all active orders before deactivating BOM"
-            )
+            st.warning("⚠️ Complete or cancel all active orders before deactivating BOM")
+        
+        if completed_orders > 0:
+            st.caption(f"ℹ️ This BOM has {completed_orders} completed order(s). Deactivating will prevent new orders but preserve history.")
     
     elif status == 'DRAFT':
-        st.info("**Reverting to DRAFT:**")
-        st.write("✅ Can edit BOM information")
-        st.write("✅ Can modify materials and alternatives")
-        st.write("⚠️ Cannot be used in manufacturing orders")
-
-def _validate_status_transition(current: str, new: str, 
-                                bom_info: dict, manager: BOMManager) -> tuple[bool, str]:
-    """Validate if status transition is allowed"""
-    # Check if same status
-    if current == new:
-        return False, "New status must be different from current status"
-    
-    # Check if transition is allowed
-    allowed = STATUS_WORKFLOW.get(current, [])
-    if new not in allowed:
-        return False, f"Cannot transition from {current} to {new}"
-    
-    # Validate ACTIVE requirements
-    if new == 'ACTIVE':
-        # Check has materials
-        bom_details = manager.get_bom_details(bom_info['id'])
-        if bom_details.empty:
-            return False, "Cannot activate BOM without materials"
+        st.info("**To return to DRAFT:**")
         
-        # Check output quantity
-        if bom_info.get('output_qty', 0) <= 0:
-            return False, "Output quantity must be greater than 0"
+        no_usage = total_usage == 0
+        usage_icon = "✅" if no_usage else "❌"
+        st.write(f"{usage_icon} No manufacturing orders created (Current: {total_usage})")
         
-    # Validate INACTIVE requirements
-    if new == 'INACTIVE':
-        # Check no active orders
-        active_orders = bom_info.get('active_orders', 0)
-        if active_orders > 0:
-            return False, f"Cannot deactivate BOM with {active_orders} active manufacturing orders"
-    
-    return True, ""
+        if no_usage:
+            st.success("✅ BOM can be returned to DRAFT for full editing")
+            st.caption("ℹ️ In DRAFT status, you can modify all BOM information including header, materials, and alternatives.")
+        else:
+            st.error(f"❌ Cannot return to DRAFT - BOM has been used in {total_usage} order(s)")
+            st.caption("💡 Use 'Clone' to create a new editable BOM based on this one instead.")
 
 
 def _handle_status_update(bom_id: int, new_status: str, bom_info: dict,
@@ -198,6 +224,17 @@ def _handle_status_update(bom_id: int, new_status: str, bom_info: dict,
     """Handle status update"""
     try:
         user_id = st.session_state.get('user_id', 1)
+        
+        # Final validation
+        is_valid, error = validate_status_transition(
+            bom_info['status'], 
+            new_status, 
+            bom_info
+        )
+        
+        if not is_valid:
+            st.error(f"❌ {error}")
+            return
         
         manager.update_bom_status(bom_id, new_status, user_id)
         
@@ -207,12 +244,13 @@ def _handle_status_update(bom_id: int, new_status: str, bom_info: dict,
             bom_code=bom_info['bom_code']
         )
         
+        # Clear cache to reflect status change
+        state.clear_bom_list_cache()
+        
         state.show_success(
             f"✅ BOM {bom_info['bom_code']} status updated to {new_status}"
         )
         
-        state.clear_bom_list_cache() # Clear cache to reflect status change
-
         state.close_dialog()
         
         st.rerun()

@@ -1,12 +1,17 @@
 # utils/bom/common.py
 """
-Common utilities for BOM module - ENHANCED VERSION
-Formatting, UI helpers, and product queries with full product info
+Common utilities for BOM module - ENHANCED VERSION v2.0
+Formatting, UI helpers, product queries, and Edit Level system
+
+Changes in v2.0:
+- Added Edit Level constants and get_edit_level() function
+- Updated STATUS_WORKFLOW to support ACTIVE/INACTIVE → DRAFT
+- Added validation helpers for status transitions
 """
 
 import logging
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Union, Optional, Dict, Any
+from typing import Union, Optional, Dict, Any, Tuple
 from io import BytesIO
 
 import pandas as pd
@@ -15,6 +20,254 @@ import streamlit as st
 from ..db import get_db_engine
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Edit Level Constants ====================
+
+class EditLevel:
+    """
+    Edit permission levels for BOM based on status and usage
+    
+    Level 0: READ_ONLY - No edits allowed (has completed orders or inactive with history)
+    Level 1: METADATA_ONLY - Name, notes, effective_date only (reserved for future use)
+    Level 2: ALTERNATIVES_PLUS - Alternatives + metadata (has IN_PROGRESS orders)
+    Level 4: FULL_EDIT - Everything editable (DRAFT or no usage)
+    """
+    READ_ONLY = 0
+    METADATA_ONLY = 1
+    ALTERNATIVES_PLUS = 2
+    FULL_EDIT = 4
+    
+    LABELS = {
+        0: "Read Only",
+        1: "Metadata Only",
+        2: "Alternatives + Metadata",
+        4: "Full Edit"
+    }
+    
+    ICONS = {
+        0: "🔒",
+        1: "📝",
+        2: "🔀",
+        4: "✏️"
+    }
+
+
+def get_edit_level(bom_info: Dict[str, Any]) -> int:
+    """
+    Determine edit level based on BOM status and usage context
+    
+    Business Rules:
+    - DRAFT: Always full edit
+    - ACTIVE with no usage: Full edit (never been used)
+    - ACTIVE with IN_PROGRESS orders: Alternatives only (don't break running production)
+    - ACTIVE with only COMPLETED orders: Read only (create new BOM instead)
+    - INACTIVE with no usage: Full edit (can be edited freely)
+    - INACTIVE with usage history: Read only (historical data, create new BOM)
+    
+    Args:
+        bom_info: Dictionary containing status, active_orders, total_usage
+        
+    Returns:
+        EditLevel constant (0, 1, 2, or 4)
+    """
+    status = bom_info.get('status', 'DRAFT')
+    active_orders = int(bom_info.get('active_orders', 0))  # IN_PROGRESS orders
+    total_usage = int(bom_info.get('total_usage', 0))      # All MOs ever created
+    
+    if status == 'DRAFT':
+        return EditLevel.FULL_EDIT
+    
+    if status == 'ACTIVE':
+        if total_usage == 0:
+            # Never used - safe to fully edit
+            return EditLevel.FULL_EDIT
+        elif active_orders > 0:
+            # Has running orders - only allow alternatives changes
+            return EditLevel.ALTERNATIVES_PLUS
+        else:
+            # Has completed orders but no active - read only, create new BOM
+            return EditLevel.READ_ONLY
+    
+    if status == 'INACTIVE':
+        if total_usage == 0:
+            # Never used - safe to fully edit
+            return EditLevel.FULL_EDIT
+        else:
+            # Has usage history - read only for audit trail
+            return EditLevel.READ_ONLY
+    
+    # Default fallback
+    return EditLevel.READ_ONLY
+
+
+def get_edit_level_description(level: int, bom_info: Dict[str, Any]) -> Tuple[str, str, str]:
+    """
+    Get human-readable description for edit level
+    
+    Args:
+        level: EditLevel constant
+        bom_info: BOM information dict
+        
+    Returns:
+        Tuple of (title, description, help_text)
+    """
+    status = bom_info.get('status', 'DRAFT')
+    active_orders = int(bom_info.get('active_orders', 0))
+    total_usage = int(bom_info.get('total_usage', 0))
+    completed_orders = total_usage - active_orders
+    
+    if level == EditLevel.FULL_EDIT:
+        return (
+            "✏️ Full Edit Mode",
+            "You can modify all BOM information including header, materials, and alternatives.",
+            "All changes will be saved immediately."
+        )
+    
+    if level == EditLevel.ALTERNATIVES_PLUS:
+        return (
+            "🔀 Limited Edit Mode - Alternatives Only",
+            f"BOM has {active_orders} active manufacturing order(s) in progress. "
+            "Only alternatives and metadata can be modified to avoid disrupting production.",
+            "💡 Complete or cancel active orders to enable full editing, or clone this BOM for modifications."
+        )
+    
+    if level == EditLevel.METADATA_ONLY:
+        return (
+            "📝 Metadata Only Mode",
+            "Only BOM name, notes, and effective date can be modified.",
+            "💡 Clone this BOM if you need to make structural changes."
+        )
+    
+    # READ_ONLY
+    if status == 'ACTIVE' and completed_orders > 0:
+        return (
+            "🔒 Read Only - Has Completed Orders",
+            f"BOM has been used in {completed_orders} completed manufacturing order(s). "
+            "Editing is disabled to preserve production history and audit trail.",
+            "💡 Use 'Clone' to create a new BOM based on this one if you need modifications."
+        )
+    
+    if status == 'INACTIVE' and total_usage > 0:
+        return (
+            "🔒 Read Only - Historical BOM",
+            f"This inactive BOM has been used in {total_usage} manufacturing order(s). "
+            "Editing is disabled to preserve historical data.",
+            "💡 Use 'Clone' to create a new BOM, or change status to ACTIVE first."
+        )
+    
+    return (
+        "🔒 Read Only",
+        "This BOM cannot be edited in its current state.",
+        "💡 Check BOM status and usage to determine available actions."
+    )
+
+
+def can_edit_field(level: int, field_type: str) -> bool:
+    """
+    Check if a specific field type can be edited at given level
+    
+    Args:
+        level: EditLevel constant
+        field_type: One of 'header', 'materials', 'alternatives', 'metadata'
+        
+    Returns:
+        True if field can be edited
+    """
+    if level == EditLevel.FULL_EDIT:
+        return True
+    
+    if level == EditLevel.ALTERNATIVES_PLUS:
+        return field_type in ('alternatives', 'metadata')
+    
+    if level == EditLevel.METADATA_ONLY:
+        return field_type == 'metadata'
+    
+    return False
+
+
+# ==================== Status Workflow ====================
+
+# Updated workflow to support returning to DRAFT
+STATUS_WORKFLOW = {
+    'DRAFT': ['ACTIVE', 'INACTIVE'],
+    'ACTIVE': ['INACTIVE', 'DRAFT'],   # Added DRAFT transition
+    'INACTIVE': ['ACTIVE', 'DRAFT']    # Added DRAFT transition
+}
+
+
+def get_allowed_status_transitions(bom_info: Dict[str, Any]) -> Dict[str, Tuple[bool, str]]:
+    """
+    Get allowed status transitions with validation
+    
+    Args:
+        bom_info: BOM information dict
+        
+    Returns:
+        Dict of {new_status: (is_allowed, reason)}
+    """
+    current_status = bom_info.get('status', 'DRAFT')
+    active_orders = int(bom_info.get('active_orders', 0))
+    total_usage = int(bom_info.get('total_usage', 0))
+    material_count = int(bom_info.get('material_count', 0))
+    
+    possible_statuses = STATUS_WORKFLOW.get(current_status, [])
+    result = {}
+    
+    for new_status in possible_statuses:
+        if new_status == 'ACTIVE':
+            # Activation requirements
+            if material_count == 0:
+                result[new_status] = (False, "Cannot activate BOM without materials")
+            elif bom_info.get('output_qty', 0) <= 0:
+                result[new_status] = (False, "Output quantity must be greater than 0")
+            else:
+                result[new_status] = (True, "BOM can be activated")
+        
+        elif new_status == 'INACTIVE':
+            # Deactivation requirements
+            if active_orders > 0:
+                result[new_status] = (False, f"Cannot deactivate - {active_orders} active order(s) in progress")
+            else:
+                result[new_status] = (True, "BOM can be deactivated")
+        
+        elif new_status == 'DRAFT':
+            # Return to DRAFT requirements - only if never used
+            if total_usage > 0:
+                result[new_status] = (False, f"Cannot return to DRAFT - BOM has been used in {total_usage} order(s)")
+            else:
+                result[new_status] = (True, "BOM can be returned to DRAFT for full editing")
+    
+    return result
+
+
+def validate_status_transition(current_status: str, new_status: str, 
+                                bom_info: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Validate if a status transition is allowed
+    
+    Args:
+        current_status: Current BOM status
+        new_status: Target status
+        bom_info: BOM information dict
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if current_status == new_status:
+        return False, "New status must be different from current status"
+    
+    allowed = STATUS_WORKFLOW.get(current_status, [])
+    if new_status not in allowed:
+        return False, f"Cannot transition from {current_status} to {new_status}"
+    
+    transitions = get_allowed_status_transitions(bom_info)
+    if new_status in transitions:
+        is_allowed, reason = transitions[new_status]
+        if not is_allowed:
+            return False, reason
+    
+    return True, ""
 
 
 # ==================== Number Formatting ====================
@@ -420,6 +673,58 @@ def render_bom_summary(bom_info: Dict[str, Any]):
         st.write(f"Materials: {bom_info.get('material_count', 0)}")
 
 
+def render_edit_level_indicator(level: int, bom_info: Dict[str, Any]):
+    """
+    Render edit level indicator with description
+    
+    Args:
+        level: EditLevel constant
+        bom_info: BOM information dict
+    """
+    title, description, help_text = get_edit_level_description(level, bom_info)
+    
+    if level == EditLevel.FULL_EDIT:
+        st.info(f"**{title}**\n\n{description}")
+    elif level == EditLevel.ALTERNATIVES_PLUS:
+        st.warning(f"**{title}**\n\n{description}")
+        st.caption(help_text)
+    elif level == EditLevel.METADATA_ONLY:
+        st.warning(f"**{title}**\n\n{description}")
+        st.caption(help_text)
+    else:  # READ_ONLY
+        st.error(f"**{title}**\n\n{description}")
+        st.caption(help_text)
+
+
+def render_usage_context(bom_info: Dict[str, Any]):
+    """
+    Render BOM usage context metrics
+    
+    Args:
+        bom_info: BOM information dict
+    """
+    total_usage = int(bom_info.get('total_usage', 0))
+    active_orders = int(bom_info.get('active_orders', 0))
+    completed_orders = total_usage - active_orders
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if active_orders > 0:
+            st.metric("🔄 Active Orders", active_orders, help="Manufacturing orders in progress")
+        else:
+            st.metric("🔄 Active Orders", 0)
+    
+    with col2:
+        if completed_orders > 0:
+            st.metric("✅ Completed Orders", completed_orders, help="Finished manufacturing orders")
+        else:
+            st.metric("✅ Completed Orders", 0)
+    
+    with col3:
+        st.metric("📊 Total Usage", total_usage, help="All manufacturing orders using this BOM")
+
+
 # ==================== Material Type Counter ====================
 
 def count_materials_by_type(materials: list) -> Dict[str, int]:
@@ -476,7 +781,7 @@ def render_material_type_counter(materials: list, show_warning: bool = True):
         st.warning("⚠️ **At least 1 RAW_MATERIAL is required to create BOM**")
 
 
-def validate_materials_for_bom(materials: list) -> tuple[bool, str]:
+def validate_materials_for_bom(materials: list) -> Tuple[bool, str]:
     """
     Validate materials list for BOM creation
     
@@ -495,12 +800,3 @@ def validate_materials_for_bom(materials: list) -> tuple[bool, str]:
         return False, "At least one RAW_MATERIAL is required"
     
     return True, ""
-
-
-# ==================== Constants ====================
-
-STATUS_WORKFLOW = {
-    'DRAFT': ['ACTIVE', 'INACTIVE'],
-    'ACTIVE': ['INACTIVE'],
-    'INACTIVE': ['ACTIVE']
-}

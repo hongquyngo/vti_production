@@ -1,8 +1,12 @@
 # pages/1___BOM.py
 """
-Bill of Materials (BOM) Management - ENHANCED VERSION
+Bill of Materials (BOM) Management - VERSION 2.1
 Clean single-page UI with dialog-driven workflows
-Added Clone functionality and performance optimizations
+
+Changes in v2.1:
+- Updated Edit button logic to use usage-based edit levels
+- Edit enabled for INACTIVE BOMs without usage
+- Better help text based on actual edit capability
 """
 
 import streamlit as st
@@ -18,7 +22,10 @@ from utils.bom.common import (
     create_status_indicator,
     format_number,
     format_product_display,
-    get_products
+    get_products,
+    # New imports for edit levels
+    EditLevel,
+    get_edit_level
 )
 
 # Import dialogs
@@ -28,7 +35,7 @@ from utils.bom.dialogs.edit import show_edit_dialog
 from utils.bom.dialogs.delete import show_delete_dialog
 from utils.bom.dialogs.status import show_status_dialog
 from utils.bom.dialogs.where_used import show_where_used_dialog
-from utils.bom.dialogs.clone import show_clone_dialog  # New clone dialog
+from utils.bom.dialogs.clone import show_clone_dialog
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +295,18 @@ def render_bom_table():
         # Action buttons for selected BOM
         st.markdown(f"### Actions for: **{selected_bom['bom_code']}** - {selected_bom['bom_name']}")
         
+        # Get edit level for this BOM
+        bom_info_for_level = {
+            'status': selected_bom['status'],
+            'total_usage': selected_bom['usage_count'],
+            'active_orders': 0,  # Will be fetched when needed in edit dialog
+            'material_count': selected_bom['material_count']
+        }
+        
+        # For more accurate edit level, we need active_orders
+        # But for button display, we can use a simplified check
+        edit_level = _get_simplified_edit_level(selected_bom)
+        
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         
         with col1:
@@ -296,21 +315,14 @@ def render_bom_table():
                 st.rerun()
         
         with col2:
-            # Edit enabled for DRAFT (full) and ACTIVE (alternatives only)
-            can_edit = selected_bom['status'] in ['DRAFT', 'ACTIVE']
-            disabled = not can_edit
+            # Edit button - enabled based on edit level
+            can_edit = edit_level > EditLevel.READ_ONLY
+            help_text = _get_edit_button_help(edit_level, selected_bom)
             
-            # Dynamic help text based on status
-            if selected_bom['status'] == 'DRAFT':
-                help_text = "Full edit mode - Modify all BOM information"
-            elif selected_bom['status'] == 'ACTIVE':
-                help_text = "Limited edit - Manage alternatives only"
-            else:
-                help_text = f"Cannot edit {selected_bom['status']} BOMs"
             if st.button(
                 "✏️ Edit",
                 use_container_width=True,
-                disabled=disabled,
+                disabled=not can_edit,
                 key=f"edit_btn_{selected_bom_id}",
                 help=help_text
             ):
@@ -346,6 +358,58 @@ def render_bom_table():
             ):
                 state.open_dialog(state.DIALOG_DELETE, selected_bom_id)
                 st.rerun()
+
+
+def _get_simplified_edit_level(bom_row: pd.Series) -> int:
+    """
+    Get simplified edit level for button display
+    Note: Full edit level requires active_orders which needs DB query
+    """
+    status = bom_row['status']
+    usage_count = int(bom_row.get('usage_count', 0))
+    
+    if status == 'DRAFT':
+        return EditLevel.FULL_EDIT
+    
+    if status == 'ACTIVE':
+        if usage_count == 0:
+            return EditLevel.FULL_EDIT
+        else:
+            # Could be ALTERNATIVES_PLUS or READ_ONLY depending on active orders
+            # Conservative assumption: at least alternatives
+            return EditLevel.ALTERNATIVES_PLUS
+    
+    if status == 'INACTIVE':
+        if usage_count == 0:
+            return EditLevel.FULL_EDIT
+        else:
+            return EditLevel.READ_ONLY
+    
+    return EditLevel.READ_ONLY
+
+
+def _get_edit_button_help(edit_level: int, bom_row: pd.Series) -> str:
+    """Get help text for edit button based on edit level"""
+    status = bom_row['status']
+    usage_count = int(bom_row.get('usage_count', 0))
+    
+    if edit_level == EditLevel.FULL_EDIT:
+        if status == 'DRAFT':
+            return "Full edit mode - Modify all BOM information"
+        else:
+            return "Full edit mode - BOM has never been used"
+    
+    if edit_level == EditLevel.ALTERNATIVES_PLUS:
+        return "Limited edit - Alternatives only (BOM has active orders)"
+    
+    if edit_level == EditLevel.METADATA_ONLY:
+        return "Metadata only - Name, notes, effective date"
+    
+    # READ_ONLY
+    if status == 'INACTIVE' and usage_count > 0:
+        return f"Read only - BOM has {usage_count} historical order(s). Use Clone instead."
+    
+    return f"Read only - BOM has {usage_count} completed order(s). Use Clone instead."
 
 
 def render_active_dialog():
@@ -404,7 +468,7 @@ def render_footer():
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.caption("Manufacturing Module v2.1 - BOM Management | Enhanced with Clone & Performance Optimizations")
+        st.caption("Manufacturing Module v2.1 - BOM Management | Usage-based Edit Levels")
     
     with col2:
         st.caption(f"Session: {st.session_state.get('user_name', 'Guest')}")
