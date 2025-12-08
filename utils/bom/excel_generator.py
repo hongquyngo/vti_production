@@ -1,19 +1,21 @@
 # utils/bom/excel_generator.py
 """
 Professional Excel Generator for BOM
-Creates styled Excel workbooks with multiple sheets
+Creates styled Excel workbook with single comprehensive sheet (like PDF)
 
-VERSION: 2.0.0
+VERSION: 3.0.0
 
-CHANGES in v2.0.0:
-- Added company_id and company_info parameters
-- Company information displayed in Summary and Metadata sheets
-- User selects company at export time (BOM can be shared across entities)
+CHANGES in v3.0.0:
+- Single sheet layout matching PDF structure
+- Company header with name (by language), address, MST
+- All information in one sheet: Header, BOM Info, Materials, Alternatives
+- Added exported_by parameter
+- Vietnamese diacritics removal for English export
 """
 
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from io import BytesIO
 
 import pandas as pd
@@ -28,26 +30,66 @@ from openpyxl.utils import get_column_letter
 logger = logging.getLogger(__name__)
 
 
+# ==================== Vietnamese Diacritics Removal ====================
+
+def remove_vietnamese_diacritics(text: str) -> str:
+    """Remove Vietnamese diacritics from text"""
+    if not text:
+        return text
+    
+    vietnamese_map = {
+        'à': 'a', 'á': 'a', 'ả': 'a', 'ã': 'a', 'ạ': 'a',
+        'ă': 'a', 'ằ': 'a', 'ắ': 'a', 'ẳ': 'a', 'ẵ': 'a', 'ặ': 'a',
+        'â': 'a', 'ầ': 'a', 'ấ': 'a', 'ẩ': 'a', 'ẫ': 'a', 'ậ': 'a',
+        'đ': 'd',
+        'è': 'e', 'é': 'e', 'ẻ': 'e', 'ẽ': 'e', 'ẹ': 'e',
+        'ê': 'e', 'ề': 'e', 'ế': 'e', 'ể': 'e', 'ễ': 'e', 'ệ': 'e',
+        'ì': 'i', 'í': 'i', 'ỉ': 'i', 'ĩ': 'i', 'ị': 'i',
+        'ò': 'o', 'ó': 'o', 'ỏ': 'o', 'õ': 'o', 'ọ': 'o',
+        'ô': 'o', 'ồ': 'o', 'ố': 'o', 'ổ': 'o', 'ỗ': 'o', 'ộ': 'o',
+        'ơ': 'o', 'ờ': 'o', 'ớ': 'o', 'ở': 'o', 'ỡ': 'o', 'ợ': 'o',
+        'ù': 'u', 'ú': 'u', 'ủ': 'u', 'ũ': 'u', 'ụ': 'u',
+        'ư': 'u', 'ừ': 'u', 'ứ': 'u', 'ử': 'u', 'ữ': 'u', 'ự': 'u',
+        'ỳ': 'y', 'ý': 'y', 'ỷ': 'y', 'ỹ': 'y', 'ỵ': 'y',
+        'À': 'A', 'Á': 'A', 'Ả': 'A', 'Ã': 'A', 'Ạ': 'A',
+        'Ă': 'A', 'Ằ': 'A', 'Ắ': 'A', 'Ẳ': 'A', 'Ẵ': 'A', 'Ặ': 'A',
+        'Â': 'A', 'Ầ': 'A', 'Ấ': 'A', 'Ẩ': 'A', 'Ẫ': 'A', 'Ậ': 'A',
+        'Đ': 'D',
+        'È': 'E', 'É': 'E', 'Ẻ': 'E', 'Ẽ': 'E', 'Ẹ': 'E',
+        'Ê': 'E', 'Ề': 'E', 'Ế': 'E', 'Ể': 'E', 'Ễ': 'E', 'Ệ': 'E',
+        'Ì': 'I', 'Í': 'I', 'Ỉ': 'I', 'Ĩ': 'I', 'Ị': 'I',
+        'Ò': 'O', 'Ó': 'O', 'Ỏ': 'O', 'Õ': 'O', 'Ọ': 'O',
+        'Ô': 'O', 'Ồ': 'O', 'Ố': 'O', 'Ổ': 'O', 'Ỗ': 'O', 'Ộ': 'O',
+        'Ơ': 'O', 'Ờ': 'O', 'Ớ': 'O', 'Ở': 'O', 'Ỡ': 'O', 'Ợ': 'O',
+        'Ù': 'U', 'Ú': 'U', 'Ủ': 'U', 'Ũ': 'U', 'Ụ': 'U',
+        'Ư': 'U', 'Ừ': 'U', 'Ứ': 'U', 'Ử': 'U', 'Ữ': 'U', 'Ự': 'U',
+        'Ỳ': 'Y', 'Ý': 'Y', 'Ỷ': 'Y', 'Ỹ': 'Y', 'Ỵ': 'Y',
+    }
+    
+    return ''.join(vietnamese_map.get(c, c) for c in text)
+
+
 # ==================== Style Definitions ====================
 
 # Colors
+COMPANY_BG = PatternFill(start_color="D5F5E3", end_color="D5F5E3", fill_type="solid")
+TITLE_BG = PatternFill(start_color="1ABC9C", end_color="1ABC9C", fill_type="solid")
 HEADER_BG = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
-HEADER_BG_LIGHT = PatternFill(start_color="34495E", end_color="34495E", fill_type="solid")
 SUBHEADER_BG = PatternFill(start_color="85929E", end_color="85929E", fill_type="solid")
 ALT_ROW_BG = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
-TITLE_BG = PatternFill(start_color="1ABC9C", end_color="1ABC9C", fill_type="solid")
 INFO_BG = PatternFill(start_color="EBF5FB", end_color="EBF5FB", fill_type="solid")
-COMPANY_BG = PatternFill(start_color="D5F5E3", end_color="D5F5E3", fill_type="solid")
+SECTION_BG = PatternFill(start_color="D5DBDB", end_color="D5DBDB", fill_type="solid")
 
 # Fonts
-TITLE_FONT = Font(name='Arial', size=16, bold=True, color="FFFFFF")
+COMPANY_FONT = Font(name='Arial', size=12, bold=True, color="1E8449")
+COMPANY_FONT_SUB = Font(name='Arial', size=10, italic=True, color="1E8449")
+TITLE_FONT = Font(name='Arial', size=14, bold=True, color="FFFFFF")
 HEADER_FONT = Font(name='Arial', size=10, bold=True, color="FFFFFF")
-SUBHEADER_FONT = Font(name='Arial', size=9, bold=True, color="FFFFFF")
+SECTION_FONT = Font(name='Arial', size=11, bold=True, color="2C3E50")
 LABEL_FONT = Font(name='Arial', size=10, bold=True, color="2C3E50")
 VALUE_FONT = Font(name='Arial', size=10, color="000000")
 NORMAL_FONT = Font(name='Arial', size=9, color="000000")
-SMALL_FONT = Font(name='Arial', size=8, color="7F8C8D")
-COMPANY_FONT = Font(name='Arial', size=11, bold=True, color="1E8449")
+FOOTER_FONT = Font(name='Arial', size=8, italic=True, color="7F8C8D")
 
 # Borders
 THIN_BORDER = Border(
@@ -57,13 +99,6 @@ THIN_BORDER = Border(
     bottom=Side(style='thin', color='BDC3C7')
 )
 
-MEDIUM_BORDER = Border(
-    left=Side(style='medium', color='2C3E50'),
-    right=Side(style='medium', color='2C3E50'),
-    top=Side(style='medium', color='2C3E50'),
-    bottom=Side(style='medium', color='2C3E50')
-)
-
 # Alignments
 CENTER_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
 LEFT_ALIGN = Alignment(horizontal='left', vertical='center', wrap_text=True)
@@ -71,19 +106,24 @@ RIGHT_ALIGN = Alignment(horizontal='right', vertical='center', wrap_text=True)
 
 
 class BOMExcelGenerator:
-    """Generate professional Excel workbook for BOM export"""
+    """Generate professional Excel workbook for BOM export - Single sheet layout"""
     
     def __init__(self):
         self.wb = None
+        self.ws = None
         self.company_info = None
+        self.language = 'vi'
+        self.current_row = 1
     
     def generate(self, bom_info: Dict[str, Any],
                  materials: pd.DataFrame,
                  alternatives_data: Dict[int, pd.DataFrame],
                  company_id: Optional[int] = None,
-                 company_info: Optional[Dict] = None) -> bytes:
+                 company_info: Optional[Dict] = None,
+                 language: str = 'vi',
+                 exported_by: Optional[str] = None) -> bytes:
         """
-        Generate Excel workbook for BOM
+        Generate Excel workbook for BOM - Single comprehensive sheet
         
         Args:
             bom_info: BOM header information
@@ -91,22 +131,29 @@ class BOMExcelGenerator:
             alternatives_data: Dict mapping detail_id to alternatives DataFrame
             company_id: Selected company ID (for reference)
             company_info: Pre-fetched company info from export dialog
+            language: 'vi' or 'en'
+            exported_by: Name of user exporting
             
         Returns:
             Excel file as bytes
         """
         self.wb = Workbook()
+        self.ws = self.wb.active
+        self.ws.title = "BOM"
         self.company_info = company_info or {}
+        self.language = language
+        self.current_row = 1
         
-        # Remove default sheet
-        default_sheet = self.wb.active
-        self.wb.remove(default_sheet)
+        # Set column widths
+        self._set_column_widths()
         
-        # Create sheets
-        self._create_summary_sheet(bom_info, materials)
-        self._create_materials_sheet(materials)
-        self._create_alternatives_sheet(materials, alternatives_data)
-        self._create_metadata_sheet(bom_info)
+        # Build single sheet with all sections
+        self._create_company_header()
+        self._create_document_title(bom_info)
+        self._create_bom_info_section(bom_info)
+        self._create_materials_section(materials)
+        self._create_alternatives_section(materials, alternatives_data)
+        self._create_footer(bom_info, exported_by)
         
         # Save to bytes
         buffer = BytesIO()
@@ -115,343 +162,400 @@ class BOMExcelGenerator:
         
         return buffer.getvalue()
     
-    def _create_summary_sheet(self, bom_info: Dict, materials: pd.DataFrame):
-        """Create summary sheet with company info and BOM overview"""
-        ws = self.wb.create_sheet("Summary", 0)
+    def _set_column_widths(self):
+        """Set column widths for optimal display"""
+        widths = {
+            'A': 6,   # STT
+            'B': 18,  # Code
+            'C': 45,  # Name
+            'D': 15,  # Type
+            'E': 12,  # Quantity
+            'F': 10,  # UOM
+            'G': 10,  # Scrap
+            'H': 8,   # Alt
+        }
+        for col, width in widths.items():
+            self.ws.column_dimensions[col].width = width
+    
+    def _create_company_header(self):
+        """Create company header section - matching PDF style"""
+        if not self.company_info:
+            return
         
-        # Set column widths
-        ws.column_dimensions['A'].width = 5
-        ws.column_dimensions['B'].width = 20
-        ws.column_dimensions['C'].width = 45
-        ws.column_dimensions['D'].width = 20
-        ws.column_dimensions['E'].width = 45
+        # Company name based on language
+        if self.language == 'vi':
+            company_name = self.company_info.get('local_name') or self.company_info.get('english_name', '')
+        else:
+            company_name = self.company_info.get('english_name') or self.company_info.get('local_name', '')
         
-        row = 1
+        # Address (remove diacritics for English)
+        address = self.company_info.get('address', '')
+        if self.language == 'en' and address:
+            address = remove_vietnamese_diacritics(address)
         
-        # ==================== Company Header ====================
-        if self.company_info:
-            company_name = self.company_info.get('english_name', '')
-            local_name = self.company_info.get('local_name', '')
-            
-            # Company name row
-            ws.merge_cells(f'B{row}:E{row}')
-            company_cell = ws.cell(row=row, column=2, value=company_name)
-            company_cell.font = COMPANY_FONT
-            company_cell.fill = COMPANY_BG
-            company_cell.alignment = CENTER_ALIGN
-            ws.row_dimensions[row].height = 25
-            row += 1
-            
-            # Local name row
-            if local_name:
-                ws.merge_cells(f'B{row}:E{row}')
-                local_cell = ws.cell(row=row, column=2, value=local_name)
-                local_cell.font = Font(name='Arial', size=10, italic=True, color="1E8449")
-                local_cell.fill = COMPANY_BG
-                local_cell.alignment = CENTER_ALIGN
-                row += 1
-            
-            row += 1  # Empty row after company header
+        # MST
+        mst = self.company_info.get('registration_code', '')
         
-        # ==================== Title Row ====================
-        ws.merge_cells(f'B{row}:E{row}')
-        title_cell = ws.cell(row=row, column=2, value="BILL OF MATERIALS (BOM)")
-        title_cell.font = TITLE_FONT
-        title_cell.fill = TITLE_BG
-        title_cell.alignment = CENTER_ALIGN
-        ws.row_dimensions[row].height = 30
-        row += 2
+        # Row 1: Company name
+        self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+        cell = self.ws.cell(row=self.current_row, column=1, value=company_name)
+        cell.font = COMPANY_FONT
+        cell.alignment = Alignment(horizontal='right', vertical='center')
+        cell.fill = COMPANY_BG
+        self.ws.row_dimensions[self.current_row].height = 22
+        self.current_row += 1
+        
+        # Row 2: Address
+        if address:
+            self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+            cell = self.ws.cell(row=self.current_row, column=1, value=address)
+            cell.font = COMPANY_FONT_SUB
+            cell.alignment = Alignment(horizontal='right', vertical='center')
+            cell.fill = COMPANY_BG
+            self.current_row += 1
+        
+        # Row 3: MST
+        if mst:
+            self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+            cell = self.ws.cell(row=self.current_row, column=1, value=f"MST: {mst}")
+            cell.font = COMPANY_FONT_SUB
+            cell.alignment = Alignment(horizontal='right', vertical='center')
+            cell.fill = COMPANY_BG
+            self.current_row += 1
+        
+        # Empty row
+        self.current_row += 1
+    
+    def _create_document_title(self, bom_info: Dict):
+        """Create document title section"""
+        # Title row
+        if self.language == 'vi':
+            title = "ĐỊNH MỨC SẢN XUẤT (BOM)"
+        else:
+            title = "BILL OF MATERIALS (BOM)"
+        
+        self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+        cell = self.ws.cell(row=self.current_row, column=1, value=title)
+        cell.font = TITLE_FONT
+        cell.fill = TITLE_BG
+        cell.alignment = CENTER_ALIGN
+        self.ws.row_dimensions[self.current_row].height = 28
+        self.current_row += 2
         
         # BOM Code subtitle
-        ws.merge_cells(f'B{row}:E{row}')
-        ws.cell(row=row, column=2, value=bom_info.get('bom_code', '')).font = Font(size=14, bold=True)
-        ws.cell(row=row, column=2).alignment = CENTER_ALIGN
-        row += 2
+        self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+        cell = self.ws.cell(row=self.current_row, column=1, value=bom_info.get('bom_code', ''))
+        cell.font = Font(name='Arial', size=12, bold=True)
+        cell.alignment = CENTER_ALIGN
+        self.current_row += 2
+    
+    def _create_bom_info_section(self, bom_info: Dict):
+        """Create BOM information section"""
+        # Section header
+        if self.language == 'vi':
+            section_title = "📋 THÔNG TIN BOM"
+        else:
+            section_title = "📋 BOM INFORMATION"
         
-        # ==================== BOM Information Section ====================
-        ws.merge_cells(f'B{row}:E{row}')
-        section_cell = ws.cell(row=row, column=2, value="📋 BOM Information")
-        section_cell.font = Font(size=12, bold=True, color="2C3E50")
-        row += 1
+        self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+        cell = self.ws.cell(row=self.current_row, column=1, value=section_title)
+        cell.font = SECTION_FONT
+        cell.fill = SECTION_BG
+        self.current_row += 1
         
-        # Info grid - 2 columns
+        # Labels based on language
+        if self.language == 'vi':
+            labels = {
+                'code': 'Mã BOM', 'name': 'Tên BOM', 'type': 'Loại BOM', 'status': 'Trạng thái',
+                'product': 'Sản phẩm', 'output': 'Sản lượng', 'effective': 'Ngày hiệu lực',
+                'version': 'Phiên bản', 'creator': 'Người tạo', 'created_date': 'Ngày tạo'
+            }
+        else:
+            labels = {
+                'code': 'BOM Code', 'name': 'BOM Name', 'type': 'BOM Type', 'status': 'Status',
+                'product': 'Output Product', 'output': 'Output Qty', 'effective': 'Effective Date',
+                'version': 'Version', 'creator': 'Created By', 'created_date': 'Created Date'
+            }
+        
+        # Format values
+        product_display = f"{bom_info.get('product_code', '')} - {bom_info.get('product_name', '')}"
+        output_qty = bom_info.get('output_qty', 0)
+        output_str = f"{output_qty:,.2f} {bom_info.get('uom', 'PCS')}"
+        
+        effective_date = bom_info.get('effective_date', '')
+        if effective_date and hasattr(effective_date, 'strftime'):
+            effective_date = effective_date.strftime('%d/%m/%Y')
+        
+        created_date = bom_info.get('created_date', '')
+        if created_date and hasattr(created_date, 'strftime'):
+            created_date = created_date.strftime('%d/%m/%Y %H:%M')
+        
+        creator_name = bom_info.get('creator_name', 'Unknown')
+        
+        # Info rows - 2 columns layout
         info_rows = [
-            ('BOM Code', bom_info.get('bom_code', ''), 'Output Product', f"{bom_info.get('product_code', '')} - {bom_info.get('product_name', '')}"),
-            ('BOM Name', bom_info.get('bom_name', ''), 'Output Quantity', f"{bom_info.get('output_qty', 0):,.2f} {bom_info.get('uom', '')}"),
-            ('BOM Type', bom_info.get('bom_type', ''), 'Effective Date', str(bom_info.get('effective_date', 'N/A'))),
-            ('Status', bom_info.get('status', ''), 'Version', str(bom_info.get('version', 1))),
-            ('Created By', bom_info.get('creator_name', 'Unknown'), 'Created Date', self._format_datetime(bom_info.get('created_date'))),
+            (labels['code'], bom_info.get('bom_code', ''), labels['product'], product_display),
+            (labels['name'], bom_info.get('bom_name', ''), labels['output'], output_str),
+            (labels['type'], bom_info.get('bom_type', ''), labels['effective'], str(effective_date) or 'N/A'),
+            (labels['status'], bom_info.get('status', ''), labels['version'], str(bom_info.get('version', 1))),
+            (labels['creator'], creator_name, labels['created_date'], str(created_date) or 'N/A'),
         ]
         
         for label1, value1, label2, value2 in info_rows:
-            # Left column
-            cell_label1 = ws.cell(row=row, column=2, value=label1)
-            cell_label1.font = LABEL_FONT
-            cell_label1.fill = INFO_BG
-            cell_label1.border = THIN_BORDER
+            # Left column - Label (A)
+            cell = self.ws.cell(row=self.current_row, column=1, value=label1)
+            cell.font = LABEL_FONT
+            cell.fill = INFO_BG
+            cell.border = THIN_BORDER
             
-            cell_value1 = ws.cell(row=row, column=3, value=value1)
-            cell_value1.font = VALUE_FONT
-            cell_value1.border = THIN_BORDER
+            # Left column - Value (B-C)
+            self.ws.merge_cells(f'B{self.current_row}:C{self.current_row}')
+            cell = self.ws.cell(row=self.current_row, column=2, value=value1)
+            cell.font = VALUE_FONT
+            cell.border = THIN_BORDER
             
-            # Right column
-            cell_label2 = ws.cell(row=row, column=4, value=label2)
-            cell_label2.font = LABEL_FONT
-            cell_label2.fill = INFO_BG
-            cell_label2.border = THIN_BORDER
+            # Right column - Label (D)
+            cell = self.ws.cell(row=self.current_row, column=4, value=label2)
+            cell.font = LABEL_FONT
+            cell.fill = INFO_BG
+            cell.border = THIN_BORDER
             
-            cell_value2 = ws.cell(row=row, column=5, value=value2)
-            cell_value2.font = VALUE_FONT
-            cell_value2.border = THIN_BORDER
+            # Right column - Value (E-H)
+            self.ws.merge_cells(f'E{self.current_row}:H{self.current_row}')
+            cell = self.ws.cell(row=self.current_row, column=5, value=value2)
+            cell.font = VALUE_FONT
+            cell.border = THIN_BORDER
             
-            row += 1
+            self.current_row += 1
         
-        # Notes row
+        # Notes if exist
         if bom_info.get('notes'):
-            ws.merge_cells(f'C{row}:E{row}')
-            ws.cell(row=row, column=2, value='Notes').font = LABEL_FONT
-            ws.cell(row=row, column=2).fill = INFO_BG
-            ws.cell(row=row, column=2).border = THIN_BORDER
-            ws.cell(row=row, column=3, value=bom_info.get('notes', '')).border = THIN_BORDER
-            row += 1
-        
-        row += 1
-        
-        # ==================== Materials Summary Section ====================
-        ws.merge_cells(f'B{row}:E{row}')
-        section_cell = ws.cell(row=row, column=2, value="🧱 Materials Summary")
-        section_cell.font = Font(size=12, bold=True, color="2C3E50")
-        row += 1
-        
-        if not materials.empty:
-            # Summary statistics
-            type_counts = materials['material_type'].value_counts()
-            total_materials = len(materials)
-            total_alts = int(materials['alternatives_count'].sum()) if 'alternatives_count' in materials.columns else 0
+            note_label = 'Ghi chú' if self.language == 'vi' else 'Notes'
+            cell = self.ws.cell(row=self.current_row, column=1, value=note_label)
+            cell.font = LABEL_FONT
+            cell.fill = INFO_BG
+            cell.border = THIN_BORDER
             
-            summary_data = [
-                ('Total Materials', total_materials, 'Total Alternatives', total_alts),
-                ('Raw Materials', type_counts.get('RAW_MATERIAL', 0), 'Packaging', type_counts.get('PACKAGING', 0)),
-                ('Consumables', type_counts.get('CONSUMABLE', 0), '', ''),
-            ]
-            
-            for label1, value1, label2, value2 in summary_data:
-                if label1:
-                    ws.cell(row=row, column=2, value=label1).font = LABEL_FONT
-                    ws.cell(row=row, column=2).fill = INFO_BG
-                    ws.cell(row=row, column=2).border = THIN_BORDER
-                    ws.cell(row=row, column=3, value=value1).border = THIN_BORDER
-                
-                if label2:
-                    ws.cell(row=row, column=4, value=label2).font = LABEL_FONT
-                    ws.cell(row=row, column=4).fill = INFO_BG
-                    ws.cell(row=row, column=4).border = THIN_BORDER
-                    ws.cell(row=row, column=5, value=value2).border = THIN_BORDER
-                
-                row += 1
-        else:
-            ws.cell(row=row, column=2, value="No materials in this BOM")
+            self.ws.merge_cells(f'B{self.current_row}:H{self.current_row}')
+            cell = self.ws.cell(row=self.current_row, column=2, value=bom_info.get('notes', ''))
+            cell.font = VALUE_FONT
+            cell.border = THIN_BORDER
+            self.current_row += 1
+        
+        self.current_row += 1
     
-    def _create_materials_sheet(self, materials: pd.DataFrame):
-        """Create materials detail sheet"""
-        ws = self.wb.create_sheet("Materials")
+    def _create_materials_section(self, materials: pd.DataFrame):
+        """Create materials list section"""
+        # Section header
+        if self.language == 'vi':
+            section_title = "🧱 DANH SÁCH NGUYÊN VẬT LIỆU"
+        else:
+            section_title = "🧱 MATERIALS LIST"
+        
+        self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+        cell = self.ws.cell(row=self.current_row, column=1, value=section_title)
+        cell.font = SECTION_FONT
+        cell.fill = SECTION_BG
+        self.current_row += 1
         
         if materials.empty:
-            ws.cell(row=1, column=1, value="No materials in this BOM")
+            self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+            msg = "Không có nguyên vật liệu" if self.language == 'vi' else "No materials"
+            self.ws.cell(row=self.current_row, column=1, value=msg)
+            self.current_row += 2
             return
         
-        # Headers
-        headers = ['#', 'Material Code', 'Material Name', 'Type', 'Quantity', 
-                   'UOM', 'Scrap Rate', 'Current Stock', 'Alternatives']
+        # Table headers
+        if self.language == 'vi':
+            headers = ['STT', 'Mã NVL', 'Tên nguyên vật liệu', 'Loại', 'Số lượng', 'ĐVT', 'Hao hụt', 'Alt']
+        else:
+            headers = ['#', 'Code', 'Material Name', 'Type', 'Quantity', 'UOM', 'Scrap', 'Alt']
         
         for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
+            cell = self.ws.cell(row=self.current_row, column=col, value=header)
             cell.font = HEADER_FONT
             cell.fill = HEADER_BG
             cell.alignment = CENTER_ALIGN
             cell.border = THIN_BORDER
         
-        # Set column widths
-        col_widths = [5, 18, 45, 15, 12, 10, 12, 15, 12]
-        for i, width in enumerate(col_widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = width
+        self.ws.row_dimensions[self.current_row].height = 22
+        self.current_row += 1
         
         # Data rows
         for idx, (_, mat) in enumerate(materials.iterrows(), 1):
-            row_num = idx + 1
-            
-            # Alternate row coloring
             fill = ALT_ROW_BG if idx % 2 == 0 else None
+            
+            # Format quantity
+            qty = float(mat.get('quantity', 0))
+            if qty == int(qty):
+                qty_str = f"{int(qty):,}"
+            else:
+                qty_str = f"{qty:,.4f}".rstrip('0').rstrip('.')
+            
+            # Format scrap
+            scrap = float(mat.get('scrap_rate', 0))
+            scrap_str = f"{scrap:.1f}%" if scrap > 0 else "-"
+            
+            # Alt count
+            alt_count = int(mat.get('alternatives_count', 0))
+            alt_str = str(alt_count) if alt_count > 0 else "-"
             
             row_data = [
                 idx,
                 mat.get('material_code', ''),
                 mat.get('material_name', ''),
                 mat.get('material_type', ''),
-                float(mat.get('quantity', 0)),
+                qty_str,
                 mat.get('uom', ''),
-                f"{float(mat.get('scrap_rate', 0)):.2f}%",
-                float(mat.get('current_stock', 0)),
-                int(mat.get('alternatives_count', 0))
+                scrap_str,
+                alt_str
             ]
             
-            alignments = [CENTER_ALIGN, LEFT_ALIGN, LEFT_ALIGN, CENTER_ALIGN, 
-                         RIGHT_ALIGN, CENTER_ALIGN, RIGHT_ALIGN, RIGHT_ALIGN, CENTER_ALIGN]
+            alignments = [CENTER_ALIGN, LEFT_ALIGN, LEFT_ALIGN, CENTER_ALIGN,
+                         RIGHT_ALIGN, CENTER_ALIGN, CENTER_ALIGN, CENTER_ALIGN]
             
             for col, (value, align) in enumerate(zip(row_data, alignments), 1):
-                cell = ws.cell(row=row_num, column=col, value=value)
+                cell = self.ws.cell(row=self.current_row, column=col, value=value)
                 cell.font = NORMAL_FONT
                 cell.alignment = align
                 cell.border = THIN_BORDER
                 if fill:
                     cell.fill = fill
+            
+            self.current_row += 1
         
-        # Freeze header row
-        ws.freeze_panes = 'A2'
-        
-        # Auto-filter
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(materials) + 1}"
+        self.current_row += 1
     
-    def _create_alternatives_sheet(self, materials: pd.DataFrame,
-                                    alternatives_data: Dict[int, pd.DataFrame]):
-        """Create alternatives sheet with all alternatives"""
-        ws = self.wb.create_sheet("Alternatives")
+    def _create_alternatives_section(self, materials: pd.DataFrame,
+                                      alternatives_data: Dict[int, pd.DataFrame]):
+        """Create alternatives section if any exist"""
+        # Check if any alternatives exist
+        has_alternatives = False
+        for _, mat in materials.iterrows():
+            detail_id = int(mat['id'])
+            if detail_id in alternatives_data and not alternatives_data[detail_id].empty:
+                has_alternatives = True
+                break
         
-        # Collect all alternatives
-        all_alts = []
+        if not has_alternatives:
+            return
+        
+        # Section header
+        if self.language == 'vi':
+            section_title = "🔄 NGUYÊN VẬT LIỆU THAY THẾ"
+        else:
+            section_title = "🔄 ALTERNATIVE MATERIALS"
+        
+        self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+        cell = self.ws.cell(row=self.current_row, column=1, value=section_title)
+        cell.font = SECTION_FONT
+        cell.fill = SECTION_BG
+        self.current_row += 1
+        
+        # Process each material with alternatives
         for _, mat in materials.iterrows():
             detail_id = int(mat['id'])
             alternatives = alternatives_data.get(detail_id)
             
-            if alternatives is not None and not alternatives.empty:
-                for _, alt in alternatives.iterrows():
-                    all_alts.append({
-                        'Primary Code': mat['material_code'],
-                        'Primary Name': mat['material_name'],
-                        'Priority': alt['priority'],
-                        'Alt Code': alt['material_code'],
-                        'Alt Name': alt['material_name'],
-                        'Quantity': float(alt['quantity']),
-                        'UOM': alt['uom'],
-                        'Scrap Rate': f"{float(alt.get('scrap_rate', 0)):.2f}%",
-                        'Status': 'Active' if alt['is_active'] else 'Inactive',
-                        'Notes': alt.get('notes', '')
-                    })
-        
-        if not all_alts:
-            ws.cell(row=1, column=1, value="No alternatives defined for this BOM")
-            return
-        
-        # Headers
-        headers = ['Primary Code', 'Primary Name', 'Priority', 'Alt Code', 'Alt Name',
-                   'Quantity', 'UOM', 'Scrap Rate', 'Status', 'Notes']
-        
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
-            cell.font = HEADER_FONT
-            cell.fill = SUBHEADER_BG
-            cell.alignment = CENTER_ALIGN
-            cell.border = THIN_BORDER
-        
-        # Set column widths
-        col_widths = [15, 35, 8, 15, 35, 12, 8, 12, 10, 25]
-        for i, width in enumerate(col_widths, 1):
-            ws.column_dimensions[get_column_letter(i)].width = width
-        
-        # Data rows
-        for idx, alt in enumerate(all_alts, 1):
-            row_num = idx + 1
-            fill = ALT_ROW_BG if idx % 2 == 0 else None
+            if alternatives is None or alternatives.empty:
+                continue
             
-            for col, header in enumerate(headers, 1):
-                value = alt.get(header, '')
-                cell = ws.cell(row=row_num, column=col, value=value)
-                cell.font = NORMAL_FONT
+            # Material header
+            mat_title = f"▸ {mat['material_code']} - {mat['material_name']}"
+            self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+            cell = self.ws.cell(row=self.current_row, column=1, value=mat_title)
+            cell.font = Font(name='Arial', size=9, bold=True, color="2C3E50")
+            self.current_row += 1
+            
+            # Alternatives table headers
+            if self.language == 'vi':
+                alt_headers = ['ƯT', 'Mã NVL thay thế', 'Tên nguyên vật liệu thay thế', '', 'SL', 'ĐVT', 'Hao hụt', 'TT']
+            else:
+                alt_headers = ['P', 'Alt Code', 'Alternative Material Name', '', 'Qty', 'UOM', 'Scrap', 'Status']
+            
+            for col, header in enumerate(alt_headers, 1):
+                cell = self.ws.cell(row=self.current_row, column=col, value=header)
+                cell.font = Font(name='Arial', size=8, bold=True, color="FFFFFF")
+                cell.fill = SUBHEADER_BG
+                cell.alignment = CENTER_ALIGN
                 cell.border = THIN_BORDER
-                if fill:
-                    cell.fill = fill
+            
+            # Merge columns C and D for name
+            self.ws.merge_cells(f'C{self.current_row}:D{self.current_row}')
+            self.current_row += 1
+            
+            # Alternatives data
+            for _, alt in alternatives.iterrows():
+                status_icon = "✓" if alt['is_active'] else "○"
                 
-                # Alignment based on column type
-                if header in ['Priority', 'UOM', 'Status']:
-                    cell.alignment = CENTER_ALIGN
-                elif header in ['Quantity', 'Scrap Rate']:
-                    cell.alignment = RIGHT_ALIGN
+                qty = float(alt['quantity'])
+                if qty == int(qty):
+                    qty_str = f"{int(qty):,}"
                 else:
-                    cell.alignment = LEFT_ALIGN
-        
-        # Freeze header row
-        ws.freeze_panes = 'A2'
-        
-        # Auto-filter
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(all_alts) + 1}"
+                    qty_str = f"{qty:,.2f}".rstrip('0').rstrip('.')
+                
+                scrap = float(alt.get('scrap_rate', 0))
+                scrap_str = f"{scrap:.1f}%" if scrap > 0 else "-"
+                
+                alt_row_data = [
+                    alt['priority'],
+                    alt['material_code'],
+                    alt['material_name'],
+                    '',  # Merged with C
+                    qty_str,
+                    alt['uom'],
+                    scrap_str,
+                    status_icon
+                ]
+                
+                for col, value in enumerate(alt_row_data, 1):
+                    cell = self.ws.cell(row=self.current_row, column=col, value=value)
+                    cell.font = Font(name='Arial', size=8)
+                    cell.border = THIN_BORDER
+                    if col in [1, 5, 6, 7, 8]:
+                        cell.alignment = CENTER_ALIGN
+                    elif col == 5:
+                        cell.alignment = RIGHT_ALIGN
+                    else:
+                        cell.alignment = LEFT_ALIGN
+                
+                # Merge columns C and D for name
+                self.ws.merge_cells(f'C{self.current_row}:D{self.current_row}')
+                self.current_row += 1
+            
+            self.current_row += 1
     
-    def _create_metadata_sheet(self, bom_info: Dict):
-        """Create metadata sheet with export information including company"""
-        ws = self.wb.create_sheet("Metadata")
+    def _create_footer(self, bom_info: Dict, exported_by: Optional[str]):
+        """Create footer with export information"""
+        self.current_row += 1
         
-        # Set column widths
-        ws.column_dimensions['A'].width = 25
-        ws.column_dimensions['B'].width = 50
+        # Separator line
+        self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+        cell = self.ws.cell(row=self.current_row, column=1, value='─' * 80)
+        cell.font = Font(name='Arial', size=6, color="BDC3C7")
+        cell.alignment = CENTER_ALIGN
+        self.current_row += 1
         
-        # Build metadata including company info
-        metadata = [
-            ('Document Type', 'Bill of Materials (BOM)'),
-            ('BOM Code', bom_info.get('bom_code', '')),
-            ('BOM Name', bom_info.get('bom_name', '')),
-            ('Export Date', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
-            ('Export Format', 'Microsoft Excel (XLSX)'),
-            ('', ''),
-        ]
+        # Footer info
+        timestamp = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+        version = bom_info.get('version', 1)
+        status = bom_info.get('status', 'N/A')
         
-        # Add company info section if available
-        if self.company_info:
-            metadata.extend([
-                ('--- Company Information ---', ''),
-                ('Company (English)', self.company_info.get('english_name', 'N/A')),
-                ('Company (Local)', self.company_info.get('local_name', '') or 'N/A'),
-                ('Address', self.company_info.get('address', '') or 'N/A'),
-                ('', ''),
-            ])
+        if self.language == 'vi':
+            if exported_by:
+                footer_text = f"Xuất bởi: {exported_by} | Ngày xuất: {timestamp} | Phiên bản: {version} | Trạng thái: {status}"
+            else:
+                footer_text = f"Ngày xuất: {timestamp} | Phiên bản: {version} | Trạng thái: {status}"
+        else:
+            if exported_by:
+                footer_text = f"Exported by: {exported_by} | Generated: {timestamp} | Version: {version} | Status: {status}"
+            else:
+                footer_text = f"Generated: {timestamp} | Version: {version} | Status: {status}"
         
-        # Continue with BOM metadata
-        metadata.extend([
-            ('--- BOM Creator ---', ''),
-            ('Created By', bom_info.get('creator_name', 'Unknown')),
-            ('Created Date', self._format_datetime(bom_info.get('created_date'))),
-            ('Last Updated By', bom_info.get('updater_name', '') or 'N/A'),
-            ('Last Updated', self._format_datetime(bom_info.get('updated_date')) or 'N/A'),
-            ('', ''),
-            ('--- BOM Details ---', ''),
-            ('BOM Status', bom_info.get('status', '')),
-            ('BOM Version', bom_info.get('version', 1)),
-            ('Effective Date', str(bom_info.get('effective_date', 'N/A'))),
-            ('', ''),
-            ('--- Output ---', ''),
-            ('Output Product', f"{bom_info.get('product_code', '')} - {bom_info.get('product_name', '')}"),
-            ('Output Quantity', f"{bom_info.get('output_qty', 0):,.2f} {bom_info.get('uom', '')}"),
-            ('Material Count', bom_info.get('material_count', 0)),
-            ('Total Alternatives', bom_info.get('total_alternatives', 0)),
-            ('', ''),
-            ('--- Notes ---', ''),
-            ('Notes', bom_info.get('notes', '') or 'N/A'),
-        ])
-        
-        for row, (label, value) in enumerate(metadata, 1):
-            if label:
-                cell_label = ws.cell(row=row, column=1, value=label)
-                
-                # Section headers
-                if label.startswith('---'):
-                    cell_label.font = Font(name='Arial', size=10, bold=True, color="2C3E50")
-                    cell_label.fill = PatternFill(start_color="D5DBDB", end_color="D5DBDB", fill_type="solid")
-                else:
-                    cell_label.font = LABEL_FONT
-                    cell_label.fill = INFO_BG
-                cell_label.border = THIN_BORDER
-                
-                cell_value = ws.cell(row=row, column=2, value=value)
-                cell_value.font = VALUE_FONT
-                cell_value.border = THIN_BORDER
+        self.ws.merge_cells(f'A{self.current_row}:H{self.current_row}')
+        cell = self.ws.cell(row=self.current_row, column=1, value=footer_text)
+        cell.font = FOOTER_FONT
+        cell.alignment = CENTER_ALIGN
     
     def _format_datetime(self, dt) -> str:
         """Format datetime for display"""
@@ -468,7 +572,9 @@ def generate_bom_excel(bom_info: Dict[str, Any],
                        materials: pd.DataFrame,
                        alternatives_data: Dict[int, pd.DataFrame],
                        company_id: Optional[int] = None,
-                       company_info: Optional[Dict] = None) -> bytes:
+                       company_info: Optional[Dict] = None,
+                       language: str = 'vi',
+                       exported_by: Optional[str] = None) -> bytes:
     """
     Convenience function to generate BOM Excel
     
@@ -478,6 +584,8 @@ def generate_bom_excel(bom_info: Dict[str, Any],
         alternatives_data: Dict mapping detail_id to alternatives DataFrame
         company_id: Selected company ID (for reference)
         company_info: Pre-fetched company info from export dialog
+        language: 'vi' or 'en'
+        exported_by: Name of user exporting
         
     Returns:
         Excel file as bytes
@@ -486,5 +594,7 @@ def generate_bom_excel(bom_info: Dict[str, Any],
     return generator.generate(
         bom_info, materials, alternatives_data,
         company_id=company_id,
-        company_info=company_info
+        company_info=company_info,
+        language=language,
+        exported_by=exported_by
     )

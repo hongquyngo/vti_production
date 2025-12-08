@@ -177,7 +177,8 @@ def show_export_dialog(bom_id: int):
         
         if excel_selected:
             _export_as_excel(bom_info, bom_details, manager, 
-                           selected_company_id, selected_company_info)
+                           selected_company_id, selected_company_info,
+                           language)
         
         # ==================== Preview Section ====================
         st.markdown("### 👁️ BOM Preview")
@@ -284,7 +285,8 @@ def _export_as_pdf(bom_id: int, bom_info: Dict, bom_details: pd.DataFrame,
 
 
 def _export_as_excel(bom_info: Dict, bom_details: pd.DataFrame, manager: BOMManager,
-                     company_id: Optional[int], company_info: Optional[Dict]):
+                     company_id: Optional[int], company_info: Optional[Dict],
+                     language: str = 'vi'):
     """Generate and provide Excel download with company info"""
     try:
         with st.spinner("Generating Excel..."):
@@ -295,21 +297,29 @@ def _export_as_excel(bom_info: Dict, bom_details: pd.DataFrame, manager: BOMMana
                 alternatives = manager.get_material_alternatives(detail_id)
                 alternatives_data[detail_id] = alternatives
             
+            # Get current user name for exported_by
+            exported_by = st.session_state.get('user_name') or st.session_state.get('username') or 'Unknown'
+            
             # Generate professional Excel with company info
             excel_bytes = generate_bom_excel(
                 bom_info=bom_info,
                 materials=bom_details,
                 alternatives_data=alternatives_data,
                 company_id=company_id,
-                company_info=company_info
+                company_info=company_info,
+                language=language,
+                exported_by=exported_by
             )
             
-            # Create filename with company code if available
+            # Create filename with company code and language suffix
             company_suffix = ""
             if company_info and company_info.get('english_name'):
                 company_suffix = f"_{company_info['english_name'].split()[0]}"
             
-            filename = f"BOM_{bom_info['bom_code']}{company_suffix}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+            # Language suffix
+            lang_suffix = "_VN" if language == 'vi' else "_EN"
+            
+            filename = f"BOM_{bom_info['bom_code']}{company_suffix}{lang_suffix}_{datetime.now().strftime('%Y%m%d')}.xlsx"
             
             # Download button
             st.success("✅ Excel generated successfully!")
@@ -372,7 +382,9 @@ def quick_export_pdf(bom_id: int, manager: BOMManager,
 
 
 def quick_export_excel(bom_id: int, manager: BOMManager,
-                       company_id: Optional[int] = None) -> Optional[bytes]:
+                       company_id: Optional[int] = None,
+                       language: str = 'vi',
+                       exported_by: Optional[str] = None) -> Optional[bytes]:
     """
     Quick export BOM to Excel without dialog
     Returns Excel bytes or None on error
@@ -391,11 +403,17 @@ def quick_export_excel(bom_id: int, manager: BOMManager,
             alternatives = manager.get_material_alternatives(detail_id)
             alternatives_data[detail_id] = alternatives
         
+        # Get exported_by from session if not provided
+        if not exported_by:
+            exported_by = st.session_state.get('user_name') or st.session_state.get('username')
+        
         return generate_bom_excel(
             bom_info=bom_info,
             materials=bom_details,
             alternatives_data=alternatives_data,
-            company_id=company_id
+            company_id=company_id,
+            language=language,
+            exported_by=exported_by
         )
     
     except Exception as e:
