@@ -395,7 +395,9 @@ class BOMManager:
                 # Insert alternatives if any
                 alternatives = material.get('alternatives', [])
                 for alt in alternatives:
-                    alt_material_id = convert_to_native(alt['material_id'])
+                    # Support both 'material_id' and 'alternative_material_id' keys
+                    alt_mat_id = alt.get('alternative_material_id') or alt.get('material_id')
+                    alt_material_id = convert_to_native(alt_mat_id)
                     
                     # Get UOM for alternative
                     alt_uom_result = conn.execute(uom_query, {'material_id': alt_material_id})
@@ -904,7 +906,9 @@ class BOMManager:
                 # Clone alternatives
                 alternatives = material.get('alternatives', [])
                 for alt in alternatives:
-                    alt_material_id = convert_to_native(alt['material_id'])
+                    # Support both 'material_id' and 'alternative_material_id' keys
+                    alt_mat_id = alt.get('alternative_material_id') or alt.get('material_id')
+                    alt_material_id = convert_to_native(alt_mat_id)
                     
                     alt_query = text("""
                         INSERT INTO bom_material_alternatives (
