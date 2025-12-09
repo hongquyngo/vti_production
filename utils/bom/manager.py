@@ -35,6 +35,14 @@ def convert_to_native(value: Any) -> Any:
     else:
         return value
 
+# ==================== BOM Code Constants ====================
+
+BOM_TYPE_PREFIX = {
+    'KITTING': 'KIT',
+    'CUTTING': 'CUT',
+    'REPACKING': 'REP',
+}
+
 
 # ==================== Custom Exceptions ====================
 
@@ -440,9 +448,30 @@ class BOMManager:
             conn.close()
     
     def _generate_bom_code(self, conn, bom_type: str) -> str:
-        """Generate unique BOM code"""
+        """
+        Generate unique BOM code with type prefix
+        
+        Format: BOM-{TYPE}-{YYYYMM}-{NNN}
+        
+        Examples:
+            - BOM-KIT-202512-001 (KITTING)
+            - BOM-CUT-202512-001 (CUTTING)
+            - BOM-REP-202512-001 (REPACKING)
+        
+        Args:
+            conn: Database connection
+            bom_type: BOM type (KITTING, CUTTING, REPACKING)
+            
+        Returns:
+            Generated BOM code string
+        """
         today = date.today()
-        prefix = f"BOM-{today.strftime('%Y%m')}-"
+        
+        # Get type prefix (default to first 3 chars if not in mapping)
+        type_prefix = BOM_TYPE_PREFIX.get(bom_type.upper(), bom_type[:3].upper())
+        
+        # Build prefix: BOM-KIT-202512-
+        prefix = f"BOM-{type_prefix}-{today.strftime('%Y%m')}-"
         
         query = text("""
             SELECT bom_code FROM bom_headers 
@@ -456,13 +485,15 @@ class BOMManager:
         
         if row:
             last_code = row[0]
+            # Extract number from last segment: "BOM-KIT-202512-025" -> 25
             last_num = int(last_code.split('-')[-1])
             new_num = last_num + 1
         else:
             new_num = 1
         
         return f"{prefix}{new_num:03d}"
-    
+
+
     # ==================== UPDATE Operations ====================
     
     def update_bom_status(self, bom_id: int, new_status: str, user_id: int):
