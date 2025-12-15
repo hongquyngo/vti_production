@@ -3,13 +3,15 @@
 Common utilities for Completions domain
 Formatting, validation, UI helpers, and date utilities
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- v1.1.0: Removed unused validator methods (validate_produced_qty, can_complete)
 """
 
 import logging
 from datetime import date, timedelta, datetime
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, Tuple, Union, Optional, List, Any
+from typing import Dict, Tuple, Union, Optional, Any
 from io import BytesIO
 
 import pandas as pd
@@ -70,9 +72,7 @@ def get_vietnam_today() -> date:
 
 
 def convert_to_vietnam_tz(dt: Union[datetime, str, None]) -> Optional[datetime]:
-    """
-    Convert datetime to Vietnam timezone (UTC+7)
-    """
+    """Convert datetime to Vietnam timezone (UTC+7)"""
     if dt is None:
         return None
     
@@ -279,30 +279,11 @@ class CompletionValidator:
     """Completion form validation helpers"""
     
     @staticmethod
-    def validate_produced_qty(produced_qty: float, 
-                             planned_qty: float,
-                             current_produced: float) -> Tuple[bool, Optional[str]]:
-        """Validate produced quantity"""
-        if produced_qty <= 0:
-            return False, "Produced quantity must be greater than 0"
-        
-        remaining = planned_qty - current_produced
-        if produced_qty > remaining * 1.5:  # Allow 50% overproduction
-            return False, f"Produced quantity ({produced_qty}) exceeds allowed limit"
-        
-        return True, None
-    
-    @staticmethod
     def validate_batch_no(batch_no: str) -> Tuple[bool, Optional[str]]:
         """Validate batch number"""
         if not batch_no or not batch_no.strip():
             return False, "Batch number is required"
         return True, None
-    
-    @staticmethod
-    def can_complete(status: str) -> bool:
-        """Check if order can be completed"""
-        return status in CompletionConstants.COMPLETABLE_STATUSES
 
 
 # ==================== UI Helpers ====================

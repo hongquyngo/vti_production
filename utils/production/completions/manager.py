@@ -3,12 +3,12 @@
 Completion Manager - Business logic for Production Completions
 Complete production orders with receipt creation and inventory updates
 
-Version: 3.0.0
+Version: 3.1.0
 Changes:
+- v3.1.0: Changed validation from "fully issued" to "issued" (issued_qty > 0)
+  - Renamed _get_pending_raw_materials → _get_unissued_raw_materials
+  - Allows completion when materials are partially issued (practical tolerance)
 - v3.0.0: Full partial QC support - PASSED + PENDING + FAILED combinations
-  - Added pending_qty parameter to update_quality_status_partial()
-  - Supports all 7 QC scenarios including 3-way split
-  - Split priority: PASSED > PENDING > FAILED (original keeps highest priority)
 - v2.0.1: Fixed SQL error - removed updated_by/updated_date from production_receipts UPDATE
 - v2.0.0: Added update_quality_status_partial() for partial QC results
 
@@ -72,14 +72,14 @@ class CompletionManager:
                 if order['status'] not in ['IN_PROGRESS']:
                     raise ValueError(f"Cannot complete {order['status']} order. Only IN_PROGRESS orders can be completed.")
                 
-                # Validate all RAW_MATERIALs have been issued
-                pending_materials = self._get_pending_raw_materials(conn, order_id)
-                if pending_materials:
-                    material_list = ", ".join([m['name'] for m in pending_materials[:3]])
-                    if len(pending_materials) > 3:
-                        material_list += f" and {len(pending_materials) - 3} more..."
+                # Validate all RAW_MATERIALs have been issued (at least partially)
+                unissued_materials = self._get_unissued_raw_materials(conn, order_id)
+                if unissued_materials:
+                    material_list = ", ".join([m['name'] for m in unissued_materials[:3]])
+                    if len(unissued_materials) > 3:
+                        material_list += f" and {len(unissued_materials) - 3} more..."
                     raise ValueError(
-                        f"Cannot complete order: {len(pending_materials)} raw material(s) have not been fully issued. "
+                        f"Cannot complete order: {len(unissued_materials)} raw material(s) have not been issued. "
                         f"Materials: {material_list}"
                     )
                 
@@ -195,30 +195,21 @@ class CompletionManager:
         
         Inventory Logic (spec compliant):
         - PENDING/FAILED → PASSED: Create stockInProduction record
-        - PASSED → PENDING/FAILED: Find existing stockInProduction (via action_detail_id) and set remain=0
+        - PASSED → PENDING/FAILED: Remove from inventory (set remain = 0)
         """
         with self.engine.begin() as conn:
             try:
                 # Get current receipt info
-                receipt_query = text("""
-                    SELECT 
-                        pr.id, pr.quality_status, pr.quantity, pr.batch_no,
-                        pr.warehouse_id, pr.expired_date, pr.product_id,
-                        mo.id as order_id
-                    FROM production_receipts pr
-                    JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
-                    WHERE pr.id = :receipt_id
-                    FOR UPDATE
-                """)
-                
-                result = conn.execute(receipt_query, {'receipt_id': receipt_id})
-                row = result.fetchone()
-                
-                if not row:
+                receipt = self._get_receipt_info(conn, receipt_id)
+                if not receipt:
                     raise ValueError(f"Receipt {receipt_id} not found")
                 
-                receipt = dict(zip(result.keys(), row))
                 old_status = receipt['quality_status']
+                
+                # Skip if no change
+                if old_status == new_status:
+                    logger.info(f"Quality status unchanged for receipt {receipt_id}")
+                    return True
                 
                 # Update receipt
                 update_query = text("""
@@ -234,502 +225,311 @@ class CompletionManager:
                     'receipt_id': receipt_id
                 })
                 
-                # Handle inventory changes based on status transition
-                if keycloak_id:
-                    group_id = str(uuid.uuid4())
-                    
-                    # If changing from non-PASSED to PASSED, add to inventory
-                    # Use type: stockInProduction (as per spec)
-                    if old_status != 'PASSED' and new_status == 'PASSED':
-                        self._add_stock_in_production(
-                            conn, receipt, group_id, keycloak_id
-                        )
-                    
-                    # If changing from PASSED to non-PASSED, remove from inventory
-                    # Find existing stockInProduction record and set remain=0
-                    elif old_status == 'PASSED' and new_status != 'PASSED':
-                        self._remove_stock_in_production(
-                            conn, receipt, keycloak_id
-                        )
+                # Handle inventory changes
+                group_id = str(uuid.uuid4())
                 
-                logger.info(f"✅ Updated receipt {receipt_id} quality: {old_status} → {new_status}")
+                if old_status != 'PASSED' and new_status == 'PASSED':
+                    # Add to inventory
+                    self._add_stock_in_production(conn, receipt, group_id, keycloak_id or str(user_id))
+                
+                elif old_status == 'PASSED' and new_status != 'PASSED':
+                    # Remove from inventory
+                    self._remove_stock_in_production(conn, receipt, keycloak_id or str(user_id))
+                
+                logger.info(f"✅ Updated quality status for receipt {receipt_id}: {old_status} → {new_status}")
                 return True
                 
             except Exception as e:
-                logger.error(f"❌ Error updating quality status: {e}")
+                logger.error(f"❌ Error updating quality status for receipt {receipt_id}: {e}")
                 raise
     
-    # ==================== Update Quality Status (Partial QC - Full Support) ====================
+    # ==================== Update Quality Status (Partial QC Support) ====================
     
-    def update_quality_status_partial(self, receipt_id: int, 
-                                       passed_qty: float, 
-                                       failed_qty: float,
-                                       pending_qty: float = 0.0,
-                                       defect_type: str = None,
-                                       notes: str = '', 
-                                       user_id: int = None,
-                                       keycloak_id: str = None) -> Dict[str, Any]:
+    def update_quality_status_partial(self, receipt_id: int,
+                                      passed_qty: float,
+                                      pending_qty: float,
+                                      failed_qty: float,
+                                      defect_type: Optional[str],
+                                      notes: str,
+                                      user_id: int,
+                                      keycloak_id: str = None) -> Dict[str, Any]:
         """
-        Update quality status with full partial QC support
-        Supports all combinations: PASSED, PENDING, FAILED and any mix
+        Update quality status with partial results support
+        
+        Supports all 7 scenarios:
+        1. All PASSED (passed = total)
+        2. All PENDING (pending = total)
+        3. All FAILED (failed = total)
+        4. PASSED + FAILED (split into 2 receipts)
+        5. PASSED + PENDING (split into 2 receipts)
+        6. PENDING + FAILED (split into 2 receipts)
+        7. PASSED + PENDING + FAILED (split into 3 receipts)
+        
+        Split priority: PASSED > PENDING > FAILED
+        Original receipt keeps highest priority status
         
         Args:
             receipt_id: Receipt ID
             passed_qty: Quantity that passed QC
+            pending_qty: Quantity still pending QC
             failed_qty: Quantity that failed QC
-            pending_qty: Quantity still pending QC (NEW)
-            defect_type: Type of defect (required if failed_qty > 0)
+            defect_type: Defect type for failed items
             notes: QC notes
             user_id: User ID
-            keycloak_id: Keycloak ID for inventory updates
+            keycloak_id: Keycloak ID for inventory
         
         Returns:
-            Dict with success status and details
-        
-        Split Priority: PASSED > PENDING > FAILED
-        - Original receipt keeps the highest priority status with quantity
-        - New receipts created for other portions
-        
-        Scenarios:
-        1. All PASSED (pending=0, failed=0): Update to PASSED, add inventory
-        2. All PENDING (passed=0, failed=0): Update to PENDING, no inventory
-        3. All FAILED (passed=0, pending=0): Update to FAILED, no inventory
-        4. PASSED + FAILED: Original→PASSED, New→FAILED
-        5. PASSED + PENDING: Original→PASSED, New→PENDING
-        6. PENDING + FAILED: Original→PENDING, New→FAILED
-        7. PASSED + PENDING + FAILED: Original→PASSED, New1→PENDING, New2→FAILED
-        
-        Inventory Logic:
-        - PASSED portion → stockInProduction (available inventory)
-        - PENDING portion → no inventory (awaiting QC)
-        - FAILED portion → no inventory (defective, tracked via receipt)
+            Dict with success status and new receipt info
         """
         with self.engine.begin() as conn:
             try:
-                # Get current receipt info
-                receipt_query = text("""
-                    SELECT 
-                        pr.id, pr.receipt_no, pr.manufacturing_order_id,
-                        pr.quality_status, pr.quantity, pr.batch_no,
-                        pr.warehouse_id, pr.expired_date, pr.product_id,
-                        pr.uom, pr.notes as original_notes,
-                        mo.id as order_id
-                    FROM production_receipts pr
-                    JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
-                    WHERE pr.id = :receipt_id
-                    FOR UPDATE
-                """)
+                receipt = self._get_receipt_info(conn, receipt_id)
+                if not receipt:
+                    return {'success': False, 'error': 'Receipt not found'}
                 
-                result = conn.execute(receipt_query, {'receipt_id': receipt_id})
-                row = result.fetchone()
-                
-                if not row:
-                    return {'success': False, 'error': f"Receipt {receipt_id} not found"}
-                
-                receipt = dict(zip(result.keys(), row))
-                old_status = receipt['quality_status']
                 total_qty = float(receipt['quantity'])
+                old_status = receipt['quality_status']
                 
-                # Validate quantities
-                sum_qty = passed_qty + failed_qty + pending_qty
-                if abs(sum_qty - total_qty) > 0.01:
+                # Validate total
+                input_total = passed_qty + pending_qty + failed_qty
+                if abs(input_total - total_qty) > 0.01:
                     return {
-                        'success': False, 
-                        'error': f"Passed ({passed_qty}) + Failed ({failed_qty}) + Pending ({pending_qty}) = {sum_qty} must equal Total ({total_qty})"
+                        'success': False,
+                        'error': f'Total ({input_total}) must equal receipt quantity ({total_qty})'
                     }
                 
                 group_id = str(uuid.uuid4())
-                new_receipts = []  # Track created receipts
+                new_receipts = []
                 
-                # Determine scenario and handle accordingly
+                # Determine how many portions we have
                 has_passed = passed_qty > 0
                 has_pending = pending_qty > 0
                 has_failed = failed_qty > 0
-                
-                # Count non-zero portions
                 portions = sum([has_passed, has_pending, has_failed])
                 
-                # ============ Single Status (No Split) ============
                 if portions == 1:
+                    # Simple case: entire batch goes to one status
                     if has_passed:
-                        # All PASSED
-                        self._update_receipt_full(conn, receipt_id, 'PASSED', passed_qty, notes, user_id)
-                        if keycloak_id and old_status != 'PASSED':
-                            self._add_stock_in_production(conn, receipt, group_id, keycloak_id)
-                        elif keycloak_id and old_status == 'PASSED':
-                            pass  # Already in inventory, no change needed
-                        logger.info(f"✅ Receipt {receipt['receipt_no']} - All {passed_qty} PASSED")
-                        
+                        new_status = 'PASSED'
                     elif has_pending:
-                        # All PENDING
-                        self._update_receipt_full(conn, receipt_id, 'PENDING', pending_qty, notes, user_id)
-                        if keycloak_id and old_status == 'PASSED':
-                            self._remove_stock_in_production(conn, receipt, keycloak_id)
-                        logger.info(f"✅ Receipt {receipt['receipt_no']} - All {pending_qty} PENDING")
-                        
+                        new_status = 'PENDING'
                     else:
-                        # All FAILED
-                        final_notes = self._build_failed_notes(notes, defect_type)
-                        self._update_receipt_full(conn, receipt_id, 'FAILED', failed_qty, final_notes, user_id, defect_type)
-                        if keycloak_id and old_status == 'PASSED':
-                            self._remove_stock_in_production(conn, receipt, keycloak_id)
-                        logger.info(f"✅ Receipt {receipt['receipt_no']} - All {failed_qty} FAILED ({defect_type})")
+                        new_status = 'FAILED'
+                    
+                    # Update original receipt
+                    self._update_receipt_status(conn, receipt_id, new_status, notes, defect_type if new_status == 'FAILED' else None)
+                    
+                    # Handle inventory
+                    if old_status != 'PASSED' and new_status == 'PASSED':
+                        self._add_stock_in_production(conn, receipt, group_id, keycloak_id or str(user_id))
+                    elif old_status == 'PASSED' and new_status != 'PASSED':
+                        self._remove_stock_in_production(conn, receipt, keycloak_id or str(user_id))
                 
-                # ============ Two-Way Split ============
-                elif portions == 2:
-                    if has_passed and has_failed:
-                        # PASSED + FAILED (existing logic)
-                        new_receipt = self._handle_split_passed_failed(
-                            conn, receipt, passed_qty, failed_qty,
-                            defect_type, notes, user_id, keycloak_id, group_id
-                        )
-                        new_receipts.append({'status': 'FAILED', 'receipt_no': new_receipt, 'qty': failed_qty})
+                else:
+                    # Split case: multiple portions
+                    # Priority: PASSED > PENDING > FAILED
+                    # Original receipt keeps highest priority
+                    
+                    if has_passed:
+                        # Original → PASSED
+                        self._update_receipt_quantity_status(conn, receipt_id, passed_qty, 'PASSED', notes, None)
                         
-                    elif has_passed and has_pending:
-                        # PASSED + PENDING (NEW)
-                        new_receipt = self._handle_split_passed_pending(
-                            conn, receipt, passed_qty, pending_qty,
-                            notes, user_id, keycloak_id, group_id
-                        )
-                        new_receipts.append({'status': 'PENDING', 'receipt_no': new_receipt, 'qty': pending_qty})
+                        # Handle inventory for original
+                        if old_status != 'PASSED':
+                            # Create new inventory record with new quantity
+                            receipt_copy = dict(receipt)
+                            receipt_copy['quantity'] = passed_qty
+                            self._add_stock_in_production(conn, receipt_copy, group_id, keycloak_id or str(user_id))
+                        elif old_status == 'PASSED':
+                            # Reduce existing inventory
+                            removed_qty = pending_qty + failed_qty
+                            if removed_qty > 0:
+                                self._reduce_stock_in_production(conn, receipt, removed_qty, keycloak_id or str(user_id))
                         
-                    else:
-                        # PENDING + FAILED (NEW)
-                        new_receipt = self._handle_split_pending_failed(
-                            conn, receipt, pending_qty, failed_qty,
-                            defect_type, notes, user_id, keycloak_id, group_id
-                        )
-                        new_receipts.append({'status': 'FAILED', 'receipt_no': new_receipt, 'qty': failed_qty})
+                        # Create PENDING receipt if needed
+                        if has_pending:
+                            pending_receipt_no = self._create_split_receipt(
+                                conn, receipt, pending_qty, 'PENDING', notes, None, user_id
+                            )
+                            new_receipts.append({'receipt_no': pending_receipt_no, 'status': 'PENDING', 'qty': pending_qty})
+                        
+                        # Create FAILED receipt if needed
+                        if has_failed:
+                            failed_receipt_no = self._create_split_receipt(
+                                conn, receipt, failed_qty, 'FAILED', notes, defect_type, user_id
+                            )
+                            new_receipts.append({'receipt_no': failed_receipt_no, 'status': 'FAILED', 'qty': failed_qty})
+                    
+                    elif has_pending:
+                        # Original → PENDING (no PASSED qty)
+                        self._update_receipt_quantity_status(conn, receipt_id, pending_qty, 'PENDING', notes, None)
+                        
+                        # If was PASSED, remove from inventory
+                        if old_status == 'PASSED':
+                            self._remove_stock_in_production(conn, receipt, keycloak_id or str(user_id))
+                        
+                        # Create FAILED receipt
+                        if has_failed:
+                            failed_receipt_no = self._create_split_receipt(
+                                conn, receipt, failed_qty, 'FAILED', notes, defect_type, user_id
+                            )
+                            new_receipts.append({'receipt_no': failed_receipt_no, 'status': 'FAILED', 'qty': failed_qty})
                 
-                # ============ Three-Way Split ============
-                elif portions == 3:
-                    # PASSED + PENDING + FAILED (NEW)
-                    created_receipts = self._handle_split_three_way(
-                        conn, receipt, passed_qty, pending_qty, failed_qty,
-                        defect_type, notes, user_id, keycloak_id, group_id
-                    )
-                    new_receipts.extend(created_receipts)
+                logger.info(f"✅ Partial QC updated for receipt {receipt_id}: PASSED={passed_qty}, PENDING={pending_qty}, FAILED={failed_qty}")
                 
-                # Build result
-                result = {
+                return {
                     'success': True,
-                    'passed_qty': passed_qty,
-                    'pending_qty': pending_qty,
-                    'failed_qty': failed_qty,
                     'new_receipts': new_receipts
                 }
                 
-                # For backward compatibility
-                if len(new_receipts) == 1:
-                    result['new_receipt_no'] = new_receipts[0]['receipt_no']
-                
-                return result
-                
             except Exception as e:
-                logger.error(f"❌ Error updating quality status (partial): {e}")
+                logger.error(f"❌ Error in partial QC update for receipt {receipt_id}: {e}")
                 return {'success': False, 'error': str(e)}
     
-    # ==================== Split Handlers ====================
+    # ==================== Private Helper Methods ====================
     
-    def _handle_split_passed_failed(self, conn, receipt: Dict, passed_qty: float, 
-                                     failed_qty: float, defect_type: str, notes: str,
-                                     user_id: int, keycloak_id: str, group_id: str) -> str:
-        """
-        Handle PASSED + FAILED split
-        Original → PASSED, New → FAILED
-        """
-        old_status = receipt['quality_status']
-        receipt_id = receipt['id']
+    def _get_receipt_info(self, conn, receipt_id: int) -> Optional[Dict]:
+        """Get receipt information"""
+        query = text("""
+            SELECT 
+                pr.id, pr.receipt_no, pr.manufacturing_order_id,
+                pr.product_id, pr.quantity, pr.uom,
+                pr.batch_no, pr.expired_date, pr.warehouse_id,
+                pr.quality_status, pr.notes
+            FROM production_receipts pr
+            WHERE pr.id = :receipt_id
+            FOR UPDATE
+        """)
         
-        # 1. Update original receipt to PASSED
-        self._update_receipt_full(conn, receipt_id, 'PASSED', passed_qty, notes, user_id)
+        result = conn.execute(query, {'receipt_id': receipt_id})
+        row = result.fetchone()
         
-        # 2. Handle inventory for PASSED portion
-        if keycloak_id:
-            if old_status == 'PASSED':
-                # Was already PASSED - adjust quantity
-                self._remove_stock_in_production(conn, receipt, keycloak_id)
-            
-            # Add new inventory for passed quantity
-            receipt_for_inv = receipt.copy()
-            receipt_for_inv['quantity'] = passed_qty
-            self._add_stock_in_production(conn, receipt_for_inv, group_id, keycloak_id)
-        
-        # 3. Create new receipt for FAILED portion
-        new_receipt_no = self._create_split_receipt(
-            conn, receipt, failed_qty, 'FAILED', 
-            defect_type, notes, user_id
-        )
-        
-        logger.info(f"✅ Split {receipt['receipt_no']}: {passed_qty} PASSED, {failed_qty} FAILED → {new_receipt_no}")
-        return new_receipt_no
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
     
-    def _handle_split_passed_pending(self, conn, receipt: Dict, passed_qty: float, 
-                                      pending_qty: float, notes: str,
-                                      user_id: int, keycloak_id: str, group_id: str) -> str:
-        """
-        Handle PASSED + PENDING split
-        Original → PASSED, New → PENDING
-        """
-        old_status = receipt['quality_status']
-        receipt_id = receipt['id']
+    def _update_receipt_status(self, conn, receipt_id: int, status: str, 
+                               notes: str, defect_type: Optional[str]):
+        """Update receipt status only"""
+        query = text("""
+            UPDATE production_receipts
+            SET quality_status = :status,
+                notes = :notes,
+                defect_type = :defect_type
+            WHERE id = :receipt_id
+        """)
         
-        # 1. Update original receipt to PASSED
-        self._update_receipt_full(conn, receipt_id, 'PASSED', passed_qty, notes, user_id)
-        
-        # 2. Handle inventory for PASSED portion
-        if keycloak_id:
-            if old_status == 'PASSED':
-                self._remove_stock_in_production(conn, receipt, keycloak_id)
-            
-            receipt_for_inv = receipt.copy()
-            receipt_for_inv['quantity'] = passed_qty
-            self._add_stock_in_production(conn, receipt_for_inv, group_id, keycloak_id)
-        
-        # 3. Create new receipt for PENDING portion
-        new_receipt_no = self._create_split_receipt(
-            conn, receipt, pending_qty, 'PENDING', 
-            None, notes, user_id
-        )
-        
-        logger.info(f"✅ Split {receipt['receipt_no']}: {passed_qty} PASSED, {pending_qty} PENDING → {new_receipt_no}")
-        return new_receipt_no
-    
-    def _handle_split_pending_failed(self, conn, receipt: Dict, pending_qty: float, 
-                                      failed_qty: float, defect_type: str, notes: str,
-                                      user_id: int, keycloak_id: str, group_id: str) -> str:
-        """
-        Handle PENDING + FAILED split
-        Original → PENDING, New → FAILED
-        """
-        old_status = receipt['quality_status']
-        receipt_id = receipt['id']
-        
-        # 1. Update original receipt to PENDING
-        self._update_receipt_full(conn, receipt_id, 'PENDING', pending_qty, notes, user_id)
-        
-        # 2. Remove from inventory if was PASSED
-        if keycloak_id and old_status == 'PASSED':
-            self._remove_stock_in_production(conn, receipt, keycloak_id)
-        
-        # 3. Create new receipt for FAILED portion
-        new_receipt_no = self._create_split_receipt(
-            conn, receipt, failed_qty, 'FAILED', 
-            defect_type, notes, user_id
-        )
-        
-        logger.info(f"✅ Split {receipt['receipt_no']}: {pending_qty} PENDING, {failed_qty} FAILED → {new_receipt_no}")
-        return new_receipt_no
-    
-    def _handle_split_three_way(self, conn, receipt: Dict, 
-                                 passed_qty: float, pending_qty: float, failed_qty: float,
-                                 defect_type: str, notes: str,
-                                 user_id: int, keycloak_id: str, group_id: str) -> List[Dict]:
-        """
-        Handle PASSED + PENDING + FAILED three-way split
-        Original → PASSED, New1 → PENDING, New2 → FAILED
-        """
-        old_status = receipt['quality_status']
-        receipt_id = receipt['id']
-        created_receipts = []
-        
-        # 1. Update original receipt to PASSED
-        self._update_receipt_full(conn, receipt_id, 'PASSED', passed_qty, notes, user_id)
-        
-        # 2. Handle inventory for PASSED portion
-        if keycloak_id:
-            if old_status == 'PASSED':
-                self._remove_stock_in_production(conn, receipt, keycloak_id)
-            
-            receipt_for_inv = receipt.copy()
-            receipt_for_inv['quantity'] = passed_qty
-            self._add_stock_in_production(conn, receipt_for_inv, group_id, keycloak_id)
-        
-        # 3. Create new receipt for PENDING portion
-        pending_receipt_no = self._create_split_receipt(
-            conn, receipt, pending_qty, 'PENDING', 
-            None, notes, user_id
-        )
-        created_receipts.append({
-            'status': 'PENDING', 
-            'receipt_no': pending_receipt_no, 
-            'qty': pending_qty
+        conn.execute(query, {
+            'receipt_id': receipt_id,
+            'status': status,
+            'notes': notes,
+            'defect_type': defect_type
         })
+    
+    def _update_receipt_quantity_status(self, conn, receipt_id: int, quantity: float,
+                                        status: str, notes: str, defect_type: Optional[str]):
+        """Update receipt quantity and status"""
+        query = text("""
+            UPDATE production_receipts
+            SET quantity = :quantity,
+                quality_status = :status,
+                notes = :notes,
+                defect_type = :defect_type
+            WHERE id = :receipt_id
+        """)
         
-        # 4. Create new receipt for FAILED portion
-        failed_receipt_no = self._create_split_receipt(
-            conn, receipt, failed_qty, 'FAILED', 
-            defect_type, notes, user_id
-        )
-        created_receipts.append({
-            'status': 'FAILED', 
-            'receipt_no': failed_receipt_no, 
-            'qty': failed_qty
+        conn.execute(query, {
+            'receipt_id': receipt_id,
+            'quantity': quantity,
+            'status': status,
+            'notes': notes,
+            'defect_type': defect_type
         })
-        
-        logger.info(
-            f"✅ 3-way split {receipt['receipt_no']}: "
-            f"{passed_qty} PASSED, {pending_qty} PENDING → {pending_receipt_no}, "
-            f"{failed_qty} FAILED → {failed_receipt_no}"
-        )
-        
-        return created_receipts
     
-    # ==================== Helper Methods ====================
-    
-    def _update_receipt_full(self, conn, receipt_id: int, new_status: str, 
-                              quantity: float, notes: str, user_id: int,
-                              defect_type: str = None):
-        """Update receipt with new status, quantity, and notes"""
-        if defect_type:
-            update_query = text("""
-                UPDATE production_receipts
-                SET quality_status = :new_status,
-                    quantity = :quantity,
-                    defect_type = :defect_type,
-                    notes = :notes
-                WHERE id = :receipt_id
-            """)
-            conn.execute(update_query, {
-                'new_status': new_status,
-                'quantity': quantity,
-                'defect_type': defect_type,
-                'notes': notes,
-                'receipt_id': receipt_id
-            })
-        else:
-            update_query = text("""
-                UPDATE production_receipts
-                SET quality_status = :new_status,
-                    quantity = :quantity,
-                    notes = :notes
-                WHERE id = :receipt_id
-            """)
-            conn.execute(update_query, {
-                'new_status': new_status,
-                'quantity': quantity,
-                'notes': notes,
-                'receipt_id': receipt_id
-            })
-    
-    def _create_split_receipt(self, conn, original_receipt: Dict, quantity: float,
-                               status: str, defect_type: str, notes: str,
-                               user_id: int) -> str:
+    def _create_split_receipt(self, conn, original: Dict, quantity: float,
+                              status: str, notes: str, defect_type: Optional[str],
+                              user_id: int) -> str:
         """Create a new receipt from split"""
-        new_receipt_no = self._generate_receipt_number(conn)
+        receipt_no = self._generate_receipt_number(conn)
         
-        # Build notes for split receipt
-        split_notes = self._build_split_notes(notes, status, defect_type, original_receipt['receipt_no'])
-        
-        create_query = text("""
+        query = text("""
             INSERT INTO production_receipts (
                 receipt_no, manufacturing_order_id, receipt_date,
                 product_id, quantity, uom, batch_no, expired_date,
-                warehouse_id, quality_status, defect_type, notes,
-                parent_receipt_id,
+                warehouse_id, quality_status, notes, defect_type,
                 created_by, created_date
             ) VALUES (
                 :receipt_no, :order_id, NOW(),
                 :product_id, :quantity, :uom, :batch_no, :expired_date,
-                :warehouse_id, :status, :defect_type, :notes,
-                :parent_receipt_id,
+                :warehouse_id, :status, :notes, :defect_type,
                 :user_id, NOW()
             )
         """)
         
-        conn.execute(create_query, {
-            'receipt_no': new_receipt_no,
-            'order_id': original_receipt['manufacturing_order_id'],
-            'product_id': original_receipt['product_id'],
+        conn.execute(query, {
+            'receipt_no': receipt_no,
+            'order_id': original['manufacturing_order_id'],
+            'product_id': original['product_id'],
             'quantity': quantity,
-            'uom': original_receipt['uom'],
-            'batch_no': original_receipt['batch_no'],
-            'expired_date': original_receipt['expired_date'],
-            'warehouse_id': original_receipt['warehouse_id'],
+            'uom': original['uom'],
+            'batch_no': original['batch_no'],
+            'expired_date': original['expired_date'],
+            'warehouse_id': original['warehouse_id'],
             'status': status,
-            'defect_type': defect_type if status == 'FAILED' else None,
-            'notes': split_notes,
-            'parent_receipt_id': original_receipt['id'],
+            'notes': notes,
+            'defect_type': defect_type,
             'user_id': user_id
         })
         
-        return new_receipt_no
+        return receipt_no
     
-    def _build_split_notes(self, notes: str, status: str, defect_type: str,
-                           parent_receipt_no: str) -> str:
-        """Build notes for split receipt"""
-        parts = []
+    def _reduce_stock_in_production(self, conn, receipt: Dict, reduce_qty: float, keycloak_id: str):
+        """Reduce inventory quantity when partial QC fails/pending from PASSED"""
+        find_query = text("""
+            SELECT id, remain
+            FROM inventory_histories
+            WHERE type = 'stockInProduction'
+                AND action_detail_id = :receipt_id
+                AND product_id = :product_id
+                AND warehouse_id = :warehouse_id
+                AND remain > 0
+                AND delete_flag = 0
+            FOR UPDATE
+        """)
         
-        parts.append(f"[Split from: {parent_receipt_no}]")
+        result = conn.execute(find_query, {
+            'receipt_id': receipt['id'],
+            'product_id': receipt['product_id'],
+            'warehouse_id': receipt['warehouse_id']
+        })
+        row = result.fetchone()
         
-        if status == 'FAILED' and defect_type:
-            parts.append(f"[Defect: {defect_type}]")
-        elif status == 'PENDING':
-            parts.append("[Awaiting QC]")
-        
-        if notes:
-            parts.append(notes)
-        
-        return " ".join(parts)
-    
-    def _build_failed_notes(self, notes: str, defect_type: str, 
-                            parent_receipt_no: str = None) -> str:
-        """Build notes for failed receipt"""
-        parts = []
-        
-        if defect_type:
-            parts.append(f"[Defect: {defect_type}]")
-        
-        if parent_receipt_no:
-            parts.append(f"[Split from: {parent_receipt_no}]")
-        
-        if notes:
-            parts.append(notes)
-        
-        return " ".join(parts) if parts else ""
-    
-    def _update_receipt_status(self, conn, receipt_id: int, new_status: str, 
-                               notes: str, user_id: int, defect_type: str = None):
-        """Update receipt status and notes (legacy - without quantity change)"""
-        if defect_type:
+        if row:
+            inv_record = dict(zip(result.keys(), row))
+            new_remain = max(0, float(inv_record['remain']) - reduce_qty)
+            
             update_query = text("""
-                UPDATE production_receipts
-                SET quality_status = :new_status,
-                    defect_type = :defect_type,
-                    notes = :notes
-                WHERE id = :receipt_id
+                UPDATE inventory_histories
+                SET remain = :new_remain,
+                    updated_date = NOW()
+                WHERE id = :inv_id
             """)
+            
             conn.execute(update_query, {
-                'new_status': new_status,
-                'defect_type': defect_type,
-                'notes': notes,
-                'receipt_id': receipt_id
+                'inv_id': inv_record['id'],
+                'new_remain': new_remain
             })
-        else:
-            update_query = text("""
-                UPDATE production_receipts
-                SET quality_status = :new_status,
-                    notes = :notes
-                WHERE id = :receipt_id
-            """)
-            conn.execute(update_query, {
-                'new_status': new_status,
-                'notes': notes,
-                'receipt_id': receipt_id
-            })
-    
-    # ==================== Private Helper Methods ====================
+            
+            logger.info(f"📦 Reduced stockInProduction by {reduce_qty} for receipt {receipt['id']}")
     
     def _get_order_info(self, conn, order_id: int) -> Optional[Dict]:
         """Get order information"""
         query = text("""
             SELECT 
-                mo.id, mo.order_no, mo.product_id,
-                mo.warehouse_id, mo.target_warehouse_id,
-                mo.status, mo.planned_qty, mo.produced_qty,
-                mo.entity_id, p.uom
+                mo.id, mo.order_no, mo.status,
+                mo.product_id, mo.planned_qty, mo.produced_qty, mo.uom,
+                mo.warehouse_id, mo.target_warehouse_id
             FROM manufacturing_orders mo
-            JOIN products p ON mo.product_id = p.id
             WHERE mo.id = :order_id AND mo.delete_flag = 0
             FOR UPDATE
         """)
@@ -879,16 +679,19 @@ class CompletionManager:
             # No inventory record found - might have been already processed
             logger.warning(f"⚠️ No stockInProduction record found for receipt {receipt['id']}")
     
-    def _get_pending_raw_materials(self, conn, order_id: int) -> List[Dict]:
+    def _get_unissued_raw_materials(self, conn, order_id: int) -> List[Dict]:
         """
-        Get list of RAW_MATERIALs that have not been fully issued
+        Get list of RAW_MATERIALs that have NOT been issued at all (issued_qty = 0)
+        
+        Note: This allows partial issuance - materials with issued_qty > 0 will pass validation
+        even if issued_qty < required_qty (practical tolerance for production variances)
         
         Args:
             conn: Database connection
             order_id: Manufacturing order ID
             
         Returns:
-            List of dict with pending material info
+            List of dict with unissued material info
         """
         query = text("""
             SELECT 
@@ -898,7 +701,6 @@ class CompletionManager:
                 p.pt_code,
                 mom.required_qty,
                 COALESCE(mom.issued_qty, 0) as issued_qty,
-                mom.required_qty - COALESCE(mom.issued_qty, 0) as pending_qty,
                 bd.material_type
             FROM manufacturing_order_materials mom
             JOIN products p ON mom.material_id = p.id
@@ -906,24 +708,23 @@ class CompletionManager:
             LEFT JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
                 AND bd.material_id = mom.material_id
             WHERE mom.manufacturing_order_id = :order_id
-                AND mom.required_qty > COALESCE(mom.issued_qty, 0)
+                AND COALESCE(mom.issued_qty, 0) = 0
                 AND (bd.material_type = 'RAW_MATERIAL' OR bd.material_type IS NULL)
         """)
         
         result = conn.execute(query, {'order_id': order_id})
         
-        pending = []
+        unissued = []
         for row in result.fetchall():
             row_dict = dict(zip(result.keys(), row))
-            pending.append({
+            unissued.append({
                 'id': row_dict['id'],
                 'material_id': row_dict['material_id'],
                 'name': row_dict['name'],
                 'pt_code': row_dict.get('pt_code'),
                 'required_qty': float(row_dict['required_qty']),
                 'issued_qty': float(row_dict['issued_qty']),
-                'pending_qty': float(row_dict['pending_qty']),
                 'material_type': row_dict.get('material_type', 'RAW_MATERIAL')
             })
         
-        return pending
+        return unissued

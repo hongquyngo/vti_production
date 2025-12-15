@@ -216,7 +216,7 @@ def _handle_save_info(bom_id: int, bom_info: dict, new_name: str, new_output_qty
             'updated_by': user_id
         }
         
-        manager.update_bom_header(bom_id, update_data)
+        manager.update_bom_header(bom_id, update_data, user_id)
         
         state.record_action('edit', bom_id=bom_id, bom_code=bom_info['bom_code'])
         state.clear_bom_list_cache()

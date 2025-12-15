@@ -3,9 +3,10 @@
 Form components for Completions domain
 Production completion form with quantity and quality inputs
 
-Version: 2.0.0
+Version: 2.1.0
 Changes:
-- Added st.form() to prevent unnecessary reruns when changing inputs
+- v2.1.0: Cleaned up unused imports (format_date)
+- v2.0.0: Added st.form() to prevent unnecessary reruns when changing inputs
 - Fixed batch_no generation - now generates ONCE and persists in session state
 - Added session state to preserve all form values
 - Order selection remains outside form (needs to reload order info)
@@ -13,7 +14,7 @@ Changes:
 
 import logging
 from datetime import timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 import streamlit as st
 import pandas as pd
@@ -21,9 +22,9 @@ import pandas as pd
 from .queries import CompletionQueries
 from .manager import CompletionManager
 from .common import (
-    format_number, calculate_percentage, create_status_indicator, format_date,
+    format_number, calculate_percentage, create_status_indicator,
     CompletionConstants, CompletionValidator, get_user_audit_info,
-    get_vietnam_today, get_vietnam_now, generate_batch_no
+    get_vietnam_today, generate_batch_no
 )
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class CompletionForms:
         orders = self.queries.get_completable_orders()
         
         if orders.empty:
-            st.info("📭 No orders in progress")
+            st.info("🏭 No orders in progress")
             st.caption("Only IN_PROGRESS orders can have production completed")
             return
         
