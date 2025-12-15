@@ -3,7 +3,9 @@
 Main UI orchestrator for Completions domain
 Renders the Completions tab with dashboard, completion form, and receipts list
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- v1.1.0: Added Help section with validation rules and calculation formulas
 """
 
 import logging
@@ -35,11 +37,282 @@ def _init_session_state():
     """Initialize session state for completions tab"""
     defaults = {
         'completions_page': 1,
-        'completions_view': 'receipts',  # 'receipts' or 'create'
+        'completions_view': 'receipts',  # 'receipts', 'create', or 'help'
     }
     
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+
+
+# ==================== Help Section ====================
+
+def _render_help_section():
+    """Render help section with validation rules and formulas"""
+    st.subheader("📚 Production Completion Help")
+    
+    # Back button
+    if st.button("⬅️ Back to Receipts", key="btn_back_from_help"):
+        st.session_state.completions_view = 'receipts'
+        st.rerun()
+    
+    st.markdown("---")
+    
+    # Table of Contents
+    st.markdown("""
+    ### 📑 Table of Contents
+    1. [Validation Rules](#validation-rules)
+    2. [Calculation Formulas](#calculation-formulas)
+    3. [Quality Status Flow](#quality-status-flow)
+    4. [Inventory Impact](#inventory-impact)
+    5. [Terminology](#terminology)
+    """)
+    
+    st.markdown("---")
+    
+    # 1. Validation Rules
+    st.markdown("### 🔒 Validation Rules")
+    st.markdown("""
+    Để hoàn thành (complete) một Production Order, các điều kiện sau **BẮT BUỘC** phải thỏa mãn:
+    """)
+    
+    validation_data = {
+        "Điều kiện": [
+            "Order Status",
+            "Produced Quantity", 
+            "Max Quantity",
+            "Batch Number",
+            "Raw Materials Issued"
+        ],
+        "Yêu cầu": [
+            "= IN_PROGRESS",
+            "> 0",
+            "≤ Remaining × 1.5",
+            "Không được để trống",
+            "Tất cả đã được issue (issued_qty > 0)"
+        ],
+        "Giải thích": [
+            "Chỉ orders đang sản xuất mới có thể record output",
+            "Số lượng sản xuất phải là số dương",
+            "Cho phép sản xuất vượt 50% so với kế hoạch còn lại",
+            "Mỗi lô sản xuất phải có mã batch để truy xuất",
+            "Nguyên liệu chính phải được xuất kho (cho phép xuất thiếu/thừa)"
+        ]
+    }
+    st.table(pd.DataFrame(validation_data))
+    
+    with st.expander("💡 Chi tiết về Raw Materials Validation", expanded=False):
+        st.markdown("""
+        **Logic kiểm tra:**
+        ```
+        ❌ Không cho complete nếu có material thỏa:
+           • material_type = 'RAW_MATERIAL' (hoặc NULL)
+           • issued_qty = 0 (chưa issue gì cả)
+        
+        ✅ Cho phép complete nếu:
+           • Tất cả RAW_MATERIAL có issued_qty > 0
+           • Không yêu cầu issued_qty = required_qty (cho phép sai số)
+        ```
+        
+        **Lý do cho phép issue thiếu/thừa:**
+        - Sai số trong quá trình cân đo
+        - Hao hụt thực tế khác với dự tính
+        - Điều chỉnh công thức trong sản xuất
+        
+        **Lưu ý:** PACKAGING và CONSUMABLE không bắt buộc phải issue.
+        """)
+    
+    st.markdown("---")
+    
+    # 2. Calculation Formulas
+    st.markdown("### 📐 Calculation Formulas")
+    
+    st.markdown("#### Production Progress")
+    st.latex(r"\text{Progress (\%)} = \frac{\text{Produced Qty}}{\text{Planned Qty}} \times 100")
+    
+    st.markdown("#### Remaining Quantity")
+    st.latex(r"\text{Remaining} = \text{Planned Qty} - \text{Produced Qty}")
+    
+    st.markdown("#### Max Allowed Input (khi record output)")
+    st.latex(r"\text{Max Qty} = \text{Remaining} \times 1.5")
+    
+    st.markdown("#### Yield Rate")
+    st.latex(r"\text{Yield Rate (\%)} = \frac{\text{Produced Qty}}{\text{Planned Qty}} \times 100")
+    
+    st.markdown("#### Quality Pass Rate")
+    st.latex(r"\text{Pass Rate (\%)} = \frac{\text{PASSED Qty}}{\text{Total Qty}} \times 100")
+    
+    with st.expander("📊 Yield Rate Indicators", expanded=False):
+        yield_data = {
+            "Yield Rate": ["≥ 95%", "85% - 94%", "< 85%"],
+            "Indicator": ["✅ Excellent", "⚠️ Acceptable", "❌ Below Target"],
+            "Màu sắc": ["Xanh lá", "Vàng", "Đỏ"]
+        }
+        st.table(pd.DataFrame(yield_data))
+    
+    st.markdown("---")
+    
+    # 3. Quality Status Flow
+    st.markdown("### 🔄 Quality Status Flow")
+    
+    st.markdown("""
+    ```
+    ┌─────────────┐
+    │   PENDING   │  ← Trạng thái mặc định khi tạo receipt
+    └──────┬──────┘
+           │
+           ▼
+    ┌──────┴──────┐
+    │   QC Check  │
+    └──────┬──────┘
+           │
+      ┌────┴────┐
+      │         │
+      ▼         ▼
+    ┌─────┐   ┌─────┐
+    │PASSED│   │FAILED│
+    └─────┘   └─────┘
+    ```
+    """)
+    
+    status_data = {
+        "Status": ["⏳ PENDING", "✅ PASSED", "❌ FAILED"],
+        "Mô tả": [
+            "Chờ kiểm tra chất lượng",
+            "Đạt yêu cầu chất lượng",
+            "Không đạt yêu cầu"
+        ],
+        "Inventory Impact": [
+            "❌ Không cập nhật tồn kho",
+            "✅ Cộng vào tồn kho",
+            "❌ Không cập nhật tồn kho"
+        ]
+    }
+    st.table(pd.DataFrame(status_data))
+    
+    with st.expander("🔬 Partial QC (Chia tách receipt)", expanded=False):
+        st.markdown("""
+        **Hỗ trợ 7 kịch bản QC:**
+        
+        | # | Kịch bản | Kết quả |
+        |---|----------|---------|
+        | 1 | 100% PASSED | Original receipt → PASSED |
+        | 2 | 100% PENDING | Original receipt → PENDING |
+        | 3 | 100% FAILED | Original receipt → FAILED |
+        | 4 | PASSED + FAILED | Split thành 2 receipts |
+        | 5 | PASSED + PENDING | Split thành 2 receipts |
+        | 6 | PENDING + FAILED | Split thành 2 receipts |
+        | 7 | PASSED + PENDING + FAILED | Split thành 3 receipts |
+        
+        **Nguyên tắc split:**
+        - Original receipt giữ status có priority cao nhất
+        - Priority: PASSED > PENDING > FAILED
+        - Tạo receipt mới cho các status còn lại
+        """)
+    
+    st.markdown("---")
+    
+    # 4. Inventory Impact
+    st.markdown("### 📦 Inventory Impact")
+    
+    st.markdown("""
+    **Khi tạo Production Receipt:**
+    """)
+    
+    inv_data = {
+        "Quality Status": ["PASSED", "PENDING", "FAILED"],
+        "Inventory Action": [
+            "✅ Tạo `stockInProduction` record",
+            "❌ Không tạo inventory record",
+            "❌ Không tạo inventory record"
+        ],
+        "Ghi chú": [
+            "Hàng vào kho target_warehouse ngay",
+            "Chờ QC xong mới vào kho",
+            "Hàng lỗi không nhập kho"
+        ]
+    }
+    st.table(pd.DataFrame(inv_data))
+    
+    st.markdown("""
+    **Khi cập nhật Quality Status:**
+    """)
+    
+    change_data = {
+        "Thay đổi": [
+            "PENDING → PASSED",
+            "PENDING → FAILED", 
+            "PASSED → PENDING",
+            "PASSED → FAILED",
+            "FAILED → PASSED",
+            "FAILED → PENDING"
+        ],
+        "Inventory Action": [
+            "➕ Tạo `stockInProduction`",
+            "Không thay đổi",
+            "➖ Xóa khỏi tồn kho (remain = 0)",
+            "➖ Xóa khỏi tồn kho (remain = 0)",
+            "➕ Tạo `stockInProduction`",
+            "Không thay đổi"
+        ]
+    }
+    st.table(pd.DataFrame(change_data))
+    
+    st.markdown("---")
+    
+    # 5. Terminology
+    st.markdown("### 📖 Terminology")
+    
+    terms_data = {
+        "Thuật ngữ": [
+            "Production Order (MO)",
+            "Production Receipt (PR)",
+            "Planned Qty",
+            "Produced Qty",
+            "Remaining Qty",
+            "Yield Rate",
+            "Batch No",
+            "RAW_MATERIAL",
+            "PACKAGING",
+            "CONSUMABLE",
+            "stockInProduction"
+        ],
+        "Tiếng Việt": [
+            "Lệnh sản xuất",
+            "Phiếu nhập kho thành phẩm",
+            "Số lượng kế hoạch",
+            "Số lượng đã sản xuất",
+            "Số lượng còn lại",
+            "Tỷ lệ hoàn thành",
+            "Mã lô sản xuất",
+            "Nguyên liệu chính",
+            "Bao bì đóng gói",
+            "Vật tư tiêu hao",
+            "Nhập kho từ sản xuất"
+        ],
+        "Mô tả": [
+            "Lệnh chỉ đạo sản xuất một sản phẩm từ BOM",
+            "Ghi nhận số lượng thành phẩm sản xuất được",
+            "Số lượng mục tiêu cần sản xuất",
+            "Tổng số đã sản xuất (có thể từ nhiều receipts)",
+            "Planned - Produced",
+            "Produced / Planned × 100%",
+            "Mã để truy xuất nguồn gốc sản phẩm",
+            "Nguyên liệu bắt buộc phải issue trước khi complete",
+            "Không bắt buộc issue",
+            "Không bắt buộc issue",
+            "Loại inventory khi nhập kho từ sản xuất"
+        ]
+    }
+    st.table(pd.DataFrame(terms_data))
+    
+    st.markdown("---")
+    
+    # Contact
+    st.info("""
+    💬 **Cần hỗ trợ thêm?**
+    
+    Liên hệ team IT hoặc sử dụng nút 👎 để báo lỗi.
+    """)
 
 
 # ==================== Filter Bar ====================
@@ -318,7 +591,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
 
 def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
     """Render action bar"""
-    col1, col2, col3 = st.columns([1, 1, 2])
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
     
     with col1:
         if st.button("✅ Record Output", type="primary", use_container_width=True,
@@ -332,6 +605,11 @@ def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
     
     with col3:
         if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_completions"):
+            st.rerun()
+    
+    with col4:
+        if st.button("❓ Help", use_container_width=True, key="btn_help_completions"):
+            st.session_state.completions_view = 'help'
             st.rerun()
 
 
@@ -350,7 +628,7 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
             page_size=10000
         )
         
-        if receipts.empty:
+        if receipts is None or receipts.empty:
             st.warning("No receipts to export")
             return
         
@@ -392,6 +670,10 @@ def render_completions_tab():
     queries = CompletionQueries()
     
     # Check current view
+    if st.session_state.completions_view == 'help':
+        _render_help_section()
+        return
+    
     if st.session_state.completions_view == 'create':
         if st.button("⬅️ Back to Receipts", key="btn_back_to_receipts"):
             st.session_state.completions_view = 'receipts'
