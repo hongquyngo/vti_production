@@ -38,7 +38,11 @@ from utils.bom.common import (
     get_edit_level_description,
     can_edit_field,
     render_edit_level_indicator,
-    render_usage_context
+    render_usage_context,
+    # Duplicate validation helpers
+    get_all_material_ids_in_bom_db,
+    validate_material_not_duplicate,
+    filter_available_materials
 )
 
 logger = logging.getLogger(__name__)
@@ -246,7 +250,7 @@ def _render_materials_tab_full_edit(bom_id: int, bom_details: pd.DataFrame,
         
         # Display each material with edit/delete options
         for idx, material in bom_details.iterrows():
-            _render_material_card_full_edit(material, state, manager)
+            _render_material_card_full_edit(bom_id, material, state, manager)
     
     st.markdown("---")
     
@@ -261,7 +265,7 @@ def _render_materials_tab_full_edit(bom_id: int, bom_details: pd.DataFrame,
         st.rerun()
 
 
-def _render_material_card_full_edit(material: pd.Series, state: StateManager, manager: BOMManager):
+def _render_material_card_full_edit(bom_id: int, material: pd.Series, state: StateManager, manager: BOMManager):
     """Render material card with full edit options"""
     detail_id = int(material['id'])
     alt_count = int(material.get('alternatives_count', 0))
@@ -298,12 +302,12 @@ def _render_material_card_full_edit(material: pd.Series, state: StateManager, ma
     
     # Expandable alternatives section
     with st.expander(f"🔀 Manage Alternatives ({alt_count})", expanded=False):
-        _render_alternatives_manager(detail_id, material, manager)
+        _render_alternatives_manager(bom_id, detail_id, material, manager)
     
     st.markdown("")
 
 
-def _render_alternatives_manager(detail_id: int, material: pd.Series, manager: BOMManager):
+def _render_alternatives_manager(bom_id: int, detail_id: int, material: pd.Series, manager: BOMManager):
     """Render alternatives management section"""
     try:
         alternatives = manager.get_material_alternatives(detail_id)
@@ -347,16 +351,19 @@ def _render_alternatives_manager(detail_id: int, material: pd.Series, manager: B
         st.markdown("---")
         
         # Add alternative form
-        _render_add_alternative_form(detail_id, material, manager)
+        _render_add_alternative_form(bom_id, detail_id, material, manager)
     
     except Exception as e:
         logger.error(f"Error rendering alternatives: {e}")
         st.error(f"❌ Error: {str(e)}")
 
 
-def _render_add_alternative_form(detail_id: int, material: pd.Series, manager: BOMManager):
-    """Render form to add new alternative"""
+def _render_add_alternative_form(bom_id: int, detail_id: int, material: pd.Series, manager: BOMManager):
+    """Render form to add new alternative with duplicate validation"""
     st.markdown("**➕ Add Alternative:**")
+    
+    # Get all material IDs already used in this BOM (from database)
+    used_material_ids = get_all_material_ids_in_bom_db(bom_id)
     
     with st.form(f"add_alt_form_{detail_id}", clear_on_submit=True):
         products = get_cached_products()
@@ -364,20 +371,19 @@ def _render_add_alternative_form(detail_id: int, material: pd.Series, manager: B
         col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
         
         with col1:
-            product_options = {}
-            for _, row in products.iterrows():
-                display_text = format_product_display(
-                    code=row['code'],
-                    name=row['name'],
-                    package_size=row.get('package_size'),
-                    brand=row.get('brand')
-                )
-                product_options[display_text] = {'id': row['id'], 'uom': row['uom']}
+            # Filter products to exclude ALL materials already in BOM
+            product_options = filter_available_materials(products, used_material_ids)
             
-            selected = st.selectbox("Alternative Material", options=list(product_options.keys()))
-            alt_info = product_options.get(selected)
-            alt_material_id = alt_info['id'] if alt_info else None
-            alt_uom = alt_info['uom'] if alt_info else 'PCS'
+            if not product_options:
+                st.warning("⚠️ No available materials (all products already used in this BOM)")
+                selected = None
+                alt_material_id = None
+                alt_uom = 'PCS'
+            else:
+                selected = st.selectbox("Alternative Material", options=list(product_options.keys()))
+                alt_info = product_options.get(selected)
+                alt_material_id = alt_info['id'] if alt_info else None
+                alt_uom = alt_info['uom'] if alt_info else 'PCS'
         
         with col2:
             quantity = st.number_input("Qty", min_value=0.0001, value=float(material['quantity']), step=0.1, format="%.4f")
@@ -393,10 +399,15 @@ def _render_add_alternative_form(detail_id: int, material: pd.Series, manager: B
         
         notes = st.text_input("Notes (optional)")
         
-        add_btn = st.form_submit_button("➕ Add Alternative", use_container_width=True)
+        add_btn = st.form_submit_button("➕ Add Alternative", use_container_width=True, disabled=not product_options)
     
     if add_btn and alt_material_id:
-        if validate_quantity(quantity) and validate_percentage(scrap):
+        # Double-check validation (in case of race condition)
+        is_valid, error_msg = validate_material_not_duplicate(alt_material_id, used_material_ids)
+        
+        if not is_valid:
+            st.error(f"❌ {error_msg}")
+        elif validate_quantity(quantity) and validate_percentage(scrap):
             try:
                 alternative_data = {
                     'bom_detail_id': detail_id,
@@ -418,8 +429,11 @@ def _render_add_alternative_form(detail_id: int, material: pd.Series, manager: B
 
 
 def _render_add_material_form(bom_id: int, state: StateManager, manager: BOMManager):
-    """Render form to add new material to BOM"""
+    """Render form to add new material to BOM with duplicate validation"""
     st.markdown("### ➕ Add New Material")
+    
+    # Get all material IDs already used in this BOM (from database)
+    used_material_ids = get_all_material_ids_in_bom_db(bom_id)
     
     with st.form("add_material_form", clear_on_submit=True):
         products = get_cached_products()
@@ -432,20 +446,19 @@ def _render_add_material_form(bom_id: int, state: StateManager, manager: BOMMana
         col1, col2, col3, col4, col5 = st.columns([3, 1.5, 1, 0.8, 0.8])
         
         with col1:
-            product_options = {}
-            for _, row in products.iterrows():
-                display_text = format_product_display(
-                    code=row['code'],
-                    name=row['name'],
-                    package_size=row.get('package_size'),
-                    brand=row.get('brand')
-                )
-                product_options[display_text] = {'id': row['id'], 'uom': row['uom']}
+            # Filter products to exclude materials already in BOM
+            product_options = filter_available_materials(products, used_material_ids)
             
-            selected = st.selectbox("Material", options=list(product_options.keys()))
-            mat_info = product_options.get(selected)
-            material_id = mat_info['id'] if mat_info else None
-            material_uom = mat_info['uom'] if mat_info else 'PCS'
+            if not product_options:
+                st.warning("⚠️ No available materials (all products already used in this BOM)")
+                selected = None
+                material_id = None
+                material_uom = 'PCS'
+            else:
+                selected = st.selectbox("Material", options=list(product_options.keys()))
+                mat_info = product_options.get(selected)
+                material_id = mat_info['id'] if mat_info else None
+                material_uom = mat_info['uom'] if mat_info else 'PCS'
         
         with col2:
             material_type = st.selectbox("Type", options=["RAW_MATERIAL", "PACKAGING", "CONSUMABLE"])
@@ -459,10 +472,15 @@ def _render_add_material_form(bom_id: int, state: StateManager, manager: BOMMana
         with col5:
             scrap_rate = st.number_input("Scrap %", min_value=0.0, max_value=100.0, value=0.0, step=0.5)
         
-        add_btn = st.form_submit_button("➕ Add Material", type="primary", use_container_width=True)
+        add_btn = st.form_submit_button("➕ Add Material", type="primary", use_container_width=True, disabled=not product_options)
     
     if add_btn and material_id:
-        if validate_quantity(quantity) and validate_percentage(scrap_rate):
+        # Double-check validation (in case of race condition)
+        is_valid, error_msg = validate_material_not_duplicate(material_id, used_material_ids)
+        
+        if not is_valid:
+            st.error(f"❌ {error_msg}")
+        elif validate_quantity(quantity) and validate_percentage(scrap_rate):
             try:
                 material_data = {
                     'bom_header_id': bom_id,
@@ -507,7 +525,7 @@ def _render_alternatives_mode(bom_id: int, bom_info: dict, bom_details: pd.DataF
         st.warning("⚠️ No materials in this BOM")
     else:
         for idx, material in bom_details.iterrows():
-            _render_material_card_alternatives_only(material, manager)
+            _render_material_card_alternatives_only(bom_id, material, manager)
     
     st.markdown("---")
     
@@ -517,7 +535,7 @@ def _render_alternatives_mode(bom_id: int, bom_info: dict, bom_details: pd.DataF
         st.rerun()
 
 
-def _render_material_card_alternatives_only(material: pd.Series, manager: BOMManager):
+def _render_material_card_alternatives_only(bom_id: int, material: pd.Series, manager: BOMManager):
     """Render material card with alternatives editing only"""
     detail_id = int(material['id'])
     alt_count = int(material.get('alternatives_count', 0))
@@ -547,7 +565,7 @@ def _render_material_card_alternatives_only(material: pd.Series, manager: BOMMan
     
     # Expandable alternatives section - editable
     with st.expander(f"🔀 Manage Alternatives ({alt_count})", expanded=False):
-        _render_alternatives_manager(detail_id, material, manager)
+        _render_alternatives_manager(bom_id, detail_id, material, manager)
     
     st.markdown("")
 

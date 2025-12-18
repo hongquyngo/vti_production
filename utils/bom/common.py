@@ -872,3 +872,150 @@ def validate_materials_for_bom(materials: list) -> Tuple[bool, str]:
         return False, "At least one RAW_MATERIAL is required"
     
     return True, ""
+
+# ==================== BOM Material Duplicate Validation ====================
+
+def get_all_material_ids_in_bom_list(materials: list) -> set:
+    """
+    Get all material IDs used in BOM materials list (for Create wizard)
+    Includes both primary materials and their alternatives
+    
+    Args:
+        materials: List of material dicts with structure:
+            {
+                'material_id': int,
+                'alternatives': [{'alternative_material_id': int}, ...]
+            }
+    
+    Returns:
+        Set of all material IDs used in the BOM
+    """
+    used_ids = set()
+    
+    for mat in materials:
+        # Add primary material ID
+        mat_id = mat.get('material_id')
+        if mat_id:
+            used_ids.add(int(mat_id))
+        
+        # Add alternative material IDs
+        alternatives = mat.get('alternatives', [])
+        for alt in alternatives:
+            alt_id = alt.get('alternative_material_id') or alt.get('material_id')
+            if alt_id:
+                used_ids.add(int(alt_id))
+    
+    return used_ids
+
+
+def get_all_material_ids_in_bom_db(bom_id: int) -> set:
+    """
+    Get all material IDs used in existing BOM from database (for Edit dialog)
+    Includes both primary materials and their alternatives
+    
+    Args:
+        bom_id: BOM header ID
+    
+    Returns:
+        Set of all material IDs used in the BOM
+    """
+    try:
+        engine = get_db_engine()
+        
+        # Query all primary materials
+        primary_query = """
+            SELECT DISTINCT material_id 
+            FROM bom_details 
+            WHERE bom_header_id = %s
+        """
+        
+        # Query all alternative materials
+        alternatives_query = """
+            SELECT DISTINCT a.alternative_material_id
+            FROM bom_material_alternatives a
+            JOIN bom_details d ON a.bom_detail_id = d.id
+            WHERE d.bom_header_id = %s
+        """
+        
+        primary_df = pd.read_sql(primary_query, engine, params=(bom_id,))
+        alt_df = pd.read_sql(alternatives_query, engine, params=(bom_id,))
+        
+        used_ids = set()
+        
+        if not primary_df.empty:
+            used_ids.update(primary_df['material_id'].astype(int).tolist())
+        
+        if not alt_df.empty:
+            used_ids.update(alt_df['alternative_material_id'].astype(int).tolist())
+        
+        return used_ids
+    
+    except Exception as e:
+        logger.error(f"Error getting material IDs from BOM: {e}")
+        return set()
+
+
+def validate_material_not_duplicate(material_id: int, 
+                                     used_ids: set, 
+                                     material_name: str = None) -> Tuple[bool, str]:
+    """
+    Validate that a material is not already used in BOM
+    
+    Args:
+        material_id: Material ID to check
+        used_ids: Set of already used material IDs
+        material_name: Optional material name for error message
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if int(material_id) in used_ids:
+        if material_name:
+            return False, f"Material '{material_name}' is already used in this BOM (as primary or alternative)"
+        return False, "This material is already used in this BOM (as primary or alternative)"
+    
+    return True, ""
+
+
+def filter_available_materials(products: pd.DataFrame, 
+                               used_ids: set,
+                               exclude_id: int = None) -> Dict:
+    """
+    Filter products to exclude already used materials in BOM
+    Returns product options dict for selectbox
+    
+    Args:
+        products: DataFrame of all products
+        used_ids: Set of material IDs already used in BOM
+        exclude_id: Optional single ID to also exclude (e.g., current primary material)
+    
+    Returns:
+        Dict of {display_text: {'id': int, 'uom': str, 'code': str, 'name': str}}
+    """
+    product_options = {}
+    
+    for _, row in products.iterrows():
+        mat_id = int(row['id'])
+        
+        # Skip if already used in BOM
+        if mat_id in used_ids:
+            continue
+        
+        # Skip if explicitly excluded
+        if exclude_id and mat_id == exclude_id:
+            continue
+        
+        display_text = format_product_display(
+            code=row['code'],
+            name=row['name'],
+            package_size=row.get('package_size'),
+            brand=row.get('brand')
+        )
+        product_options[display_text] = {
+            'id': mat_id,
+            'uom': row['uom'],
+            'code': row['code'],
+            'name': row['name']
+        }
+    
+    return product_options

@@ -22,7 +22,11 @@ from utils.bom.common import (
     validate_percentage,
     render_material_type_counter,
     validate_materials_for_bom,
-    format_number
+    format_number,
+    # Duplicate validation helpers
+    get_all_material_ids_in_bom_list,
+    validate_material_not_duplicate,
+    filter_available_materials
 )
 
 logger = logging.getLogger(__name__)
@@ -363,35 +367,34 @@ def _render_alternatives_section_optimized(material_idx: int, material: dict,
     # Add alternative form
     st.markdown("**Add Alternative:**")
     
+    # Get all material IDs already used in this BOM (primary + alternatives)
+    all_materials = state.get_create_materials()
+    used_material_ids = get_all_material_ids_in_bom_list(all_materials)
+    
     with st.form(f"add_alternative_form_{material_idx}", clear_on_submit=True):
         products = get_cached_products()
         
         col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
         
         with col1:
-            product_options = {}
-            for _, row in products.iterrows():
-                if row['id'] != material['material_id']:  # Exclude primary material
-                    display_text = format_product_display(
-                        code=row['code'],
-                        name=row['name'],
-                        package_size=row.get('package_size'),
-                        brand=row.get('brand')
-                    )
-                    product_options[display_text] = {
-                        'id': row['id'],
-                        'uom': row['uom']
-                    }
+            # Filter products to exclude ALL materials already in BOM
+            product_options = filter_available_materials(products, used_material_ids)
             
-            selected_alt = st.selectbox(
-                "Alternative Material",
-                options=list(product_options.keys()),
-                key=f"alt_select_{material_idx}"
-            )
-            
-            alt_info = product_options.get(selected_alt)
-            alt_material_id = alt_info['id'] if alt_info else None
-            alt_uom = alt_info['uom'] if alt_info else 'PCS'
+            if not product_options:
+                st.warning("⚠️ No available materials (all products already used in this BOM)")
+                selected_alt = None
+                alt_material_id = None
+                alt_uom = 'PCS'
+            else:
+                selected_alt = st.selectbox(
+                    "Alternative Material",
+                    options=list(product_options.keys()),
+                    key=f"alt_select_{material_idx}"
+                )
+                
+                alt_info = product_options.get(selected_alt)
+                alt_material_id = alt_info['id'] if alt_info else None
+                alt_uom = alt_info['uom'] if alt_info else 'PCS'
         
         with col2:
             quantity = st.number_input(
@@ -423,11 +426,16 @@ def _render_alternatives_section_optimized(material_idx: int, material: dict,
                 value=next_priority
             )
         
-        add_alt_button = st.form_submit_button("➕ Add", use_container_width=True)
+        add_alt_button = st.form_submit_button("➕ Add", use_container_width=True, disabled=not product_options)
     
     # Handle add alternative
     if add_alt_button and alt_material_id:
-        if validate_quantity(quantity) and validate_percentage(scrap):
+        # Double-check validation (in case of race condition)
+        is_valid, error_msg = validate_material_not_duplicate(alt_material_id, used_material_ids)
+        
+        if not is_valid:
+            st.error(f"❌ {error_msg}")
+        elif validate_quantity(quantity) and validate_percentage(scrap):
             alternative_data = {
                 'alternative_material_id': alt_material_id,
                 'quantity': quantity,
@@ -453,6 +461,10 @@ def _render_add_material_form_optimized(state: StateManager):
     """Render add material form - Using Form Container"""
     st.markdown("**Add Material:**")
     
+    # Get all material IDs already used in this BOM (primary + alternatives)
+    current_materials = state.get_create_materials()
+    used_material_ids = get_all_material_ids_in_bom_list(current_materials)
+    
     with st.form("add_material_form", clear_on_submit=True):
         products = get_cached_products()
         
@@ -463,28 +475,23 @@ def _render_add_material_form_optimized(state: StateManager):
         col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
         
         with col1:
-            # Build product options
-            product_options = {}
-            for _, row in products.iterrows():
-                display_text = format_product_display(
-                    code=row['code'],
-                    name=row['name'],
-                    package_size=row.get('package_size'),
-                    brand=row.get('brand')
+            # Filter products to exclude materials already in BOM
+            product_options = filter_available_materials(products, used_material_ids)
+            
+            if not product_options:
+                st.warning("⚠️ No available materials (all products already used in this BOM)")
+                selected_material = None
+                material_id = None
+                mat_uom = 'PCS'
+            else:
+                selected_material = st.selectbox(
+                    "Material",
+                    options=list(product_options.keys())
                 )
-                product_options[display_text] = {
-                    'id': row['id'],
-                    'uom': row['uom']
-                }
-            
-            selected_material = st.selectbox(
-                "Material",
-                options=list(product_options.keys())
-            )
-            
-            mat_info = product_options.get(selected_material)
-            material_id = mat_info['id'] if mat_info else None
-            mat_uom = mat_info['uom'] if mat_info else 'PCS'
+                
+                mat_info = product_options.get(selected_material)
+                material_id = mat_info['id'] if mat_info else None
+                mat_uom = mat_info['uom'] if mat_info else 'PCS'
         
         with col2:
             material_type = st.selectbox(
@@ -513,15 +520,15 @@ def _render_add_material_form_optimized(state: StateManager):
                 step=0.5
             )
         
-        add_button = st.form_submit_button("➕ Add Material", use_container_width=True)
+        add_button = st.form_submit_button("➕ Add Material", use_container_width=True, disabled=not product_options)
     
     # Handle form submission
     if add_button and material_id:
-        current_materials = state.get_create_materials()
+        # Double-check validation (in case of race condition)
+        is_valid, error_msg = validate_material_not_duplicate(material_id, used_material_ids)
         
-        # Check if already added
-        if any(m['material_id'] == material_id for m in current_materials):
-            st.error("❌ Material already added")
+        if not is_valid:
+            st.error(f"❌ {error_msg}")
         elif not validate_quantity(quantity):
             st.error("❌ Invalid quantity")
         elif not validate_percentage(scrap_rate):
