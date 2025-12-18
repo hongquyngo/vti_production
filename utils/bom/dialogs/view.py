@@ -1,7 +1,11 @@
 # utils/bom/dialogs/view.py
 """
-View BOM Details Dialog with Alternatives Display - VERSION 2.1
+View BOM Details Dialog with Alternatives Display - VERSION 2.2
 Read-only display of BOM information with alternatives
+
+Changes in v2.2:
+- Added duplicate materials warning section
+- Shows detailed info about which materials are duplicated
 
 Changes in v2.1:
 - Added Export button in action buttons
@@ -16,7 +20,10 @@ from utils.bom.state import StateManager
 from utils.bom.common import (
     create_status_indicator,
     format_number,
-    render_bom_summary
+    render_bom_summary,
+    # Duplicate detection
+    detect_duplicate_materials_in_bom,
+    render_duplicate_warning_section
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +48,12 @@ def show_view_dialog(bom_id: int):
         _render_action_buttons(bom_id, bom_info, state)
         
         st.markdown("---")
+        
+        # Check for duplicate materials and show warning
+        duplicate_info = detect_duplicate_materials_in_bom(bom_id)
+        if duplicate_info.get('has_duplicates'):
+            render_duplicate_warning_section(duplicate_info)
+            st.markdown("---")
         
         st.markdown("### 📋 BOM Information")
         render_bom_summary(bom_info)

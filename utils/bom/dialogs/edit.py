@@ -42,7 +42,10 @@ from utils.bom.common import (
     # Duplicate validation helpers
     get_all_material_ids_in_bom_db,
     validate_material_not_duplicate,
-    filter_available_materials
+    filter_available_materials,
+    # Duplicate detection for warning
+    detect_duplicate_materials_in_bom,
+    render_duplicate_warning_section
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +80,12 @@ def show_edit_dialog(bom_id: int):
                 state.close_dialog()
                 st.rerun()
             return
+        
+        # Check for duplicate materials and show warning at top
+        duplicate_info = detect_duplicate_materials_in_bom(bom_id)
+        if duplicate_info.get('has_duplicates'):
+            render_duplicate_warning_section(duplicate_info)
+            st.markdown("---")
         
         # Determine edit level based on status AND usage
         edit_level = get_edit_level(bom_info)

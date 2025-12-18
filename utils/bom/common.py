@@ -11,7 +11,7 @@ Changes in v2.0:
 
 import logging
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Union, Optional, Dict, Any, Tuple
+from typing import Union, Optional, Dict, Any, Tuple, List
 from io import BytesIO
 
 import pandas as pd
@@ -1019,3 +1019,226 @@ def filter_available_materials(products: pd.DataFrame,
         }
     
     return product_options
+
+
+# ==================== BOM Duplicate Detection for UI Warning ====================
+
+def detect_duplicate_materials_in_bom(bom_id: int) -> Dict[str, Any]:
+    """
+    Detect duplicate materials in a BOM (same material used as primary or alternative)
+    
+    Args:
+        bom_id: BOM header ID
+        
+    Returns:
+        {
+            'has_duplicates': bool,
+            'duplicate_count': int,
+            'duplicates': [
+                {
+                    'material_id': int,
+                    'material_code': str,
+                    'material_name': str,
+                    'occurrences': [
+                        {'type': 'PRIMARY'|'ALTERNATIVE', 'detail_info': str}
+                    ]
+                }
+            ]
+        }
+    """
+    try:
+        engine = get_db_engine()
+        
+        # Query all materials usage in BOM (both primary and alternatives)
+        query = """
+            SELECT 
+                'PRIMARY' as usage_type,
+                d.material_id,
+                p.pt_code as material_code,
+                p.name as material_name,
+                CONCAT('Primary material in BOM') as detail_info
+            FROM bom_details d
+            JOIN products p ON d.material_id = p.id
+            WHERE d.bom_header_id = %s
+            
+            UNION ALL
+            
+            SELECT 
+                'ALTERNATIVE' as usage_type,
+                a.alternative_material_id as material_id,
+                p.pt_code as material_code,
+                p.name as material_name,
+                CONCAT('Alternative for ', pm.name, ' (P', a.priority, ')') as detail_info
+            FROM bom_material_alternatives a
+            JOIN bom_details d ON a.bom_detail_id = d.id
+            JOIN products p ON a.alternative_material_id = p.id
+            JOIN products pm ON d.material_id = pm.id
+            WHERE d.bom_header_id = %s
+        """
+        
+        df = pd.read_sql(query, engine, params=(bom_id, bom_id))
+        
+        if df.empty:
+            return {
+                'has_duplicates': False,
+                'duplicate_count': 0,
+                'duplicates': []
+            }
+        
+        # Group by material_id and find duplicates
+        material_counts = df.groupby('material_id').size()
+        duplicate_ids = material_counts[material_counts > 1].index.tolist()
+        
+        if not duplicate_ids:
+            return {
+                'has_duplicates': False,
+                'duplicate_count': 0,
+                'duplicates': []
+            }
+        
+        # Build duplicate details
+        duplicates = []
+        for mat_id in duplicate_ids:
+            mat_rows = df[df['material_id'] == mat_id]
+            first_row = mat_rows.iloc[0]
+            
+            occurrences = []
+            for _, row in mat_rows.iterrows():
+                occurrences.append({
+                    'type': row['usage_type'],
+                    'detail_info': row['detail_info']
+                })
+            
+            duplicates.append({
+                'material_id': int(mat_id),
+                'material_code': first_row['material_code'],
+                'material_name': first_row['material_name'],
+                'occurrences': occurrences
+            })
+        
+        return {
+            'has_duplicates': True,
+            'duplicate_count': len(duplicates),
+            'duplicates': duplicates
+        }
+    
+    except Exception as e:
+        logger.error(f"Error detecting duplicate materials: {e}")
+        return {
+            'has_duplicates': False,
+            'duplicate_count': 0,
+            'duplicates': [],
+            'error': str(e)
+        }
+
+
+def get_boms_with_duplicate_check(bom_ids: List[int] = None) -> Dict[int, bool]:
+    """
+    Check multiple BOMs for duplicates efficiently (for dashboard)
+    
+    Args:
+        bom_ids: List of BOM IDs to check, or None for all BOMs
+        
+    Returns:
+        Dict mapping bom_id to has_duplicates boolean
+    """
+    try:
+        engine = get_db_engine()
+        
+        # Query to find all BOMs with duplicate materials
+        query = """
+            WITH all_materials AS (
+                -- Primary materials
+                SELECT 
+                    d.bom_header_id,
+                    d.material_id
+                FROM bom_details d
+                JOIN bom_headers h ON d.bom_header_id = h.id
+                WHERE h.delete_flag = 0
+                
+                UNION ALL
+                
+                -- Alternative materials
+                SELECT 
+                    d.bom_header_id,
+                    a.alternative_material_id as material_id
+                FROM bom_material_alternatives a
+                JOIN bom_details d ON a.bom_detail_id = d.id
+                JOIN bom_headers h ON d.bom_header_id = h.id
+                WHERE h.delete_flag = 0
+            ),
+            duplicates AS (
+                SELECT 
+                    bom_header_id,
+                    material_id,
+                    COUNT(*) as cnt
+                FROM all_materials
+                GROUP BY bom_header_id, material_id
+                HAVING COUNT(*) > 1
+            )
+            SELECT DISTINCT bom_header_id
+            FROM duplicates
+        """
+        
+        df = pd.read_sql(query, engine)
+        
+        boms_with_duplicates = set(df['bom_header_id'].tolist()) if not df.empty else set()
+        
+        # If specific bom_ids provided, filter result
+        if bom_ids:
+            return {bom_id: (bom_id in boms_with_duplicates) for bom_id in bom_ids}
+        
+        return {bom_id: True for bom_id in boms_with_duplicates}
+    
+    except Exception as e:
+        logger.error(f"Error checking BOMs for duplicates: {e}")
+        return {}
+
+
+def render_duplicate_warning_badge(has_duplicates: bool, duplicate_count: int = 0) -> str:
+    """
+    Return HTML/emoji badge for duplicate warning
+    
+    Args:
+        has_duplicates: Whether BOM has duplicates
+        duplicate_count: Number of duplicate materials
+        
+    Returns:
+        Badge string for display
+    """
+    if not has_duplicates:
+        return ""
+    
+    if duplicate_count > 0:
+        return f"⚠️ {duplicate_count} trùng"
+    return "⚠️ Trùng NVL"
+
+
+def render_duplicate_warning_section(duplicate_info: Dict[str, Any]):
+    """
+    Render duplicate warning section in Streamlit UI
+    
+    Args:
+        duplicate_info: Result from detect_duplicate_materials_in_bom()
+    """
+    import streamlit as st
+    
+    if not duplicate_info.get('has_duplicates'):
+        return
+    
+    duplicates = duplicate_info.get('duplicates', [])
+    count = duplicate_info.get('duplicate_count', 0)
+    
+    st.warning(f"⚠️ **Cảnh báo: Phát hiện {count} nguyên vật liệu bị trùng lặp trong BOM**")
+    
+    with st.expander("📋 Chi tiết NVL trùng lặp", expanded=True):
+        for dup in duplicates:
+            st.markdown(f"**{dup['material_code']}** - {dup['material_name']}")
+            
+            for occ in dup['occurrences']:
+                icon = "🔵" if occ['type'] == 'PRIMARY' else "🔀"
+                st.markdown(f"   {icon} {occ['detail_info']}")
+            
+            st.markdown("")
+        
+        st.info("💡 **Khuyến nghị:** Xóa bớt các NVL trùng lặp để đảm bảo tính chính xác của BOM.")

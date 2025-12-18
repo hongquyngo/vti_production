@@ -1,7 +1,11 @@
 # pages/1___BOM.py
 """
-Bill of Materials (BOM) Management - VERSION 2.1
+Bill of Materials (BOM) Management - VERSION 2.2
 Clean single-page UI with dialog-driven workflows
+
+Changes in v2.2:
+- Added duplicate materials warning badge in BOM list
+- Visual indicator for BOMs with duplicate materials
 
 Changes in v2.1:
 - Updated Edit button logic to use usage-based edit levels
@@ -25,7 +29,9 @@ from utils.bom.common import (
     get_products,
     # New imports for edit levels
     EditLevel,
-    get_edit_level
+    get_edit_level,
+    # Duplicate detection
+    get_boms_with_duplicate_check
 )
 
 # Import dialogs
@@ -219,7 +225,7 @@ def render_filters_and_metrics():
 
 
 def render_bom_table():
-    """Render BOM table with actions"""
+    """Render BOM table with actions and duplicate warnings"""
     st.markdown("### 📋 BOM List")
     
     # Get filtered BOMs
@@ -229,8 +235,25 @@ def render_bom_table():
         st.info("ℹ️ No BOMs found. Create your first BOM using the button above.")
         return
     
+    # Check for duplicates in all BOMs (cached for performance)
+    bom_ids = boms['id'].tolist()
+    duplicates_map = get_boms_with_duplicate_check(bom_ids)
+    
+    # Count BOMs with duplicates for summary
+    boms_with_duplicates = sum(1 for v in duplicates_map.values() if v)
+    
+    # Show summary warning if any BOMs have duplicates
+    if boms_with_duplicates > 0:
+        st.warning(f"⚠️ **Cảnh báo:** {boms_with_duplicates} BOM có nguyên vật liệu trùng lặp. Xem chi tiết trong cột 'Cảnh báo'.")
+    
     # Format display data
     display_df = boms.copy()
+    
+    # Add duplicate warning column
+    display_df['has_duplicate'] = display_df['id'].apply(lambda x: duplicates_map.get(x, False))
+    display_df['warning_display'] = display_df['has_duplicate'].apply(
+        lambda x: "⚠️ Trùng NVL" if x else "✅"
+    )
     
     # Format columns for display
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
@@ -263,11 +286,11 @@ def render_bom_table():
         lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else '-'
     )
     
-    # Select columns to display
+    # Select columns to display (added warning_display)
     display_columns = [
         'bom_code', 'bom_name', 'bom_type', 'product_display',
         'output_display', 'status_display', 'materials_display', 
-        'usage_display', 'creator_display', 'created_display'
+        'usage_display', 'warning_display', 'created_display'
     ]
     
     # Column configuration
@@ -280,7 +303,7 @@ def render_bom_table():
         "status_display": st.column_config.TextColumn("Status", width="small"),
         "materials_display": st.column_config.TextColumn("Materials", width="small"),
         "usage_display": st.column_config.TextColumn("Usage", width="small"),
-        "creator_display": st.column_config.TextColumn("Created By", width="small"),
+        "warning_display": st.column_config.TextColumn("Cảnh báo", width="small"),
         "created_display": st.column_config.TextColumn("Date", width="small"),
     }
     
@@ -305,6 +328,10 @@ def render_bom_table():
         
         # Action buttons for selected BOM
         st.markdown(f"### Actions for: **{selected_bom['bom_code']}** - {selected_bom['bom_name']}")
+        
+        # Show duplicate warning if this BOM has duplicates
+        if duplicates_map.get(selected_bom_id, False):
+            st.warning("⚠️ **BOM này có nguyên vật liệu trùng lặp!** Nhấn 'View' để xem chi tiết và sửa trong 'Edit'.")
         
         # Get edit level for this BOM
         bom_info_for_level = {
