@@ -244,7 +244,7 @@ def render_bom_table():
     
     # Show summary warning if any BOMs have duplicates
     if boms_with_duplicates > 0:
-        st.warning(f"⚠️ **Cảnh báo:** {boms_with_duplicates} BOM có nguyên vật liệu trùng lặp. Xem chi tiết trong cột 'Cảnh báo'.")
+        st.warning(f"⚠️ **Warning:** {boms_with_duplicates} BOM(s) have duplicate materials. See 'Warning' column for details.")
     
     # Format display data
     display_df = boms.copy()
@@ -252,7 +252,7 @@ def render_bom_table():
     # Add duplicate warning column
     display_df['has_duplicate'] = display_df['id'].apply(lambda x: duplicates_map.get(x, False))
     display_df['warning_display'] = display_df['has_duplicate'].apply(
-        lambda x: "⚠️ Trùng NVL" if x else "✅"
+        lambda x: "⚠️ Duplicate" if x else "✅"
     )
     
     # Format columns for display
@@ -303,7 +303,7 @@ def render_bom_table():
         "status_display": st.column_config.TextColumn("Status", width="small"),
         "materials_display": st.column_config.TextColumn("Materials", width="small"),
         "usage_display": st.column_config.TextColumn("Usage", width="small"),
-        "warning_display": st.column_config.TextColumn("Cảnh báo", width="small"),
+        "warning_display": st.column_config.TextColumn("Warning", width="small"),
         "created_display": st.column_config.TextColumn("Date", width="small"),
     }
     
@@ -331,7 +331,7 @@ def render_bom_table():
         
         # Show duplicate warning if this BOM has duplicates
         if duplicates_map.get(selected_bom_id, False):
-            st.warning("⚠️ **BOM này có nguyên vật liệu trùng lặp!** Nhấn 'View' để xem chi tiết và sửa trong 'Edit'.")
+            st.warning("⚠️ **This BOM has duplicate materials!** Click 'View' for details or 'Edit' to fix.")
         
         # Get edit level for this BOM
         bom_info_for_level = {

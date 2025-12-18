@@ -1210,8 +1210,8 @@ def render_duplicate_warning_badge(has_duplicates: bool, duplicate_count: int = 
         return ""
     
     if duplicate_count > 0:
-        return f"⚠️ {duplicate_count} trùng"
-    return "⚠️ Trùng NVL"
+        return f"⚠️ {duplicate_count} dup"
+    return "⚠️ Duplicate"
 
 
 def render_duplicate_warning_section(duplicate_info: Dict[str, Any]):
@@ -1229,9 +1229,9 @@ def render_duplicate_warning_section(duplicate_info: Dict[str, Any]):
     duplicates = duplicate_info.get('duplicates', [])
     count = duplicate_info.get('duplicate_count', 0)
     
-    st.warning(f"⚠️ **Cảnh báo: Phát hiện {count} nguyên vật liệu bị trùng lặp trong BOM**")
+    st.warning(f"⚠️ **Warning: Found {count} duplicate material(s) in this BOM**")
     
-    with st.expander("📋 Chi tiết NVL trùng lặp", expanded=True):
+    with st.expander("📋 Duplicate Materials Details", expanded=True):
         for dup in duplicates:
             st.markdown(f"**{dup['material_code']}** - {dup['material_name']}")
             
@@ -1241,4 +1241,4 @@ def render_duplicate_warning_section(duplicate_info: Dict[str, Any]):
             
             st.markdown("")
         
-        st.info("💡 **Khuyến nghị:** Xóa bớt các NVL trùng lặp để đảm bảo tính chính xác của BOM.")
+        st.info("💡 **Recommendation:** Remove duplicate materials to ensure BOM accuracy.")
