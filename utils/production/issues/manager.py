@@ -300,7 +300,8 @@ class IssueManager:
             )
             
             for alt in alternatives:
-                alt_key = f"{material_id}_{alt['alternative_material_id']}"
+                # Use alt['id'] (bom_material_alternatives.id) to match key format from forms.py
+                alt_key = f"{material_id}_{alt['id']}"
                 alt_qty_to_issue = alternative_quantities.get(alt_key, 0)
                 
                 if alt_qty_to_issue <= 0:

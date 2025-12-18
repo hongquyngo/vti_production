@@ -150,7 +150,8 @@ class IssueForms:
                 if alternatives:
                     remaining = pending_qty - default_quantities[material_id]
                     for alt in alternatives:
-                        alt_key = f"{material_id}_{alt['alternative_material_id']}"
+                        # Use alternative_id (unique bom_material_alternatives.id) instead of alternative_material_id
+                        alt_key = f"{material_id}_{alt['alternative_id']}"
                         if 'saved_alt_quantities' in st.session_state:
                             default_alt_quantities[alt_key] = st.session_state['saved_alt_quantities'].get(alt_key, 0)
                         else:
@@ -290,8 +291,9 @@ class IssueForms:
         if alternatives and isinstance(alternatives, list) and len(alternatives) > 0:
             with st.container():
                 for alt in alternatives:
-                    alt_id = alt.get('alternative_material_id')
-                    alt_key = f"{material_id}_{alt_id}"
+                    # Use alternative_id (unique bom_material_alternatives.id) to avoid duplicate keys
+                    alt_unique_id = alt.get('alternative_id')
+                    alt_key = f"{material_id}_{alt_unique_id}"
                     alt_name = alt.get('name', 'Unknown')
                     alt_available = float(alt.get('available', 0))
                     alt_priority = alt.get('priority', 1)
@@ -365,7 +367,8 @@ class IssueForms:
             alts = row.get('alternative_details', [])
             if alts:
                 for alt in alts:
-                    alt_key = f"{row['material_id']}_{alt['alternative_material_id']}"
+                    # Use alternative_id to match the key format used in form
+                    alt_key = f"{row['material_id']}_{alt['alternative_id']}"
                     alt_names[alt_key] = alt.get('name', 'Unknown')
         
         st.markdown("**Materials to issue:**")
