@@ -3,8 +3,9 @@
 Main UI orchestrator for Completions domain
 Renders the Completions tab with dashboard, completion form, and receipts list
 
-Version: 1.2.0
+Version: 1.3.0
 Changes:
+- v1.3.0: Added Scheduled Date column (ngày dự kiến hoàn thành sản xuất)
 - v1.2.0: Improved product display (pt_code | name (package_size))
          Added Order Date column alongside Receipt Date
 - v1.1.0: Added Help section with validation rules and calculation formulas
@@ -529,11 +530,14 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     if st.session_state.completions_selected_idx is not None and st.session_state.completions_selected_idx < len(display_df):
         display_df.loc[st.session_state.completions_selected_idx, 'Select'] = True
     
-    # Format dates: Receipt Date and Order Date
+    # Format dates: Receipt Date, Order Date, and Scheduled Date
     display_df['receipt_date_display'] = display_df['receipt_date'].apply(
         lambda x: format_datetime_vn(x, '%d-%b-%Y')
     )
     display_df['order_date_display'] = display_df['order_date'].apply(
+        lambda x: _format_date_display(x, '%d-%b-%Y')
+    )
+    display_df['scheduled_date_display'] = display_df['scheduled_date'].apply(
         lambda x: _format_date_display(x, '%d-%b-%Y')
     )
     
@@ -553,12 +557,13 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     edited_df = st.data_editor(
         display_df[[
             'Select', 'receipt_no', 'receipt_date_display', 'order_date_display',
-            'order_no', 'product_display', 'qty_display', 'batch_no', 
-            'quality_display', 'yield_display', 'warehouse_name'
+            'scheduled_date_display', 'order_no', 'product_display', 'qty_display', 
+            'batch_no', 'quality_display', 'yield_display', 'warehouse_name'
         ]].rename(columns={
             'receipt_no': 'Receipt No',
             'receipt_date_display': 'Receipt Date',
             'order_date_display': 'Order Date',
+            'scheduled_date_display': 'Scheduled Date',
             'order_no': 'Order No',
             'product_display': 'Product',
             'qty_display': 'Quantity',
@@ -569,8 +574,8 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         }),
         use_container_width=True,
         hide_index=True,
-        disabled=['Receipt No', 'Receipt Date', 'Order Date', 'Order No', 'Product', 
-                  'Quantity', 'Batch', 'Quality', 'Yield', 'Warehouse'],
+        disabled=['Receipt No', 'Receipt Date', 'Order Date', 'Scheduled Date', 'Order No', 
+                  'Product', 'Quantity', 'Batch', 'Quality', 'Yield', 'Warehouse'],
         column_config={
             'Select': st.column_config.CheckboxColumn(
                 '✓',
@@ -707,16 +712,21 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
         export_df['Order Date'] = export_df['order_date'].apply(
             lambda x: _format_date_display(x, '%d/%m/%Y') if pd.notna(x) else ''
         )
+        export_df['Scheduled Date'] = export_df['scheduled_date'].apply(
+            lambda x: _format_date_display(x, '%d/%m/%Y') if pd.notna(x) else ''
+        )
         
         # Select and rename columns
         export_df = export_df[[
-            'receipt_no', 'Receipt Date', 'Order Date', 'order_no', 'Product', 'pt_code',
-            'quantity', 'uom', 'batch_no', 'quality_status', 'yield_rate', 'warehouse_name'
+            'receipt_no', 'Receipt Date', 'Order Date', 'Scheduled Date', 'order_no', 
+            'Product', 'pt_code', 'quantity', 'uom', 'batch_no', 'quality_status', 
+            'yield_rate', 'warehouse_name'
         ]].copy()
         
         export_df.columns = [
-            'Receipt No', 'Receipt Date', 'Order Date', 'Order No', 'Product', 'PT Code',
-            'Quantity', 'UOM', 'Batch', 'Quality Status', 'Yield Rate', 'Warehouse'
+            'Receipt No', 'Receipt Date', 'Order Date', 'Scheduled Date', 'Order No', 
+            'Product', 'PT Code', 'Quantity', 'UOM', 'Batch', 'Quality Status', 
+            'Yield Rate', 'Warehouse'
         ]
         
         excel_data = export_to_excel(export_df)

@@ -3,8 +3,9 @@
 Database queries for Completions domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.2.0
+Version: 1.3.0
 Changes:
+- v1.3.0: Added scheduled_date to receipts query
 - v1.2.0: Added order_date and package_size to receipts query for improved display
 - v1.1.0: Added connection check method
 - Better error handling to distinguish connection errors from no data
@@ -95,6 +96,7 @@ class CompletionQueries:
                 mo.order_no,
                 mo.id as order_id,
                 mo.order_date,
+                mo.scheduled_date,
                 mo.planned_qty,
                 mo.produced_qty,
                 p.id as product_id,
@@ -236,6 +238,7 @@ class CompletionQueries:
                 mo.id as manufacturing_order_id,
                 mo.order_no,
                 mo.order_date,
+                mo.scheduled_date,
                 mo.planned_qty,
                 mo.produced_qty,
                 mo.status as order_status,
