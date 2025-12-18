@@ -3,8 +3,10 @@
 Main UI orchestrator for Completions domain
 Renders the Completions tab with dashboard, completion form, and receipts list
 
-Version: 1.1.0
+Version: 1.2.0
 Changes:
+- v1.2.0: Improved product display (pt_code | name (package_size))
+         Added Order Date column alongside Receipt Date
 - v1.1.0: Added Help section with validation rules and calculation formulas
 """
 
@@ -42,6 +44,47 @@ def _init_session_state():
     
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+
+
+# ==================== Helper Functions ====================
+
+def _format_product_display(row) -> str:
+    """
+    Format product display: pt_code | name (package_size)
+    
+    Examples:
+    - VT001 | Vietape FP5309 Gasket PU Foam Tape (100m/roll)
+    - VT002 | 3M Polyester Film Electrical Tape 74
+    """
+    pt_code = row.get('pt_code', '') or ''
+    name = row.get('product_name', '') or ''
+    package_size = row.get('package_size', '') or ''
+    
+    # Build display string
+    if pt_code:
+        display = f"{pt_code} | {name}"
+    else:
+        display = name
+    
+    # Add package_size if available
+    if package_size:
+        display = f"{display} ({package_size})"
+    
+    return display
+
+
+def _format_date_display(dt, fmt: str = '%d-%b-%Y') -> str:
+    """Format date for display"""
+    if pd.isna(dt) or dt is None:
+        return ''
+    
+    try:
+        if isinstance(dt, str):
+            from datetime import datetime
+            dt = datetime.strptime(dt, '%Y-%m-%d')
+        return dt.strftime(fmt)
+    except:
+        return str(dt)[:10] if dt else ''
 
 
 # ==================== Help Section ====================
@@ -393,7 +436,7 @@ def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
 # ==================== Receipts List ====================
 
 def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
-    """Render production receipts list"""
+    """Render production receipts list with improved product display and dates"""
     page_size = CompletionConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.completions_page
     
@@ -486,9 +529,18 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     if st.session_state.completions_selected_idx is not None and st.session_state.completions_selected_idx < len(display_df):
         display_df.loc[st.session_state.completions_selected_idx, 'Select'] = True
     
+    # Format dates: Receipt Date and Order Date
     display_df['receipt_date_display'] = display_df['receipt_date'].apply(
         lambda x: format_datetime_vn(x, '%d-%b-%Y')
     )
+    display_df['order_date_display'] = display_df['order_date'].apply(
+        lambda x: _format_date_display(x, '%d-%b-%Y')
+    )
+    
+    # Format Product: pt_code | name (package_size)
+    display_df['product_display'] = display_df.apply(_format_product_display, axis=1)
+    
+    # Format other columns
     display_df['quality_display'] = display_df['quality_status'].apply(create_status_indicator)
     display_df['yield_display'] = display_df['yield_rate'].apply(
         lambda x: f"{x:.1f}% {get_yield_indicator(x)}"
@@ -500,13 +552,15 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     # Create editable dataframe with selection
     edited_df = st.data_editor(
         display_df[[
-            'Select', 'receipt_no', 'receipt_date_display', 'order_no', 'product_name',
-            'qty_display', 'batch_no', 'quality_display', 'yield_display', 'warehouse_name'
+            'Select', 'receipt_no', 'receipt_date_display', 'order_date_display',
+            'order_no', 'product_display', 'qty_display', 'batch_no', 
+            'quality_display', 'yield_display', 'warehouse_name'
         ]].rename(columns={
             'receipt_no': 'Receipt No',
-            'receipt_date_display': 'Date',
+            'receipt_date_display': 'Receipt Date',
+            'order_date_display': 'Order Date',
             'order_no': 'Order No',
-            'product_name': 'Product',
+            'product_display': 'Product',
             'qty_display': 'Quantity',
             'batch_no': 'Batch',
             'quality_display': 'Quality',
@@ -515,13 +569,19 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         }),
         use_container_width=True,
         hide_index=True,
-        disabled=['Receipt No', 'Date', 'Order No', 'Product', 'Quantity', 'Batch', 'Quality', 'Yield', 'Warehouse'],
+        disabled=['Receipt No', 'Receipt Date', 'Order Date', 'Order No', 'Product', 
+                  'Quantity', 'Batch', 'Quality', 'Yield', 'Warehouse'],
         column_config={
             'Select': st.column_config.CheckboxColumn(
                 '✓',
                 help='Select row to perform actions',
                 default=False,
                 width='small'
+            ),
+            'Product': st.column_config.TextColumn(
+                'Product',
+                help='pt_code | name (package_size)',
+                width='large'
             )
         },
         key="completions_table_editor"
@@ -547,7 +607,9 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         selected_receipt = receipts.iloc[st.session_state.completions_selected_idx]
         
         st.markdown("---")
-        st.markdown(f"**Selected:** `{selected_receipt['receipt_no']}` | {selected_receipt['order_no']} | {selected_receipt['product_name']}")
+        # Show selected receipt info with improved product display
+        product_info = _format_product_display(selected_receipt)
+        st.markdown(f"**Selected:** `{selected_receipt['receipt_no']}` | {selected_receipt['order_no']} | {product_info}")
         
         col1, col2, col3, col4 = st.columns(4)
         
@@ -614,7 +676,7 @@ def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
 
 
 def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
-    """Export receipts to Excel"""
+    """Export receipts to Excel with improved product display"""
     with st.spinner("Exporting..."):
         receipts = queries.get_receipts(
             from_date=filters['from_date'],
@@ -632,13 +694,28 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
             st.warning("No receipts to export")
             return
         
-        export_df = receipts[[
-            'receipt_no', 'receipt_date', 'order_no', 'product_name', 'pt_code',
+        # Create export dataframe with improved columns
+        export_df = receipts.copy()
+        
+        # Format product display
+        export_df['Product'] = export_df.apply(_format_product_display, axis=1)
+        
+        # Format dates
+        export_df['Receipt Date'] = export_df['receipt_date'].apply(
+            lambda x: format_datetime_vn(x, '%d/%m/%Y %H:%M') if pd.notna(x) else ''
+        )
+        export_df['Order Date'] = export_df['order_date'].apply(
+            lambda x: _format_date_display(x, '%d/%m/%Y') if pd.notna(x) else ''
+        )
+        
+        # Select and rename columns
+        export_df = export_df[[
+            'receipt_no', 'Receipt Date', 'Order Date', 'order_no', 'Product', 'pt_code',
             'quantity', 'uom', 'batch_no', 'quality_status', 'yield_rate', 'warehouse_name'
         ]].copy()
         
         export_df.columns = [
-            'Receipt No', 'Receipt Date', 'Order No', 'Product', 'PT Code',
+            'Receipt No', 'Receipt Date', 'Order Date', 'Order No', 'Product', 'PT Code',
             'Quantity', 'UOM', 'Batch', 'Quality Status', 'Yield Rate', 'Warehouse'
         ]
         

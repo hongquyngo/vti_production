@@ -3,9 +3,10 @@
 Database queries for Completions domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.1.0
+Version: 1.2.0
 Changes:
-- Added connection check method
+- v1.2.0: Added order_date and package_size to receipts query for improved display
+- v1.1.0: Added connection check method
 - Better error handling to distinguish connection errors from no data
 """
 
@@ -93,11 +94,13 @@ class CompletionQueries:
                 pr.created_date,
                 mo.order_no,
                 mo.id as order_id,
+                mo.order_date,
                 mo.planned_qty,
                 mo.produced_qty,
                 p.id as product_id,
                 p.name as product_name,
                 p.pt_code,
+                p.package_size,
                 w.id as warehouse_id,
                 w.name as warehouse_name,
                 CASE 
@@ -216,7 +219,7 @@ class CompletionQueries:
             return 0
     
     def get_receipt_details(self, receipt_id: int) -> Optional[Dict[str, Any]]:
-        """Get detailed information for a single receipt"""
+        """Get full receipt details including order and product info"""
         query = """
             SELECT 
                 pr.id,
@@ -228,10 +231,11 @@ class CompletionQueries:
                 pr.expired_date,
                 pr.quality_status,
                 pr.notes,
+                pr.created_by,
                 pr.created_date,
-                pr.warehouse_id,
                 mo.id as manufacturing_order_id,
                 mo.order_no,
+                mo.order_date,
                 mo.planned_qty,
                 mo.produced_qty,
                 mo.status as order_status,
@@ -239,9 +243,9 @@ class CompletionQueries:
                 p.name as product_name,
                 p.pt_code,
                 p.package_size,
+                w.id as warehouse_id,
                 w.name as warehouse_name,
-                bh.bom_name as bom_name,
-                pr.created_by as created_by_id,
+                bh.bom_name,
                 CONCAT(e.first_name, ' ', e.last_name) as created_by_name
             FROM production_receipts pr
             JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
@@ -255,21 +259,27 @@ class CompletionQueries:
         
         try:
             result = pd.read_sql(query, self.engine, params=(receipt_id,))
-            return result.iloc[0].to_dict() if not result.empty else None
+            if not result.empty:
+                return result.iloc[0].to_dict()
+            return None
         except Exception as e:
             logger.error(f"Error getting receipt details for {receipt_id}: {e}")
             return None
     
     def get_receipt_materials(self, order_id: int) -> pd.DataFrame:
-        """Get materials used for an order (for receipt detail view)"""
+        """Get material usage for an order"""
         query = """
             SELECT 
                 p.name as material_name,
                 p.pt_code,
                 mom.required_qty,
-                mom.issued_qty,
+                COALESCE(mom.issued_qty, 0) as issued_qty,
                 mom.uom,
-                mom.status
+                CASE 
+                    WHEN COALESCE(mom.issued_qty, 0) >= mom.required_qty THEN 'COMPLETED'
+                    WHEN COALESCE(mom.issued_qty, 0) > 0 THEN 'PARTIAL'
+                    ELSE 'PENDING'
+                END as status
             FROM manufacturing_order_materials mom
             JOIN products p ON mom.material_id = p.id
             WHERE mom.manufacturing_order_id = %s
@@ -282,10 +292,10 @@ class CompletionQueries:
             logger.error(f"Error getting receipt materials for order {order_id}: {e}")
             return pd.DataFrame()
     
-    # ==================== Completable Orders Queries ====================
+    # ==================== Order Queries ====================
     
     def get_completable_orders(self) -> pd.DataFrame:
-        """Get orders that can have production completed (IN_PROGRESS status)"""
+        """Get orders that can be completed (IN_PROGRESS status)"""
         query = """
             SELECT 
                 mo.id,
@@ -299,6 +309,7 @@ class CompletionQueries:
                 p.id as product_id,
                 p.name as product_name,
                 p.pt_code,
+                p.package_size,
                 w.id as warehouse_id,
                 w.name as warehouse_name,
                 tw.id as target_warehouse_id,
@@ -378,7 +389,7 @@ class CompletionQueries:
     def get_products(self) -> pd.DataFrame:
         """Get products for filter dropdown"""
         query = """
-            SELECT DISTINCT p.id, p.name, p.pt_code
+            SELECT DISTINCT p.id, p.name, p.pt_code, p.package_size
             FROM products p
             JOIN production_receipts pr ON p.id = pr.product_id
             ORDER BY p.name
