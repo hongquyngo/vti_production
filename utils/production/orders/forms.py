@@ -3,12 +3,13 @@
 Form components for Orders domain
 Create and Edit order forms
 
-Version: 2.0.0
+Version: 2.0.1
 Changes:
 - Added st.form() to prevent unnecessary reruns in Create form (Step 2)
 - Added st.form() to prevent unnecessary reruns in Edit form
 - Added session state to preserve form values across interactions
 - BOM selection remains outside form (needs to reload materials)
+- Fixed: Swapped default Source/Target warehouse (Source=RAW, Target=FG)
 """
 
 import logging
@@ -106,11 +107,12 @@ class OrderForms:
         warehouse_list = list(warehouse_options.keys())
         
         # Set default warehouses if not set
+        # FIXED: Source = RAW (index 1), Target = FG (index 0)
         form_data = st.session_state['create_order_form_data']
         if form_data['source_warehouse'] is None:
-            form_data['source_warehouse'] = warehouse_list[0]
+            form_data['source_warehouse'] = warehouse_list[min(1, len(warehouse_list) - 1)]
         if form_data['target_warehouse'] is None:
-            form_data['target_warehouse'] = warehouse_list[min(1, len(warehouse_list) - 1)]
+            form_data['target_warehouse'] = warehouse_list[0]
         
         # ========== FORM - Prevents reruns when changing inputs ==========
         st.markdown("### 2️⃣ Order Details")
@@ -188,12 +190,13 @@ class OrderForms:
         
         # Handle form submission
         if reset_btn:
+            # FIXED: Source = RAW (index 1), Target = FG (index 0)
             st.session_state['create_order_form_data'] = {
                 'planned_qty': float(bom_info.get('output_qty', 1)),
                 'scheduled_date': get_vietnam_today(),
                 'priority': 'NORMAL',
-                'source_warehouse': warehouse_list[0],
-                'target_warehouse': warehouse_list[min(1, len(warehouse_list) - 1)],
+                'source_warehouse': warehouse_list[min(1, len(warehouse_list) - 1)],
+                'target_warehouse': warehouse_list[0],
                 'notes': ''
             }
             # Clear material check state
