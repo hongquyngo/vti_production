@@ -3,10 +3,12 @@
 Database queries for Orders domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.1.0
+Version: 1.2.0
 Changes:
-- Added connection check method
-- Better error handling to distinguish connection errors from no data
+- v1.2.0: Expanded search to include package_size, legacy_pt_code, bom_name, 
+          bom_code, brand_name, notes, creator_name
+- v1.1.0: Added connection check method
+- v1.0.0: Better error handling to distinguish connection errors from no data
 """
 
 import logging
@@ -103,17 +105,24 @@ class OrderQueries:
                 p.pt_code,
                 p.name as product_name,
                 p.package_size,
+                p.legacy_pt_code,
                 b.bom_type,
                 b.bom_name,
+                b.bom_code,
+                br.name as brand_name,
                 w1.name as warehouse_name,
                 w2.name as target_warehouse_name,
                 o.created_date,
-                o.created_by
+                o.created_by,
+                CONCAT(e.first_name, ' ', e.last_name) as created_by_name
             FROM manufacturing_orders o
             JOIN products p ON o.product_id = p.id
             JOIN bom_headers b ON o.bom_header_id = b.id
+            JOIN brands br ON p.brand_id = br.id
             JOIN warehouses w1 ON o.warehouse_id = w1.id
             JOIN warehouses w2 ON o.target_warehouse_id = w2.id
+            LEFT JOIN users u ON o.created_by = u.id
+            LEFT JOIN employees e ON u.employee_id = e.id
             WHERE o.delete_flag = 0
         """
         
@@ -140,9 +149,22 @@ class OrderQueries:
             params.append(to_date)
         
         if search:
-            query += " AND (o.order_no LIKE %s OR p.name LIKE %s OR p.pt_code LIKE %s)"
+            query += """
+                AND (
+                    o.order_no LIKE %s 
+                    OR p.name LIKE %s 
+                    OR p.pt_code LIKE %s
+                    OR p.package_size LIKE %s
+                    OR p.legacy_pt_code LIKE %s
+                    OR b.bom_name LIKE %s
+                    OR b.bom_code LIKE %s
+                    OR br.name LIKE %s
+                    OR o.notes LIKE %s
+                    OR CONCAT(e.first_name, ' ', e.last_name) LIKE %s
+                )
+            """
             search_pattern = f"%{search}%"
-            params.extend([search_pattern, search_pattern, search_pattern])
+            params.extend([search_pattern] * 10)
         
         query += " ORDER BY o.created_date DESC"
         
@@ -177,6 +199,9 @@ class OrderQueries:
             FROM manufacturing_orders o
             JOIN products p ON o.product_id = p.id
             JOIN bom_headers b ON o.bom_header_id = b.id
+            JOIN brands br ON p.brand_id = br.id
+            LEFT JOIN users u ON o.created_by = u.id
+            LEFT JOIN employees e ON u.employee_id = e.id
             WHERE o.delete_flag = 0
         """
         
@@ -203,9 +228,22 @@ class OrderQueries:
             params.append(to_date)
         
         if search:
-            query += " AND (o.order_no LIKE %s OR p.name LIKE %s OR p.pt_code LIKE %s)"
+            query += """
+                AND (
+                    o.order_no LIKE %s 
+                    OR p.name LIKE %s 
+                    OR p.pt_code LIKE %s
+                    OR p.package_size LIKE %s
+                    OR p.legacy_pt_code LIKE %s
+                    OR b.bom_name LIKE %s
+                    OR b.bom_code LIKE %s
+                    OR br.name LIKE %s
+                    OR o.notes LIKE %s
+                    OR CONCAT(e.first_name, ' ', e.last_name) LIKE %s
+                )
+            """
             search_pattern = f"%{search}%"
-            params.extend([search_pattern, search_pattern, search_pattern])
+            params.extend([search_pattern] * 10)
         
         try:
             result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)

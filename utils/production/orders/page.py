@@ -3,7 +3,9 @@
 Main UI orchestrator for Orders domain
 Renders the Orders tab with dashboard, filters, list, and actions
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- v1.1.0: Enhanced search placeholder with help tooltip showing all searchable fields
 """
 
 import logging
@@ -101,8 +103,9 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
         with col5:
             search = st.text_input(
                 "🔍 Search",
-                placeholder="Order no, product...",
-                key="order_filter_search"
+                placeholder="Order, product, BOM, brand, size, notes, creator...",
+                key="order_filter_search",
+                help="Search by: Order No, Product Name/Code, Package Size, Legacy Code, BOM Name/Code, Brand, Notes, Creator Name"
             )
     
     return {
