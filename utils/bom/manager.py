@@ -1,7 +1,11 @@
 # utils/bom/manager.py
 """
-Bill of Materials (BOM) Management - VERSION 2.1
+Bill of Materials (BOM) Management - VERSION 2.2
 Complete CRUD operations with creator info support
+
+Changes in v2.2:
+- Added get_bom_complete_data() method for Clone dialog and other features
+- Returns header + materials with alternatives in single call
 
 Changes in v2.1:
 - Added creator info (created_by, creator_name) to all queries
@@ -228,6 +232,36 @@ class BOMManager:
         except Exception as e:
             logger.error(f"Error getting BOM info: {e}")
             raise BOMException(f"Failed to get BOM info: {str(e)}")
+    
+    def get_bom_complete_data(self, bom_id: int) -> Dict[str, Any]:
+        """
+        Get complete BOM data including header and materials with alternatives
+        Used by Clone dialog and other features needing full BOM structure
+        
+        Args:
+            bom_id: BOM header ID
+            
+        Returns:
+            Dictionary with 'header' and 'materials' keys
+            
+        Raises:
+            BOMNotFoundError: If BOM not found
+            BOMException: On database error
+        """
+        bom_id = convert_to_native(bom_id)
+        
+        # Get header info
+        header = self.get_bom_info(bom_id)
+        if not header:
+            raise BOMNotFoundError(f"BOM with ID {bom_id} not found")
+        
+        # Get materials with alternatives
+        materials = self._get_clone_materials(bom_id)
+        
+        return {
+            'header': header,
+            'materials': materials
+        }
     
     def get_bom_details(self, bom_id: int) -> pd.DataFrame:
         """Get BOM materials with stock info and alternatives count"""
