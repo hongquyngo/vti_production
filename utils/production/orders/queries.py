@@ -3,8 +3,10 @@
 Database queries for Orders domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.2.0
+Version: 1.3.0
 Changes:
+- v1.3.0: Added get_alternative_materials() and check_material_availability_with_alternatives()
+          for checking alternative materials availability when primary is PARTIAL/INSUFFICIENT
 - v1.2.0: Expanded search to include package_size, legacy_pt_code, bom_name, 
           bom_code, brand_name, notes, creator_name
 - v1.1.0: Added connection check method
@@ -552,6 +554,153 @@ class OrderQueries:
         except Exception as e:
             logger.error(f"Error checking material availability: {e}")
             return pd.DataFrame()
+    
+    def get_alternative_materials(self, bom_id: int, quantity: float,
+                                  warehouse_id: int, 
+                                  bom_detail_ids: List[int]) -> pd.DataFrame:
+        """
+        Get alternative materials for specified BOM details with availability check
+        Uses bom_material_alternatives table structure
+        
+        Args:
+            bom_id: BOM header ID
+            quantity: Planned production quantity
+            warehouse_id: Source warehouse ID
+            bom_detail_ids: List of BOM detail IDs to get alternatives for
+            
+        Returns:
+            DataFrame with alternative materials and their availability
+        """
+        if not bom_detail_ids:
+            return pd.DataFrame()
+        
+        # Build query with proper parameter handling
+        placeholders = ', '.join(['%s'] * len(bom_detail_ids))
+        
+        # Note: bom_material_alternatives has its own quantity, uom, scrap_rate
+        # Formula: (planned_qty / output_qty) * alt.quantity * (1 + alt.scrap_rate/100)
+        query = f"""
+            SELECT 
+                alt.bom_detail_id,
+                alt.alternative_material_id as material_id,
+                alt.priority as alt_priority,
+                alt.quantity as alt_quantity,
+                alt.scrap_rate as alt_scrap_rate,
+                p.name as material_name,
+                p.pt_code,
+                p.package_size,
+                p.legacy_pt_code,
+                br.brand_name,
+                alt.quantity * %s / h.output_qty * (1 + COALESCE(alt.scrap_rate, 0)/100) as required_qty,
+                alt.uom,
+                COALESCE(SUM(ih.remain), 0) as available_qty,
+                CASE 
+                    WHEN COALESCE(SUM(ih.remain), 0) >= 
+                         alt.quantity * %s / h.output_qty * (1 + COALESCE(alt.scrap_rate, 0)/100)
+                    THEN 'SUFFICIENT'
+                    WHEN COALESCE(SUM(ih.remain), 0) > 0
+                    THEN 'PARTIAL'
+                    ELSE 'INSUFFICIENT'
+                END as availability_status,
+                'ALTERNATIVE' as material_type
+            FROM bom_material_alternatives alt
+            JOIN bom_details d ON alt.bom_detail_id = d.id
+            JOIN bom_headers h ON d.bom_header_id = h.id
+            JOIN products p ON alt.alternative_material_id = p.id
+            JOIN brands br ON p.brand_id = br.id
+            LEFT JOIN inventory_histories ih 
+                ON ih.product_id = alt.alternative_material_id 
+                AND ih.warehouse_id = %s
+                AND ih.remain > 0
+                AND ih.delete_flag = 0
+            WHERE h.id = %s
+                AND alt.is_active = 1
+                AND d.id IN ({placeholders})
+            GROUP BY alt.bom_detail_id, alt.alternative_material_id, alt.priority, 
+                     alt.quantity, alt.scrap_rate, alt.uom,
+                     p.name, p.pt_code, p.package_size, 
+                     p.legacy_pt_code, br.brand_name, h.output_qty
+            ORDER BY alt.bom_detail_id, alt.priority
+        """
+        
+        try:
+            params = [quantity, quantity, warehouse_id, bom_id] + list(bom_detail_ids)
+            return pd.read_sql(query, self.engine, params=tuple(params))
+        except Exception as e:
+            logger.error(f"Error getting alternative materials: {e}")
+            return pd.DataFrame()
+    
+    def check_material_availability_with_alternatives(self, bom_id: int, 
+                                                      quantity: float,
+                                                      warehouse_id: int) -> Dict[str, Any]:
+        """
+        Check material availability including alternatives for PARTIAL/INSUFFICIENT items
+        
+        Args:
+            bom_id: BOM header ID
+            quantity: Planned production quantity
+            warehouse_id: Source warehouse ID
+            
+        Returns:
+            Dictionary containing:
+                - primary: DataFrame with primary materials
+                - alternatives: DataFrame with alternative materials (grouped by bom_detail_id)
+                - summary: Dict with counts
+        """
+        # Step 1: Get primary materials
+        primary_df = self.check_material_availability(bom_id, quantity, warehouse_id)
+        
+        if primary_df.empty:
+            return {
+                'primary': primary_df,
+                'alternatives': pd.DataFrame(),
+                'summary': {
+                    'total': 0,
+                    'sufficient': 0,
+                    'partial': 0,
+                    'insufficient': 0,
+                    'has_alternatives': 0,
+                    'has_sufficient_alternatives': 0
+                }
+            }
+        
+        # Step 2: Find materials that need alternatives (PARTIAL or INSUFFICIENT)
+        needs_alternatives = primary_df[
+            primary_df['availability_status'].isin(['PARTIAL', 'INSUFFICIENT'])
+        ]
+        
+        alternatives_df = pd.DataFrame()
+        
+        if not needs_alternatives.empty:
+            bom_detail_ids = needs_alternatives['bom_detail_id'].tolist()
+            alternatives_df = self.get_alternative_materials(
+                bom_id, quantity, warehouse_id, bom_detail_ids
+            )
+        
+        # Step 3: Calculate summary
+        total = len(primary_df)
+        sufficient = len(primary_df[primary_df['availability_status'] == 'SUFFICIENT'])
+        partial = len(primary_df[primary_df['availability_status'] == 'PARTIAL'])
+        insufficient = len(primary_df[primary_df['availability_status'] == 'INSUFFICIENT'])
+        
+        # Count how many items have sufficient alternatives
+        has_sufficient_alt = 0
+        if not alternatives_df.empty:
+            sufficient_alts = alternatives_df[alternatives_df['availability_status'] == 'SUFFICIENT']
+            has_sufficient_alt = sufficient_alts['bom_detail_id'].nunique()
+        
+        return {
+            'primary': primary_df,
+            'alternatives': alternatives_df,
+            'summary': {
+                'total': total,
+                'sufficient': sufficient,
+                'partial': partial,
+                'insufficient': insufficient,
+                'has_alternatives': len(alternatives_df['bom_detail_id'].unique()) if not alternatives_df.empty else 0,
+                'has_sufficient_alternatives': has_sufficient_alt
+            }
+        }
     
     # ==================== Dashboard Metrics ====================
     

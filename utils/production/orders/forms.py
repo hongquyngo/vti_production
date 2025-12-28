@@ -3,9 +3,11 @@
 Form components for Orders domain
 Create and Edit order forms
 
-Version: 2.0.1
+Version: 2.1.0
 Changes:
-- Added st.form() to prevent unnecessary reruns in Create form (Step 2)
+- v2.1.0: Added alternative materials display in Material Availability Check (Step 3)
+          Shows alternatives for PARTIAL/INSUFFICIENT primary materials
+- v2.0.1: Added st.form() to prevent unnecessary reruns in Create form (Step 2)
 - Added st.form() to prevent unnecessary reruns in Edit form
 - Added session state to preserve form values across interactions
 - BOM selection remains outside form (needs to reload materials)
@@ -117,6 +119,8 @@ class OrderForms:
             # Clear material check state when BOM changes
             st.session_state.pop('create_order_materials_checked', None)
             st.session_state.pop('create_order_availability', None)
+            st.session_state.pop('create_order_alternatives', None)
+            st.session_state.pop('create_order_availability_summary', None)
             st.session_state.pop('create_order_warehouse_ids', None)
         
         # Get warehouses
@@ -224,6 +228,8 @@ class OrderForms:
             # Clear material check state
             st.session_state.pop('create_order_materials_checked', None)
             st.session_state.pop('create_order_availability', None)
+            st.session_state.pop('create_order_alternatives', None)
+            st.session_state.pop('create_order_availability_summary', None)
             st.session_state.pop('create_order_warehouse_ids', None)
             st.rerun()
         
@@ -241,15 +247,17 @@ class OrderForms:
             source_warehouse_id = warehouse_options[source_warehouse]
             target_warehouse_id = warehouse_options[target_warehouse]
             
-            # Check material availability and store in session state
+            # Check material availability WITH ALTERNATIVES
             with st.spinner("Checking material availability..."):
-                availability = self.queries.check_material_availability(
+                result = self.queries.check_material_availability_with_alternatives(
                     selected_bom_id, planned_qty, source_warehouse_id
                 )
             
-            # Store availability result in session state
+            # Store results in session state
             st.session_state['create_order_materials_checked'] = True
-            st.session_state['create_order_availability'] = availability
+            st.session_state['create_order_availability'] = result['primary']
+            st.session_state['create_order_alternatives'] = result['alternatives']
+            st.session_state['create_order_availability_summary'] = result['summary']
             st.session_state['create_order_warehouse_ids'] = {
                 'source': source_warehouse_id,
                 'target': target_warehouse_id
@@ -259,17 +267,20 @@ class OrderForms:
         # Step 3: Show Material Check Results (based on session state, not button click)
         if st.session_state.get('create_order_materials_checked'):
             availability = st.session_state.get('create_order_availability', pd.DataFrame())
+            alternatives = st.session_state.get('create_order_alternatives', pd.DataFrame())
+            summary = st.session_state.get('create_order_availability_summary', {})
             warehouse_ids = st.session_state.get('create_order_warehouse_ids', {})
             
             st.markdown("---")
             st.markdown("### 3️⃣ Material Availability Check")
             
             if not availability.empty:
-                # Summary metrics
-                total = len(availability)
-                sufficient = len(availability[availability['availability_status'] == 'SUFFICIENT'])
-                partial = len(availability[availability['availability_status'] == 'PARTIAL'])
-                insufficient = len(availability[availability['availability_status'] == 'INSUFFICIENT'])
+                # Summary metrics - Enhanced with alternatives info
+                total = summary.get('total', len(availability))
+                sufficient = summary.get('sufficient', 0)
+                partial = summary.get('partial', 0)
+                insufficient = summary.get('insufficient', 0)
+                has_sufficient_alt = summary.get('has_sufficient_alternatives', 0)
                 
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -277,20 +288,29 @@ class OrderForms:
                 with col2:
                     st.metric("✅ Sufficient", sufficient)
                 with col3:
-                    st.metric("⚠️ Partial", partial)
+                    # Show partial/insufficient with alternatives info
+                    needs_attention = partial + insufficient
+                    if needs_attention > 0 and has_sufficient_alt > 0:
+                        st.metric("⚠️ Partial", partial, 
+                                 delta=f"{has_sufficient_alt} có alt ✓", 
+                                 delta_color="off")
+                    else:
+                        st.metric("⚠️ Partial", partial)
                 with col4:
                     st.metric("❌ Insufficient", insufficient)
                 
-                # Material details
-                with st.expander("📋 View Material Details", expanded=insufficient > 0):
+                # ==================== PRIMARY MATERIALS ====================
+                with st.expander("📋 View Material Details (Primary)", expanded=insufficient > 0 or partial > 0):
                     display_df = availability.copy()
                     display_df['material_info'] = display_df.apply(format_material_display, axis=1)
                     display_df['required'] = display_df['required_qty'].apply(lambda x: format_number(x, 4))
                     display_df['available'] = display_df['available_qty'].apply(lambda x: format_number(x, 4))
                     display_df['status'] = display_df['availability_status'].apply(create_status_indicator)
+                    display_df['type'] = '🔵 Primary'
                     
                     st.dataframe(
-                        display_df[['material_info', 'required', 'available', 'status', 'uom']].rename(columns={
+                        display_df[['type', 'material_info', 'required', 'available', 'status', 'uom']].rename(columns={
+                            'type': 'Type',
                             'material_info': 'Material',
                             'required': 'Required',
                             'available': 'Available',
@@ -301,12 +321,78 @@ class OrderForms:
                         hide_index=True
                     )
                 
-                # Warning if insufficient materials
+                # ==================== ALTERNATIVE MATERIALS ====================
+                if not alternatives.empty:
+                    with st.expander("🔄 Alternative Materials", expanded=True):
+                        num_alts = len(alternatives)
+                        num_primary_with_alts = alternatives['bom_detail_id'].nunique()
+                        st.info(f"💡 **{num_alts}** alternative material(s) found for **{num_primary_with_alts}** item(s) with insufficient/partial stock")
+                        
+                        # Group alternatives by primary material
+                        for bom_detail_id in alternatives['bom_detail_id'].unique():
+                            # Get primary material info
+                            primary_row = availability[availability['bom_detail_id'] == bom_detail_id]
+                            if not primary_row.empty:
+                                primary_info = primary_row.iloc[0]
+                                primary_name = format_material_display(primary_info)
+                                primary_status = primary_info['availability_status']
+                                
+                                st.markdown(f"**Primary:** {primary_name} — {create_status_indicator(primary_status)}")
+                                
+                                # Get alternatives for this primary
+                                alt_rows = alternatives[alternatives['bom_detail_id'] == bom_detail_id].copy()
+                                
+                                if not alt_rows.empty:
+                                    alt_rows['material_info'] = alt_rows.apply(format_material_display, axis=1)
+                                    alt_rows['required'] = alt_rows['required_qty'].apply(lambda x: format_number(x, 4))
+                                    alt_rows['available'] = alt_rows['available_qty'].apply(lambda x: format_number(x, 4))
+                                    alt_rows['status'] = alt_rows['availability_status'].apply(create_status_indicator)
+                                    alt_rows['priority_display'] = alt_rows['alt_priority'].apply(lambda x: f"Alt #{x}")
+                                    # Show scrap rate instead of conversion rate
+                                    alt_rows['scrap'] = alt_rows['alt_scrap_rate'].apply(
+                                        lambda x: f"+{x:.1f}%" if x and x > 0 else "0%"
+                                    )
+                                    
+                                    st.dataframe(
+                                        alt_rows[['priority_display', 'material_info', 'required', 'available', 'status', 'scrap', 'uom']].rename(columns={
+                                            'priority_display': 'Priority',
+                                            'material_info': 'Alternative Material',
+                                            'required': 'Required',
+                                            'available': 'Available',
+                                            'status': 'Status',
+                                            'scrap': 'Scrap%',
+                                            'uom': 'UOM'
+                                        }),
+                                        use_container_width=True,
+                                        hide_index=True
+                                    )
+                                
+                                st.markdown("---")
+                
+                # Warning messages with alternatives context
                 if insufficient > 0:
-                    st.warning(
-                        f"⚠️ **{insufficient} material(s) have insufficient stock.** "
-                        "You can still create the order, but materials need to be procured before production."
-                    )
+                    if has_sufficient_alt > 0:
+                        st.warning(
+                            f"⚠️ **{insufficient} material(s)** have insufficient stock, "
+                            f"but **{has_sufficient_alt}** have sufficient alternatives available. "
+                            "You can proceed with alternatives or wait for procurement."
+                        )
+                    else:
+                        st.warning(
+                            f"⚠️ **{insufficient} material(s)** have insufficient stock. "
+                            "You can still create the order, but materials need to be procured before production."
+                        )
+                elif partial > 0:
+                    if has_sufficient_alt > 0:
+                        st.info(
+                            f"ℹ️ **{partial} material(s)** have partial stock. "
+                            f"**{has_sufficient_alt}** have sufficient alternatives available."
+                        )
+                    else:
+                        st.info(
+                            f"ℹ️ **{partial} material(s)** have partial stock. "
+                            "Consider checking alternative materials or procurement."
+                        )
             
             st.markdown("---")
             
@@ -334,6 +420,8 @@ class OrderForms:
                     st.session_state.pop('create_order_bom_id', None)
                     st.session_state.pop('create_order_materials_checked', None)
                     st.session_state.pop('create_order_availability', None)
+                    st.session_state.pop('create_order_alternatives', None)
+                    st.session_state.pop('create_order_availability_summary', None)
                     st.session_state.pop('create_order_warehouse_ids', None)
                     st.rerun()
     
@@ -371,6 +459,8 @@ class OrderForms:
             st.session_state.pop('create_order_bom_id', None)
             st.session_state.pop('create_order_materials_checked', None)
             st.session_state.pop('create_order_availability', None)
+            st.session_state.pop('create_order_alternatives', None)
+            st.session_state.pop('create_order_availability_summary', None)
             st.session_state.pop('create_order_warehouse_ids', None)
             
             # Set success state and go back to list
