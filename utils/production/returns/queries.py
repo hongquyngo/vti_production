@@ -81,7 +81,7 @@ class ReturnQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                b.name as brand_name,
+                b.brand_name,
                 w.name as warehouse_name,
                 CONCAT(e_returned.first_name, ' ', e_returned.last_name) as returned_by_name,
                 CONCAT(e_received.first_name, ' ', e_received.last_name) as received_by_name,
@@ -199,7 +199,7 @@ class ReturnQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                b.name as brand_name,
+                b.brand_name,
                 w.name as warehouse_name,
                 mi.issue_no,
                 mr.returned_by as returned_by_id,
@@ -238,7 +238,7 @@ class ReturnQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                b.name as brand_name,
+                b.brand_name,
                 mrd.batch_no,
                 mrd.quantity,
                 mrd.uom,
@@ -276,7 +276,7 @@ class ReturnQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                b.name as brand_name,
+                b.brand_name,
                 w.name as warehouse_name,
                 (SELECT COUNT(*) FROM material_issues mi 
                  WHERE mi.manufacturing_order_id = mo.id AND mi.status = 'CONFIRMED') as issue_count
@@ -312,7 +312,7 @@ class ReturnQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                b.name as brand_name,
+                b.brand_name,
                 mid.batch_no,
                 mid.quantity as issued_qty,
                 COALESCE(SUM(mrd.quantity), 0) as returned_qty,
@@ -336,7 +336,7 @@ class ReturnQueries:
             WHERE mi.manufacturing_order_id = %s
                 AND mi.status = 'CONFIRMED'
             GROUP BY mid.id, mid.material_id, p.name, p.pt_code, p.legacy_pt_code,
-                     p.package_size, b.name, mid.batch_no, 
+                     p.package_size, b.brand_name, mid.batch_no, 
                      mid.quantity, mid.uom, mid.expired_date,
                      mid.is_alternative, mid.original_material_id, p2.name,
                      mi.issue_date, mi.issue_no
