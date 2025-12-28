@@ -401,7 +401,7 @@ class IssueQueries:
                 AND ih.delete_flag = 0
             WHERE mom.manufacturing_order_id = %s
             GROUP BY mom.id, mom.material_id, p.name, p.pt_code, p.legacy_pt_code, 
-                     p.package_size, br.name, mom.required_qty, mom.issued_qty, 
+                     p.package_size, br.brand_name, mom.required_qty, mom.issued_qty, 
                      mom.uom, mom.status, mo.warehouse_id, bd.id
             ORDER BY p.name
         """
@@ -486,7 +486,7 @@ class IssueQueries:
             WHERE alt.bom_detail_id = %s
                 AND alt.is_active = 1
             GROUP BY alt.id, alt.alternative_material_id, p.name, p.pt_code,
-                     p.legacy_pt_code, p.package_size, br.name, alt.quantity, 
+                     p.legacy_pt_code, p.package_size, br.brand_name, alt.quantity, 
                      alt.uom, alt.priority
             ORDER BY alt.priority ASC
         """
