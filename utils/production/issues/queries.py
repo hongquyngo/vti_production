@@ -88,7 +88,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                b.name as brand_name,
+                br.brand_name as brand_name,
                 w.name as warehouse_name,
                 CONCAT(e_issued.first_name, ' ', e_issued.last_name) as issued_by_name,
                 CONCAT(e_received.first_name, ' ', e_received.last_name) as received_by_name,
@@ -96,7 +96,7 @@ class IssueQueries:
             FROM material_issues mi
             JOIN manufacturing_orders mo ON mi.manufacturing_order_id = mo.id
             JOIN products p ON mo.product_id = p.id
-            LEFT JOIN brands b ON p.brand_id = b.id
+            LEFT JOIN brands br ON p.brand_id = br.id
             JOIN warehouses w ON mi.warehouse_id = w.id
             LEFT JOIN employees e_issued ON mi.issued_by = e_issued.id
             LEFT JOIN employees e_received ON mi.received_by = e_received.id
@@ -211,7 +211,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                br.name as brand_name,
+                br.brand_name as brand_name,
                 mo.planned_qty,
                 mo.uom as product_uom,
                 w.name as warehouse_name,
@@ -250,7 +250,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                br.name as brand_name,
+                br.brand_name as brand_name,
                 mid.batch_no,
                 mid.quantity,
                 mid.uom,
@@ -292,7 +292,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                br.name as brand_name,
+                br.brand_name as brand_name,
                 b.bom_name,
                 b.bom_type,
                 w.name as warehouse_name,
@@ -340,7 +340,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                br.name as brand_name,
+                br.brand_name as brand_name,
                 b.bom_name,
                 b.bom_type,
                 w.name as warehouse_name
@@ -379,7 +379,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                br.name as brand_name,
+                br.brand_name as brand_name,
                 mom.required_qty,
                 COALESCE(mom.issued_qty, 0) as issued_qty,
                 mom.required_qty - COALESCE(mom.issued_qty, 0) as pending_qty,
@@ -470,7 +470,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
-                br.name as brand_name,
+                br.brand_name as brand_name,
                 alt.quantity,
                 alt.uom,
                 alt.priority,
