@@ -139,21 +139,25 @@ class IssueForms:
                 pending_qty = float(row['pending_qty'])
                 available_qty = float(row['available_qty'])
                 
+                # Ensure non-negative: pending_qty can be negative if over-issued
+                safe_pending = max(0.0, pending_qty)
+                
                 # Use saved values if available, otherwise auto-suggest
                 if 'saved_quantities' in st.session_state:
-                    default_quantities[material_id] = st.session_state['saved_quantities'].get(material_id, 0)
+                    default_quantities[material_id] = max(0.0, st.session_state['saved_quantities'].get(material_id, 0))
                 else:
-                    default_quantities[material_id] = min(pending_qty, available_qty)
+                    default_quantities[material_id] = min(safe_pending, available_qty)
                 
                 # Alternatives
                 alternatives = row.get('alternative_details', [])
                 if alternatives:
-                    remaining = pending_qty - default_quantities[material_id]
+                    # Use safe_pending for remaining calculation
+                    remaining = safe_pending - default_quantities[material_id]
                     for alt in alternatives:
                         # Use alternative_id (unique bom_material_alternatives.id) instead of alternative_material_id
                         alt_key = f"{material_id}_{alt['alternative_id']}"
                         if 'saved_alt_quantities' in st.session_state:
-                            default_alt_quantities[alt_key] = st.session_state['saved_alt_quantities'].get(alt_key, 0)
+                            default_alt_quantities[alt_key] = max(0.0, st.session_state['saved_alt_quantities'].get(alt_key, 0))
                         else:
                             if remaining > 0:
                                 alt_available = float(alt['available'])
@@ -253,9 +257,17 @@ class IssueForms:
         warnings = []
         alt_qtys = {}
         
+        # Handle negative pending (over-issued) - show warning
+        safe_pending = max(0.0, pending_qty)
+        over_issued = pending_qty < 0
+        
         # Material header with status
         status_emoji = "✅" if status == 'SUFFICIENT' else "⚠️" if status == 'PARTIAL' else "❌"
-        st.markdown(f"**{status_emoji} {material_name}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
+        if over_issued:
+            st.markdown(f"**⚠️ {material_name}** — Over-issued by: {format_number(abs(pending_qty), 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
+            st.caption("ℹ️ This material has been over-issued. No additional issue needed.")
+        else:
+            st.markdown(f"**{status_emoji} {material_name}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
         
         col1, col2, col3 = st.columns([3, 2, 1])
         
@@ -264,7 +276,8 @@ class IssueForms:
         
         with col2:
             max_primary = max(0.0, available_qty)
-            default_primary = min(float(default_quantities.get(material_id, 0)), max_primary)
+            # Ensure default is non-negative and within bounds
+            default_primary = max(0.0, min(float(default_quantities.get(material_id, 0)), max_primary))
             
             primary_qty = st.number_input(
                 f"Qty {material_id}",
@@ -307,7 +320,8 @@ class IssueForms:
                     
                     with acol2:
                         max_alt = max(0.0, alt_available)
-                        default_alt = min(float(default_alt_quantities.get(alt_key, 0)), max_alt)
+                        # Ensure default is non-negative and within bounds
+                        default_alt = max(0.0, min(float(default_alt_quantities.get(alt_key, 0)), max_alt))
                         
                         alt_qty = st.number_input(
                             f"Alt {alt_key}",
@@ -334,15 +348,15 @@ class IssueForms:
         # Calculate total and add warnings
         total_qty = primary_qty + sum(alt_qtys.values())
         
-        # Summary for this material
+        # Summary for this material (use safe_pending for comparison)
         if total_qty > 0:
-            if total_qty >= pending_qty:
+            if total_qty >= safe_pending:
                 st.caption(f"  📊 Total: {format_number(total_qty, 4)} {uom} ✅")
             else:
                 st.caption(f"  📊 Total: {format_number(total_qty, 4)} {uom} ⚠️ (< required)")
-                warnings.append(f"{material_name}: Total {format_number(total_qty, 4)} < required {format_number(pending_qty, 4)}")
+                warnings.append(f"{material_name}: Total {format_number(total_qty, 4)} < required {format_number(safe_pending, 4)}")
         else:
-            if pending_qty > 0:
+            if safe_pending > 0:
                 warnings.append(f"{material_name}: No quantity entered")
         
         st.markdown("---")
