@@ -1,11 +1,15 @@
 # utils/bom/dialogs/edit.py
 """
-Edit BOM Dialog with Usage-based Edit Levels - VERSION 2.0
+Edit BOM Dialog with Usage-based Edit Levels - VERSION 2.1
 
 Edit permission based on ACTUAL IMPACT, not just STATUS:
 - Level 4 (FULL_EDIT): DRAFT always, or ACTIVE/INACTIVE with no usage
 - Level 2 (ALTERNATIVES_PLUS): ACTIVE with IN_PROGRESS orders
 - Level 0 (READ_ONLY): Has completed orders or inactive with history
+
+Changes in v2.1:
+- Updated all product/material displays to use format_product_display with legacy_code
+- Unified display format: code (legacy | N/A) | name | pkg (brand)
 
 Changes in v2.0:
 - Replaced status-based logic with usage-based edit levels
@@ -182,7 +186,15 @@ def _render_info_tab_editable(bom_id: int, bom_info: dict, state: StateManager, 
         with col2:
             st.text_input("BOM Code", value=bom_info['bom_code'], disabled=True)
             st.text_input("BOM Type", value=bom_info['bom_type'], disabled=True)
-            st.text_input("Product", value=f"{bom_info['product_code']} - {bom_info['product_name']}", disabled=True)
+            # Format product display with full info
+            product_display = format_product_display(
+                code=bom_info.get('product_code', ''),
+                name=bom_info.get('product_name', ''),
+                package_size=bom_info.get('package_size'),
+                brand=bom_info.get('brand'),
+                legacy_code=bom_info.get('legacy_code')
+            )
+            st.text_input("Product", value=product_display, disabled=True)
         
         new_notes = st.text_area(
             "Notes",
@@ -284,7 +296,14 @@ def _render_material_card_full_edit(bom_id: int, material: pd.Series, state: Sta
         
         with col1:
             alt_badge = f" 🔀 **{alt_count}**" if alt_count > 0 else ""
-            st.markdown(f"**{material['material_name']}** ({material['material_code']}){alt_badge}")
+            mat_display = format_product_display(
+                code=material.get('material_code', ''),
+                name=material.get('material_name', ''),
+                package_size=material.get('package_size'),
+                brand=material.get('brand'),
+                legacy_code=material.get('legacy_code')
+            )
+            st.markdown(f"**{mat_display}**{alt_badge}")
         
         with col2:
             st.text(material['material_type'])
@@ -327,7 +346,14 @@ def _render_alternatives_manager(bom_id: int, detail_id: int, material: pd.Serie
                 
                 with col1:
                     status_icon = "✅" if alt['is_active'] else "⭕"
-                    st.text(f"{status_icon} P{alt['priority']}: {alt['material_name']}")
+                    alt_display = format_product_display(
+                        code=alt.get('material_code', ''),
+                        name=alt.get('material_name', ''),
+                        package_size=alt.get('package_size'),
+                        brand=alt.get('brand'),
+                        legacy_code=alt.get('legacy_code')
+                    )
+                    st.text(f"{status_icon} P{alt['priority']}: {alt_display}")
                 
                 with col2:
                     st.text(f"{format_number(alt['quantity'], 4)}")
@@ -554,7 +580,14 @@ def _render_material_card_alternatives_only(bom_id: int, material: pd.Series, ma
         
         with col1:
             alt_badge = f" 🔀 **{alt_count}**" if alt_count > 0 else ""
-            st.markdown(f"**{material['material_name']}** ({material['material_code']}){alt_badge}")
+            mat_display = format_product_display(
+                code=material.get('material_code', ''),
+                name=material.get('material_name', ''),
+                package_size=material.get('package_size'),
+                brand=material.get('brand'),
+                legacy_code=material.get('legacy_code')
+            )
+            st.markdown(f"**{mat_display}**{alt_badge}")
         
         with col2:
             st.text(material['material_type'])
@@ -589,7 +622,13 @@ def _render_info_readonly(bom_info: dict):
         st.text_input("BOM Type", value=bom_info['bom_type'], disabled=True)
     
     with col2:
-        product_display = f"{bom_info['product_code']} - {bom_info['product_name']}"
+        product_display = format_product_display(
+            code=bom_info.get('product_code', ''),
+            name=bom_info.get('product_name', ''),
+            package_size=bom_info.get('package_size'),
+            brand=bom_info.get('brand'),
+            legacy_code=bom_info.get('legacy_code')
+        )
         st.text_input("Output Product", value=product_display, disabled=True)
         st.text_input("Output Quantity", value=f"{format_number(bom_info['output_qty'], 2)} {bom_info['uom']}", disabled=True)
         st.text_input("Effective Date", value=str(bom_info.get('effective_date', 'N/A')), disabled=True)
@@ -660,7 +699,14 @@ def _render_material_card_readonly(material: pd.Series, manager: BOMManager):
         
         with col1:
             alt_badge = f" 🔀 {alt_count}" if alt_count > 0 else ""
-            st.markdown(f"**{material['material_name']}** ({material['material_code']}){alt_badge}")
+            mat_display = format_product_display(
+                code=material.get('material_code', ''),
+                name=material.get('material_name', ''),
+                package_size=material.get('package_size'),
+                brand=material.get('brand'),
+                legacy_code=material.get('legacy_code')
+            )
+            st.markdown(f"**{mat_display}**{alt_badge}")
         
         with col2:
             st.text(material['material_type'])
@@ -696,7 +742,14 @@ def _render_alternatives_readonly(detail_id: int, manager: BOMManager):
             
             with col1:
                 status_icon = "✅" if alt['is_active'] else "⭕"
-                st.text(f"{status_icon} P{alt['priority']}: {alt['material_name']}")
+                alt_display = format_product_display(
+                    code=alt.get('material_code', ''),
+                    name=alt.get('material_name', ''),
+                    package_size=alt.get('package_size'),
+                    brand=alt.get('brand'),
+                    legacy_code=alt.get('legacy_code')
+                )
+                st.text(f"{status_icon} P{alt['priority']}: {alt_display}")
             
             with col2:
                 st.text(f"{format_number(alt['quantity'], 4)}")

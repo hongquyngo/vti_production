@@ -1,7 +1,10 @@
 # utils/bom/dialogs/delete.py
 """
-Delete BOM Confirmation Dialog with Alternatives Info
+Delete BOM Confirmation Dialog with Alternatives Info - VERSION 2.1
 Shows complete deletion impact including alternatives
+
+Changes in v2.1:
+- Updated material display to unified format with legacy_code
 """
 
 import logging
@@ -9,7 +12,7 @@ import streamlit as st
 
 from utils.bom.manager import BOMManager, BOMException, BOMValidationError, BOMNotFoundError
 from utils.bom.state import StateManager
-from utils.bom.common import render_confirmation_checkbox
+from utils.bom.common import render_confirmation_checkbox, format_product_display
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +119,10 @@ def _get_deletion_impact(bom_id: int, bom_info: dict, manager: BOMManager) -> di
             'materials': [
                 {
                     'name': str,
+                    'code': str,
+                    'legacy_code': str,
+                    'package_size': str,
+                    'brand': str,
                     'alternatives_count': int
                 }
             ]
@@ -128,14 +135,17 @@ def _get_deletion_impact(bom_id: int, bom_info: dict, manager: BOMManager) -> di
         total_alternatives = int(bom_details['alternatives_count'].sum()) if not bom_details.empty else 0
         materials_with_alts = int((bom_details['alternatives_count'] > 0).sum()) if not bom_details.empty else 0
         
-        # Get material details
+        # Get material details with full product info
         materials_info = []
         if not bom_details.empty:
             for _, mat in bom_details.iterrows():
                 alt_count = int(mat.get('alternatives_count', 0))
                 materials_info.append({
-                    'name': mat['material_name'],
-                    'code': mat['material_code'],
+                    'name': mat.get('material_name', ''),
+                    'code': mat.get('material_code', ''),
+                    'legacy_code': mat.get('legacy_code'),
+                    'package_size': mat.get('package_size'),
+                    'brand': mat.get('brand'),
                     'alternatives_count': alt_count
                 })
         
@@ -197,8 +207,15 @@ def _render_deletion_impact(impact: dict):
         with st.expander("📋 View materials with alternatives", expanded=False):
             for mat in impact['materials']:
                 if mat['alternatives_count'] > 0:
+                    mat_display = format_product_display(
+                        code=mat.get('code', ''),
+                        name=mat.get('name', ''),
+                        package_size=mat.get('package_size'),
+                        brand=mat.get('brand'),
+                        legacy_code=mat.get('legacy_code')
+                    )
                     st.markdown(
-                        f"- **{mat['name']}** ({mat['code']}) "
+                        f"- **{mat_display}** "
                         f"→ 🔀 **{mat['alternatives_count']} alternative(s)**"
                     )
     else:

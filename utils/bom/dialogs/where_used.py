@@ -1,7 +1,11 @@
 # utils/bom/dialogs/where_used.py
 """
-Where Used Analysis Dialog with Alternatives Support
+Where Used Analysis Dialog with Alternatives Support - VERSION 2.1
 Find which BOMs use a specific product/material (primary or alternative)
+
+Changes in v2.1:
+- Updated output product display to unified format with legacy_code
+- Added format_product_display for consistent product display
 """
 
 import logging
@@ -14,6 +18,7 @@ from utils.bom.common import (
     render_material_selector,
     create_status_indicator,
     format_number,
+    format_product_display,
     export_to_excel,
     create_download_button
 )
@@ -121,6 +126,18 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
     display_df['quantity'] = display_df['quantity'].apply(lambda x: format_number(x, 4))
     display_df['scrap_rate'] = display_df['scrap_rate'].apply(lambda x: f"{format_number(x, 2)}%")
     
+    # Format output product with unified format
+    display_df['output_product_display'] = display_df.apply(
+        lambda row: format_product_display(
+            code=row.get('output_product_code', ''),
+            name=row.get('output_product_name', ''),
+            package_size=row.get('output_package_size'),
+            brand=row.get('output_brand'),
+            legacy_code=row.get('output_legacy_code')
+        ),
+        axis=1
+    )
+    
     # Add usage type badge
     def format_usage_type(row):
         if row['usage_type'] == 'PRIMARY':
@@ -136,7 +153,7 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
         "bom_type": st.column_config.TextColumn("Type", width="small"),
         "bom_status": st.column_config.TextColumn("Status", width="small"),
         "usage_badge": st.column_config.TextColumn("Usage", width="small"),
-        "output_product_name": st.column_config.TextColumn("Output Product", width="medium"),
+        "output_product_display": st.column_config.TextColumn("Output Product", width="large"),
         "quantity": st.column_config.TextColumn("Qty", width="small"),
         "uom": st.column_config.TextColumn("UOM", width="small"),
         "scrap_rate": st.column_config.TextColumn("Scrap %", width="small"),
@@ -145,7 +162,7 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
     event = st.dataframe(
         display_df[[
             'bom_code', 'bom_name', 'bom_type', 'bom_status', 'usage_badge',
-            'output_product_name', 'quantity', 'uom', 'scrap_rate'
+            'output_product_display', 'quantity', 'uom', 'scrap_rate'
         ]],
         use_container_width=True,
         hide_index=True,
@@ -195,9 +212,22 @@ def _render_results(results: pd.DataFrame, state: StateManager, manager: BOMMana
 def _export_results(results: pd.DataFrame, state: StateManager):
     """Export results to Excel"""
     try:
-        export_df = results[[
+        # Create output product display column
+        results_copy = results.copy()
+        results_copy['output_product_display'] = results_copy.apply(
+            lambda row: format_product_display(
+                code=row.get('output_product_code', ''),
+                name=row.get('output_product_name', ''),
+                package_size=row.get('output_package_size'),
+                brand=row.get('output_brand'),
+                legacy_code=row.get('output_legacy_code')
+            ),
+            axis=1
+        )
+        
+        export_df = results_copy[[
             'bom_code', 'bom_name', 'bom_type', 'bom_status',
-            'usage_type', 'output_product_name', 'material_type',
+            'usage_type', 'output_product_display', 'material_type',
             'quantity', 'uom', 'scrap_rate'
         ]].copy()
         

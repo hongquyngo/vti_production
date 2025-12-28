@@ -1,7 +1,10 @@
 # utils/bom/dialogs/view.py
 """
-View BOM Details Dialog with Alternatives Display - VERSION 2.2
+View BOM Details Dialog with Alternatives Display - VERSION 2.3
 Read-only display of BOM information with alternatives
+
+Changes in v2.3:
+- Updated product/material display to unified format with legacy_code
 
 Changes in v2.2:
 - Added duplicate materials warning section
@@ -20,6 +23,7 @@ from utils.bom.state import StateManager
 from utils.bom.common import (
     create_status_indicator,
     format_number,
+    format_product_display,
     render_bom_summary,
     # Duplicate detection
     detect_duplicate_materials_in_bom,
@@ -185,7 +189,14 @@ def _render_material_with_alternatives(material: pd.Series, manager: BOMManager)
         
         with col1:
             alt_badge = f" 🔀 **{alt_count} alt(s)**" if alt_count > 0 else ""
-            st.markdown(f"**{material['material_name']}** ({material['material_code']}){alt_badge}")
+            mat_display = format_product_display(
+                code=material.get('material_code', ''),
+                name=material.get('material_name', ''),
+                package_size=material.get('package_size'),
+                brand=material.get('brand'),
+                legacy_code=material.get('legacy_code')
+            )
+            st.markdown(f"**{mat_display}**{alt_badge}")
         
         with col2:
             st.text(material['material_type'])
@@ -247,7 +258,14 @@ def _render_alternatives_list(detail_id: int, manager: BOMManager):
             
             with col1:
                 status = "✅ Active" if alt['is_active'] else "⭕ Inactive"
-                st.text(f"  {status}: {alt['material_name']} ({alt['material_code']})")
+                alt_display = format_product_display(
+                    code=alt.get('material_code', ''),
+                    name=alt.get('material_name', ''),
+                    package_size=alt.get('package_size'),
+                    brand=alt.get('brand'),
+                    legacy_code=alt.get('legacy_code')
+                )
+                st.text(f"  {status}: {alt_display}")
             
             with col2:
                 st.text(alt['material_type'])

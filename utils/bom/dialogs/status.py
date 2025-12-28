@@ -1,11 +1,14 @@
 # utils/bom/dialogs/status.py
 """
-Change BOM Status Dialog - VERSION 2.0
+Change BOM Status Dialog - VERSION 2.1
 
 Updated status transitions:
 - DRAFT → ACTIVE, INACTIVE
 - ACTIVE → INACTIVE, DRAFT (if no usage)
 - INACTIVE → ACTIVE, DRAFT (if no usage)
+
+Changes in v2.1:
+- Updated product display to unified format with legacy_code
 
 New in v2.0:
 - Added ACTIVE/INACTIVE → DRAFT transition (only if total_usage == 0)
@@ -20,6 +23,7 @@ from utils.bom.manager import BOMManager, BOMException, BOMValidationError, BOMN
 from utils.bom.state import StateManager
 from utils.bom.common import (
     create_status_indicator,
+    format_product_display,
     STATUS_WORKFLOW,
     get_allowed_status_transitions,
     validate_status_transition,
@@ -144,7 +148,14 @@ def _render_bom_info(bom_info: dict):
     
     with col2:
         st.write(f"**Type:** {bom_info['bom_type']}")
-        st.write(f"**Product:** {bom_info['product_name']}")
+        product_display = format_product_display(
+            code=bom_info.get('product_code', ''),
+            name=bom_info.get('product_name', ''),
+            package_size=bom_info.get('package_size'),
+            brand=bom_info.get('brand'),
+            legacy_code=bom_info.get('legacy_code')
+        )
+        st.write(f"**Product:** {product_display}")
 
 
 def _format_status_option(status: str, transitions: dict) -> str:

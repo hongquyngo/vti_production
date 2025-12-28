@@ -1,7 +1,11 @@
 # utils/bom/manager.py
 """
-Bill of Materials (BOM) Management - VERSION 2.4
+Bill of Materials (BOM) Management - VERSION 2.5
 Complete CRUD operations with creator info support
+
+Changes in v2.5:
+- Added get_where_used() method for Where Used Analysis
+- Returns full product info (legacy_code, package_size, brand) for output product
 
 Changes in v2.4:
 - Added legacy_pt_code, package_size, brand to all product queries
@@ -1055,3 +1059,83 @@ class BOMManager:
             raise BOMException(f"Failed to clone BOM: {str(e)}")
         finally:
             conn.close()
+    
+    # ==================== WHERE USED Analysis ====================
+    
+    def get_where_used(self, product_id: int) -> pd.DataFrame:
+        """
+        Find all BOMs that use a specific product/material (as primary or alternative)
+        
+        Args:
+            product_id: Product ID to search for
+            
+        Returns:
+            DataFrame with columns:
+            - bom_id, bom_code, bom_name, bom_type, bom_status
+            - output_product_code, output_product_name, output_legacy_code, 
+              output_package_size, output_brand
+            - usage_type (PRIMARY or ALTERNATIVE_P1, ALTERNATIVE_P2, etc.)
+            - material_type, quantity, uom, scrap_rate
+        """
+        product_id = convert_to_native(product_id)
+        
+        query = """
+            -- Primary usage
+            SELECT 
+                h.id as bom_id,
+                h.bom_code,
+                h.bom_name,
+                h.bom_type,
+                h.status as bom_status,
+                op.pt_code as output_product_code,
+                op.name as output_product_name,
+                op.legacy_pt_code as output_legacy_code,
+                op.package_size as output_package_size,
+                ob.brand_name as output_brand,
+                'PRIMARY' as usage_type,
+                d.material_type,
+                d.quantity,
+                d.uom,
+                d.scrap_rate
+            FROM bom_details d
+            JOIN bom_headers h ON d.bom_header_id = h.id
+            JOIN products op ON h.product_id = op.id
+            LEFT JOIN brands ob ON op.brand_id = ob.id
+            WHERE d.material_id = %s
+            AND h.delete_flag = 0
+            
+            UNION ALL
+            
+            -- Alternative usage
+            SELECT 
+                h.id as bom_id,
+                h.bom_code,
+                h.bom_name,
+                h.bom_type,
+                h.status as bom_status,
+                op.pt_code as output_product_code,
+                op.name as output_product_name,
+                op.legacy_pt_code as output_legacy_code,
+                op.package_size as output_package_size,
+                ob.brand_name as output_brand,
+                CONCAT('ALTERNATIVE_P', a.priority) as usage_type,
+                a.material_type,
+                a.quantity,
+                a.uom,
+                a.scrap_rate
+            FROM bom_material_alternatives a
+            JOIN bom_details d ON a.bom_detail_id = d.id
+            JOIN bom_headers h ON d.bom_header_id = h.id
+            JOIN products op ON h.product_id = op.id
+            LEFT JOIN brands ob ON op.brand_id = ob.id
+            WHERE a.alternative_material_id = %s
+            AND h.delete_flag = 0
+            
+            ORDER BY bom_code, usage_type
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine, params=(product_id, product_id))
+        except Exception as e:
+            logger.error(f"Error getting where used: {e}")
+            raise BOMException(f"Failed to get where used: {str(e)}")

@@ -3,10 +3,11 @@
 BOM Export Dialog - Export to PDF or Excel
 Supports exporting single BOM with materials and alternatives
 
-VERSION 2.1 - Added Internal Company Selection
+VERSION 2.2 - Updated Product Display
 - User can select which internal company to display on exported documents
 - Company logo and name will be shown on PDF header
 - Company info added to Excel metadata
+- Updated product display to unified format with legacy_code
 """
 
 import logging
@@ -193,7 +194,14 @@ def show_export_dialog(bom_id: int):
                 st.write(f"**Status:** {bom_info['status']}")
             
             with col2:
-                st.write(f"**Product:** {bom_info['product_code']} - {bom_info['product_name']}")
+                product_display = format_product_display(
+                    code=bom_info.get('product_code', ''),
+                    name=bom_info.get('product_name', ''),
+                    package_size=bom_info.get('package_size'),
+                    brand=bom_info.get('brand'),
+                    legacy_code=bom_info.get('legacy_code')
+                )
+                st.write(f"**Product:** {product_display}")
                 st.write(f"**Output:** {format_number(bom_info['output_qty'], 2)} {bom_info['uom']}")
                 st.write(f"**Effective:** {bom_info.get('effective_date', 'N/A')}")
                 st.write(f"**Version:** {bom_info.get('version', 1)}")

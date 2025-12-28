@@ -1,8 +1,11 @@
 # utils/bom/dialogs/create.py
 """
-Create BOM Dialog with Alternatives Support - OPTIMIZED VERSION
+Create BOM Dialog with Alternatives Support - OPTIMIZED VERSION v2.1
 2-step wizard with form containers to prevent unnecessary reruns
 Validation: At least 1 RAW_MATERIAL required
+
+Changes in v2.1:
+- Updated format_product_display calls with legacy_code parameter
 """
 
 import logging
@@ -101,7 +104,8 @@ def _render_step1_header_optimized(state: StateManager):
                         code=row['code'],
                         name=row['name'],
                         package_size=row.get('package_size'),
-                        brand=row.get('brand')
+                        brand=row.get('brand'),
+                        legacy_code=row.get('legacy_code')
                     )
                     product_options[display_text] = {
                         'id': row['id'],
@@ -280,7 +284,8 @@ def _render_material_list_optimized(materials: list, state: StateManager):
                     code=mat_info['code'],
                     name=mat_info['name'],
                     package_size=mat_info.get('package_size'),
-                    brand=mat_info.get('brand')
+                    brand=mat_info.get('brand'),
+                    legacy_code=mat_info.get('legacy_code')
                 )
                 st.markdown(f"**{mat_display}**{alt_badge}")
             
@@ -338,7 +343,8 @@ def _render_alternatives_section_optimized(material_idx: int, material: dict,
                         code=alt_product['code'],
                         name=alt_product['name'],
                         package_size=alt_product.get('package_size'),
-                        brand=alt_product.get('brand')
+                        brand=alt_product.get('brand'),
+                        legacy_code=alt_product.get('legacy_code')
                     )
                     st.text(f"P{alt['priority']}: {alt_display}")
                 
