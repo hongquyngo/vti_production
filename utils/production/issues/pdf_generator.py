@@ -262,13 +262,13 @@ class IssuePDFGenerator:
         issue_date = issue['issue_date']
         issue_date_str = format_datetime_vn(issue_date, '%d/%m/%Y %H:%M')
         
-        # Build product info with format: code (legacy) | name | size (brand)
+        # Build product info with format: code (legacy|NEW) | name | size (brand)
         product_lines = []
         # Line 1: Name
         product_lines.append(str(issue['product_name']))
-        # Line 2: Code (Legacy)
+        # Line 2: Code (Legacy|NEW)
         code_display = issue.get('pt_code', '')
-        legacy_display = issue.get('legacy_pt_code') or 'N/A'
+        legacy_display = issue.get('legacy_pt_code') or 'NEW'
         code_label = "Mã VT" if language == 'vi' else "Code"
         product_lines.append(f"{code_label}: {code_display} ({legacy_display})")
         # Line 3: Size (Brand)
@@ -359,9 +359,9 @@ class IssuePDFGenerator:
             
             mat_info_lines = [f"<b>{lbl_name}:</b> {mat_name}"]
             
-            # Code (Legacy) - always show legacy, N/A if empty
+            # Code (Legacy|NEW) - always show legacy, NEW if empty
             if detail.get('pt_code'):
-                legacy_code = detail.get('legacy_pt_code') or 'N/A'
+                legacy_code = detail.get('legacy_pt_code') or 'NEW'
                 mat_info_lines.append(f"<b>{lbl_code}:</b> {detail['pt_code']} ({legacy_code})")
             
             if detail.get('batch_no'):

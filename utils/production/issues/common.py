@@ -398,12 +398,13 @@ def format_product_display(pt_code: str = None,
     """
     Format product display consistently across UI
     
-    Format: code (legacy_code) | name | pkg size (brand)
+    Format: code (legacy_code|NEW) | name | pkg size (brand)
     Example: VTI001000610 (1530000469) | Vietape FP5309 Tape | 500g (Vietape)
+    Example: VTI001000610 (NEW) | Vietape FP5309 Tape | 500g (Vietape)
     
     Args:
         pt_code: VTI product code
-        legacy_pt_code: Legacy/old product code (N/A if empty)
+        legacy_pt_code: Legacy/old product code (NEW if empty)
         product_name: Product name
         package_size: Package size
         brand_name: Brand name
@@ -413,9 +414,9 @@ def format_product_display(pt_code: str = None,
     """
     parts = []
     
-    # Part 1: code (legacy_code)
+    # Part 1: code (legacy_code|NEW)
     if pt_code:
-        legacy_display = legacy_pt_code if legacy_pt_code else "N/A"
+        legacy_display = legacy_pt_code if legacy_pt_code else "NEW"
         parts.append(f"{pt_code} ({legacy_display})")
     
     # Part 2: name

@@ -108,7 +108,7 @@ def show_detail_dialog(issue_id: int):
         st.markdown("**📅 Issue Information**")
         st.write(f"• **Date:** {format_datetime(issue['issue_date'])}")
         st.write(f"• **Order:** {issue['order_no']}")
-        # Product với format: code (legacy) | name | size (brand)
+        # Product với format: code (legacy|NEW) | name | size (brand)
         product_display = format_product_display(
             pt_code=issue.get('pt_code'),
             legacy_pt_code=issue.get('legacy_pt_code'),
@@ -144,9 +144,9 @@ def show_detail_dialog(issue_id: int):
                      (f" (Alt: {x['original_material_name']})" if x.get('is_alternative') else ""),
             axis=1
         )
-        # Format: code (legacy)
+        # Format: code (legacy|NEW)
         display_df['code_display'] = display_df.apply(
-            lambda x: f"{x['pt_code']} ({x['legacy_pt_code'] if x.get('legacy_pt_code') else 'N/A'})",
+            lambda x: f"{x['pt_code']} ({x['legacy_pt_code'] if x.get('legacy_pt_code') else 'NEW'})",
             axis=1
         )
         # Format: size (brand)
