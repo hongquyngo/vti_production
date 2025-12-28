@@ -1,7 +1,11 @@
 # utils/bom/manager.py
 """
-Bill of Materials (BOM) Management - VERSION 2.3
+Bill of Materials (BOM) Management - VERSION 2.4
 Complete CRUD operations with creator info support
+
+Changes in v2.4:
+- Added legacy_pt_code, package_size, brand to all product queries
+- Enhanced get_bom_info, get_bom_details, get_material_alternatives with full product details
 
 Changes in v2.3:
 - Extended search to include: Product Code, Material Names, Brand, 
@@ -101,6 +105,7 @@ class BOMManager:
                 h.product_id,
                 p.name as product_name,
                 p.pt_code as product_code,
+                p.legacy_pt_code as legacy_code,
                 p.package_size,
                 b.brand_name as brand,
                 h.output_qty,
@@ -170,7 +175,7 @@ class BOMManager:
         
         query += """ 
             GROUP BY h.id, h.bom_code, h.bom_name, h.bom_type, h.product_id,
-                     p.name, p.pt_code, p.package_size, b.brand_name,
+                     p.name, p.pt_code, p.legacy_pt_code, p.package_size, b.brand_name,
                      h.output_qty, h.uom, h.status, h.version, 
                      h.effective_date, h.notes, h.created_by, h.created_date,
                      h.updated_by, h.updated_date, e.first_name, e.last_name, u.username
@@ -187,7 +192,7 @@ class BOMManager:
             raise BOMException(f"Failed to get BOMs: {str(e)}")
     
     def get_bom_info(self, bom_id: int) -> Optional[dict]:
-        """Get BOM header information with creator info"""
+        """Get BOM header information with creator info and full product details"""
         # Convert numpy types to native Python types
         bom_id = convert_to_native(bom_id)
         
@@ -200,6 +205,9 @@ class BOMManager:
                 h.product_id,
                 p.name as product_name,
                 p.pt_code as product_code,
+                p.legacy_pt_code as legacy_code,
+                p.package_size,
+                b.brand_name as brand,
                 h.output_qty,
                 h.uom,
                 h.status,
@@ -237,6 +245,7 @@ class BOMManager:
                 ) as active_orders
             FROM bom_headers h
             JOIN products p ON h.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             LEFT JOIN bom_details d ON d.bom_header_id = h.id
             LEFT JOIN bom_material_alternatives a ON a.bom_detail_id = d.id
             LEFT JOIN users u ON h.created_by = u.id
@@ -245,7 +254,8 @@ class BOMManager:
             LEFT JOIN employees e2 ON u2.employee_id = e2.id
             WHERE h.id = %s AND h.delete_flag = 0
             GROUP BY h.id, h.bom_code, h.bom_name, h.bom_type, 
-                     h.product_id, p.name, p.pt_code, h.output_qty,
+                     h.product_id, p.name, p.pt_code, p.legacy_pt_code, 
+                     p.package_size, b.brand_name, h.output_qty,
                      h.uom, h.status, h.version, h.effective_date, h.notes,
                      h.created_by, h.created_date, h.updated_by, h.updated_date,
                      e.first_name, e.last_name, u.username,
@@ -292,7 +302,7 @@ class BOMManager:
         }
     
     def get_bom_details(self, bom_id: int) -> pd.DataFrame:
-        """Get BOM materials with stock info and alternatives count"""
+        """Get BOM materials with stock info, alternatives count, and full product details"""
         # Convert numpy types to native Python types
         bom_id = convert_to_native(bom_id)
         
@@ -302,6 +312,9 @@ class BOMManager:
                 d.material_id,
                 p.name as material_name,
                 p.pt_code as material_code,
+                p.legacy_pt_code as legacy_code,
+                p.package_size,
+                b.brand_name as brand,
                 d.material_type,
                 d.quantity,
                 d.uom,
@@ -319,6 +332,7 @@ class BOMManager:
                  WHERE alt.bom_detail_id = d.id) as alternatives_count
             FROM bom_details d
             JOIN products p ON d.material_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             WHERE d.bom_header_id = %s
             ORDER BY 
                 CASE d.material_type 
@@ -336,7 +350,7 @@ class BOMManager:
             raise BOMException(f"Failed to get BOM details: {str(e)}")
     
     def get_material_alternatives(self, detail_id: int) -> pd.DataFrame:
-        """Get alternatives for a specific material"""
+        """Get alternatives for a specific material with full product details"""
         detail_id = convert_to_native(detail_id)
         
         query = """
@@ -346,6 +360,9 @@ class BOMManager:
                 a.alternative_material_id as material_id,
                 p.name as material_name,
                 p.pt_code as material_code,
+                p.legacy_pt_code as legacy_code,
+                p.package_size,
+                b.brand_name as brand,
                 a.material_type,
                 a.quantity,
                 a.uom,
@@ -363,6 +380,7 @@ class BOMManager:
                 ) as current_stock
             FROM bom_material_alternatives a
             JOIN products p ON a.alternative_material_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             WHERE a.bom_detail_id = %s
             ORDER BY a.priority
         """

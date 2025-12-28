@@ -1,7 +1,10 @@
 # pages/1___BOM.py
 """
-Bill of Materials (BOM) Management - VERSION 2.3
+Bill of Materials (BOM) Management - VERSION 2.4
 Clean single-page UI with dialog-driven workflows
+
+Changes in v2.4:
+- Updated product display format: code (legacy | N/A) | name | pkg (brand)
 
 Changes in v2.3:
 - Updated search placeholder to reflect extended search capabilities
@@ -269,7 +272,8 @@ def render_bom_table():
             code=row['product_code'],
             name=row['product_name'],
             package_size=row.get('package_size'),
-            brand=row.get('brand')
+            brand=row.get('brand'),
+            legacy_code=row.get('legacy_code')
         ),
         axis=1
     )
@@ -524,7 +528,7 @@ def render_footer():
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.caption("Manufacturing Module v2.3 - BOM Management | Extended Search")
+        st.caption("Manufacturing Module v2.4 - BOM Management | Unified Product Display")
     
     with col2:
         st.caption(f"Session: {st.session_state.get('user_name', 'Guest')}")

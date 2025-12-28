@@ -262,15 +262,25 @@ class IssuePDFGenerator:
         issue_date = issue['issue_date']
         issue_date_str = format_datetime_vn(issue_date, '%d/%m/%Y %H:%M')
         
-        # Build product info with details (Name, Code, Legacy, Size)
-        product_info = str(issue['product_name'])
-        if issue.get('pt_code'):
-            product_info += f"<br/>Mã VT: {issue['pt_code']}" if language == 'vi' else f"<br/>Code: {issue['pt_code']}"
-        # Legacy code - hiển thị N/A nếu không có
-        legacy_code = issue.get('legacy_pt_code') or 'N/A'
-        product_info += f"<br/>Mã cũ: {legacy_code}" if language == 'vi' else f"<br/>Legacy: {legacy_code}"
+        # Build product info with format: code (legacy) | name | size (brand)
+        product_lines = []
+        # Line 1: Name
+        product_lines.append(str(issue['product_name']))
+        # Line 2: Code (Legacy)
+        code_display = issue.get('pt_code', '')
+        legacy_display = issue.get('legacy_pt_code') or 'N/A'
+        code_label = "Mã VT" if language == 'vi' else "Code"
+        product_lines.append(f"{code_label}: {code_display} ({legacy_display})")
+        # Line 3: Size (Brand)
+        size_brand_parts = []
         if issue.get('package_size'):
-            product_info += f"<br/>Size: {issue['package_size']}"
+            size_brand_parts.append(issue['package_size'])
+        if issue.get('brand_name'):
+            size_brand_parts.append(f"({issue['brand_name']})")
+        if size_brand_parts:
+            product_lines.append(f"Size: {' '.join(size_brand_parts)}")
+        
+        product_info = "<br/>".join(product_lines)
         
         left_data = [
             [Paragraph(f"<b>{labels['issue_no']}</b>", styles['NormalViet']),
@@ -325,10 +335,10 @@ class IssuePDFGenerator:
         
         if language == 'vi':
             headers = ['STT', 'Thông tin vật tư', 'SL', 'ĐVT', 'HSD', 'SL Trả', 'Ghi chú']
-            lbl_name, lbl_code, lbl_legacy, lbl_batch, lbl_size = 'Tên VT', 'Mã VT', 'Mã cũ', 'Batch', 'Size'
+            lbl_name, lbl_code, lbl_batch, lbl_size = 'Tên VT', 'Mã VT', 'Batch', 'Size'
         else:
             headers = ['No.', 'Material Info', 'Qty', 'UOM', 'Expiry', 'Return', 'Note']
-            lbl_name, lbl_code, lbl_legacy, lbl_batch, lbl_size = 'Name', 'Code', 'Legacy', 'Batch', 'Size'
+            lbl_name, lbl_code, lbl_batch, lbl_size = 'Name', 'Code', 'Batch', 'Size'
         
         header_row = [Paragraph(f"<b>{h}</b>", styles['TableHeader']) for h in headers]
         table_data = [header_row]
@@ -342,21 +352,29 @@ class IssuePDFGenerator:
                 else:
                     exp_date = detail['expired_date'].strftime('%d/%m/%Y')
             
-            # Material info
+            # Material info with format: Name, Code (Legacy), Batch, Size (Brand)
             mat_name = detail['material_name']
             if detail.get('is_alternative'):
                 mat_name = f"(*) {mat_name}"
             
             mat_info_lines = [f"<b>{lbl_name}:</b> {mat_name}"]
+            
+            # Code (Legacy) - always show legacy, N/A if empty
             if detail.get('pt_code'):
-                mat_info_lines.append(f"<b>{lbl_code}:</b> {detail['pt_code']}")
-            # Legacy code - hiển thị N/A nếu không có
-            legacy_code = detail.get('legacy_pt_code') or 'N/A'
-            mat_info_lines.append(f"<b>{lbl_legacy}:</b> {legacy_code}")
+                legacy_code = detail.get('legacy_pt_code') or 'N/A'
+                mat_info_lines.append(f"<b>{lbl_code}:</b> {detail['pt_code']} ({legacy_code})")
+            
             if detail.get('batch_no'):
                 mat_info_lines.append(f"<b>{lbl_batch}:</b> {detail['batch_no']}")
+            
+            # Size (Brand)
+            size_brand_parts = []
             if detail.get('package_size'):
-                mat_info_lines.append(f"<b>{lbl_size}:</b> {detail['package_size']}")
+                size_brand_parts.append(detail['package_size'])
+            if detail.get('brand_name'):
+                size_brand_parts.append(f"({detail['brand_name']})")
+            if size_brand_parts:
+                mat_info_lines.append(f"<b>{lbl_size}:</b> {' '.join(size_brand_parts)}")
             
             mat_info = "<br/>".join(mat_info_lines)
             

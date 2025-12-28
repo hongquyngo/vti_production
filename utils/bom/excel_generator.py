@@ -3,7 +3,11 @@
 Professional Excel Generator for BOM
 Creates styled Excel workbook with single comprehensive sheet (like PDF)
 
-VERSION: 3.0.0
+VERSION: 3.1.0
+
+CHANGES in v3.1.0:
+- Updated product display format: code (legacy | N/A) | name | pkg (brand)
+- Added legacy_code, package_size, brand to materials and alternatives display
 
 CHANGES in v3.0.0:
 - Single sheet layout matching PDF structure
@@ -67,6 +71,58 @@ def remove_vietnamese_diacritics(text: str) -> str:
     }
     
     return ''.join(vietnamese_map.get(c, c) for c in text)
+
+
+# ==================== Product Display Formatting ====================
+
+def format_product_code_with_legacy(code: str, legacy_code: Optional[str] = None) -> str:
+    """
+    Format product code with legacy code: code (legacy | N/A)
+    
+    Args:
+        code: Product code (pt_code)
+        legacy_code: Legacy product code
+        
+    Returns:
+        Formatted string like "VTI001 (OLD-001)" or "VTI001 (N/A)"
+    """
+    legacy_display = "N/A"
+    if legacy_code and str(legacy_code).strip() and str(legacy_code).strip() != '-':
+        legacy_display = str(legacy_code).strip()
+    
+    return f"{code} ({legacy_display})"
+
+
+def format_product_name_with_details(name: str, 
+                                     package_size: Optional[str] = None,
+                                     brand: Optional[str] = None) -> str:
+    """
+    Format product name with package and brand: name | pkg (brand)
+    
+    Args:
+        name: Product name
+        package_size: Package size
+        brand: Brand name
+        
+    Returns:
+        Formatted string like "Product ABC | 100g (Brand)" or "Product ABC"
+    """
+    result = name or ""
+    
+    extra_parts = []
+    if package_size and str(package_size).strip() and str(package_size).strip() != '-':
+        extra_parts.append(str(package_size).strip())
+    
+    if brand and str(brand).strip() and str(brand).strip() != '-':
+        if extra_parts:
+            extra_parts[0] = f"{extra_parts[0]} ({str(brand).strip()})"
+        else:
+            extra_parts.append(f"({str(brand).strip()})")
+    
+    if extra_parts:
+        result += " | " + " ".join(extra_parts)
+    
+    return result
 
 
 # ==================== Style Definitions ====================
@@ -400,10 +456,23 @@ class BOMExcelGenerator:
             alt_count = int(mat.get('alternatives_count', 0))
             alt_str = str(alt_count) if alt_count > 0 else "-"
             
+            # Format code with legacy: code (legacy | N/A)
+            code_display = format_product_code_with_legacy(
+                mat.get('material_code', ''),
+                mat.get('legacy_code')
+            )
+            
+            # Format name with details: name | pkg (brand)
+            name_display = format_product_name_with_details(
+                mat.get('material_name', ''),
+                mat.get('package_size'),
+                mat.get('brand')
+            )
+            
             row_data = [
                 idx,
-                mat.get('material_code', ''),
-                mat.get('material_name', ''),
+                code_display,
+                name_display,
                 mat.get('material_type', ''),
                 qty_str,
                 mat.get('uom', ''),
@@ -497,10 +566,23 @@ class BOMExcelGenerator:
                 scrap = float(alt.get('scrap_rate', 0))
                 scrap_str = f"{scrap:.1f}%" if scrap > 0 else "-"
                 
+                # Format code with legacy: code (legacy | N/A)
+                alt_code_display = format_product_code_with_legacy(
+                    alt.get('material_code', ''),
+                    alt.get('legacy_code')
+                )
+                
+                # Format name with details: name | pkg (brand)
+                alt_name_display = format_product_name_with_details(
+                    alt.get('material_name', ''),
+                    alt.get('package_size'),
+                    alt.get('brand')
+                )
+                
                 alt_row_data = [
                     alt['priority'],
-                    alt['material_code'],
-                    alt['material_name'],
+                    alt_code_display,
+                    alt_name_display,
                     '',  # Merged with C
                     qty_str,
                     alt['uom'],

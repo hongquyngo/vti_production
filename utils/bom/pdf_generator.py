@@ -3,8 +3,12 @@
 PDF Generator for BOM - Following Issue Material template
 Generates BOM PDF with materials list, company logo, and professional layout
 
-VERSION: 2.1.0
+VERSION: 2.2.0
 Based on: IssuePDFGenerator v5.3
+
+CHANGES in v2.2.0:
+- Updated product display format: code (legacy | N/A) | name | pkg (brand)
+- Added legacy_code, package_size, brand to materials and alternatives display
 
 CHANGES in v2.1.0:
 - Company info now passed directly via company_id/company_info parameters
@@ -103,6 +107,58 @@ def remove_vietnamese_diacritics(text: str) -> str:
         result.append(vietnamese_map.get(char, char))
     
     return ''.join(result)
+
+
+# ==================== Product Display Formatting ====================
+
+def format_product_code_with_legacy(code: str, legacy_code: Optional[str] = None) -> str:
+    """
+    Format product code with legacy code: code (legacy | N/A)
+    
+    Args:
+        code: Product code (pt_code)
+        legacy_code: Legacy product code
+        
+    Returns:
+        Formatted string like "VTI001 (OLD-001)" or "VTI001 (N/A)"
+    """
+    legacy_display = "N/A"
+    if legacy_code and str(legacy_code).strip() and str(legacy_code).strip() != '-':
+        legacy_display = str(legacy_code).strip()
+    
+    return f"{code} ({legacy_display})"
+
+
+def format_product_name_with_details(name: str, 
+                                     package_size: Optional[str] = None,
+                                     brand: Optional[str] = None) -> str:
+    """
+    Format product name with package and brand: name | pkg (brand)
+    
+    Args:
+        name: Product name
+        package_size: Package size
+        brand: Brand name
+        
+    Returns:
+        Formatted string like "Product ABC | 100g (Brand)" or "Product ABC"
+    """
+    result = name or ""
+    
+    extra_parts = []
+    if package_size and str(package_size).strip() and str(package_size).strip() != '-':
+        extra_parts.append(str(package_size).strip())
+    
+    if brand and str(brand).strip() and str(brand).strip() != '-':
+        if extra_parts:
+            extra_parts[0] = f"{extra_parts[0]} ({str(brand).strip()})"
+        else:
+            extra_parts.append(f"({str(brand).strip()})")
+    
+    if extra_parts:
+        result += " | " + " ".join(extra_parts)
+    
+    return result
 
 
 class BOMPDFGenerator:
@@ -609,10 +665,23 @@ class BOMPDFGenerator:
             alt_count = int(mat.get('alternatives_count', 0))
             alt_str = str(alt_count) if alt_count > 0 else "-"
             
+            # Format code with legacy: code (legacy | N/A)
+            code_display = format_product_code_with_legacy(
+                str(mat.get('material_code', '')),
+                mat.get('legacy_code')
+            )
+            
+            # Format name with details: name | pkg (brand)
+            name_display = format_product_name_with_details(
+                str(mat.get('material_name', '')),
+                mat.get('package_size'),
+                mat.get('brand')
+            )
+            
             row = [
                 Paragraph(str(idx), styles['TableCellCenter']),
-                Paragraph(str(mat['material_code']), styles['TableCell']),
-                Paragraph(str(mat['material_name']), styles['TableCell']),
+                Paragraph(code_display, styles['TableCell']),
+                Paragraph(name_display, styles['TableCell']),
                 Paragraph(str(mat['material_type']), styles['TableCellCenter']),
                 Paragraph(qty_str, styles['TableCellRight']),
                 Paragraph(str(mat['uom']), styles['TableCellCenter']),
@@ -717,10 +786,21 @@ class BOMPDFGenerator:
             if alternatives is None or alternatives.empty:
                 continue
             
+            # Material header - format with new display format
+            mat_code_display = format_product_code_with_legacy(
+                str(mat.get('material_code', '')),
+                mat.get('legacy_code')
+            )
+            mat_name_display = format_product_name_with_details(
+                str(mat.get('material_name', '')),
+                mat.get('package_size'),
+                mat.get('brand')
+            )
+            
             # Material header - create a table with same content width
             mat_header_data = [[
                 Paragraph(
-                    f"<b>{mat['material_code']}</b> - {mat['material_name']}",
+                    f"<b>{mat_code_display}</b> - {mat_name_display}",
                     styles['NormalViet']
                 )
             ]]
@@ -757,9 +837,20 @@ class BOMPDFGenerator:
                 scrap = float(alt.get('scrap_rate', 0))
                 scrap_str = f"{scrap:.1f}%" if scrap > 0 else "-"
                 
+                # Format alternative with new display format
+                alt_code_display = format_product_code_with_legacy(
+                    str(alt.get('material_code', '')),
+                    alt.get('legacy_code')
+                )
+                alt_name_display = format_product_name_with_details(
+                    str(alt.get('material_name', '')),
+                    alt.get('package_size'),
+                    alt.get('brand')
+                )
+                
                 alt_row = [
                     Paragraph(str(alt['priority']), styles['TableCellCenter']),
-                    Paragraph(f"{alt['material_code']} - {alt['material_name']}", styles['TableCell']),
+                    Paragraph(f"{alt_code_display} - {alt_name_display}", styles['TableCell']),
                     Paragraph(qty_str, styles['TableCellRight']),
                     Paragraph(str(alt['uom']), styles['TableCellCenter']),
                     Paragraph(scrap_str, styles['TableCellCenter']),

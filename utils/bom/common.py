@@ -1,7 +1,12 @@
 # utils/bom/common.py
 """
-Common utilities for BOM module - ENHANCED VERSION v2.0
+Common utilities for BOM module - ENHANCED VERSION v2.1
 Formatting, UI helpers, product queries, and Edit Level system
+
+Changes in v2.1:
+- Updated format_product_display() to include legacy_code
+- New format: code (legacy_code | N/A) | name | pkg (brand)
+- Added legacy_pt_code to product queries (get_products, get_product_by_id)
 
 Changes in v2.0:
 - Added Edit Level constants and get_edit_level() function
@@ -341,32 +346,39 @@ def create_status_indicator(status: str) -> str:
 def format_product_display(code: str, name: str, 
                           package_size: Optional[str] = None,
                           brand: Optional[str] = None,
+                          legacy_code: Optional[str] = None,
                           max_name_length: int = 40) -> str:
     """
-    Format product display string: code | name | package_size (brand)
+    Format product display string: code (legacy_code) | name | package_size (brand)
     
     Args:
-        code: Product code
+        code: Product code (pt_code)
         name: Product name
         package_size: Package size (optional)
         brand: Brand name (optional)
+        legacy_code: Legacy product code (optional), shows N/A if not provided
         max_name_length: Maximum length for product name before truncation
     
     Returns:
         Formatted string
     
     Examples:
-        "PT-001 | Product ABC | 100g (Brand A)"
-        "PT-002 | Product XYZ | 500ml"
-        "PT-003 | Service Item (Brand C)"
-        "PT-004 | Product Name"
+        "PT-001 (OLD-001) | Product ABC | 100g (Brand A)"
+        "PT-002 (N/A) | Product XYZ | 500ml"
+        "PT-003 (N/A) | Service Item (Brand C)"
+        "PT-004 (OLD-004) | Product Name"
     """
     # Truncate name if too long
-    if len(name) > max_name_length:
+    if name and len(name) > max_name_length:
         name = name[:max_name_length - 3] + "..."
     
-    # Build format: code | name | package (brand)
-    result = f"{code} | {name}"
+    # Format legacy code - show N/A if not available
+    legacy_display = "N/A"
+    if legacy_code and str(legacy_code).strip() and str(legacy_code).strip() != '-':
+        legacy_display = str(legacy_code).strip()
+    
+    # Build format: code (legacy) | name | package (brand)
+    result = f"{code} ({legacy_display}) | {name}"
     
     # Add package size and/or brand
     extra_parts = []
@@ -401,7 +413,7 @@ def get_products(active_only: bool = True,
     
     Returns:
         DataFrame of products with columns: id, name, code, uom, package_size, 
-        brand, shelf_life, approval_status, is_service
+        brand, shelf_life, approval_status, is_service, legacy_code
     """
     engine = get_db_engine()
     
@@ -410,6 +422,7 @@ def get_products(active_only: bool = True,
             p.id,
             p.name,
             p.pt_code as code,
+            p.legacy_pt_code as legacy_code,
             p.uom,
             p.package_size,
             b.brand_name as brand,
@@ -453,6 +466,7 @@ def get_product_by_id(product_id: int) -> Optional[dict]:
             p.id,
             p.name,
             p.pt_code as code,
+            p.legacy_pt_code as legacy_code,
             p.uom,
             p.package_size,
             b.brand_name as brand,
@@ -667,7 +681,8 @@ def render_material_selector(key: str,
             code=row['code'],
             name=row['name'],
             package_size=row.get('package_size'),
-            brand=row.get('brand')
+            brand=row.get('brand'),
+            legacy_code=row.get('legacy_code')
         )
         product_options[display_text] = row['id']
     
@@ -1009,13 +1024,15 @@ def filter_available_materials(products: pd.DataFrame,
             code=row['code'],
             name=row['name'],
             package_size=row.get('package_size'),
-            brand=row.get('brand')
+            brand=row.get('brand'),
+            legacy_code=row.get('legacy_code')
         )
         product_options[display_text] = {
             'id': mat_id,
             'uom': row['uom'],
             'code': row['code'],
-            'name': row['name']
+            'name': row['name'],
+            'legacy_code': row.get('legacy_code')
         }
     
     return product_options
