@@ -388,3 +388,70 @@ def get_user_audit_info() -> Dict[str, Any]:
         'keycloak_id': st.session_state.get('user_keycloak_id', 'system'),
         'username': st.session_state.get('username', 'system')
     }
+
+
+def format_product_display(pt_code: str = None, 
+                          legacy_pt_code: str = None,
+                          product_name: str = None,
+                          package_size: str = None,
+                          include_name: bool = True) -> str:
+    """
+    Format product display consistently across UI
+    
+    Format: VTI001 (OLD001) - Product Name [500g]
+    If no legacy code: VTI001 (N/A) - Product Name [500g]
+    
+    Args:
+        pt_code: VTI product code
+        legacy_pt_code: Legacy/old product code
+        product_name: Product name
+        package_size: Package size
+        include_name: Whether to include product name (default True)
+    
+    Returns:
+        Formatted product display string
+    """
+    parts = []
+    
+    # Code part: VTI001 (OLD001) or VTI001 (N/A)
+    if pt_code:
+        legacy_display = legacy_pt_code if legacy_pt_code else "N/A"
+        code_part = f"{pt_code} ({legacy_display})"
+        parts.append(code_part)
+    
+    # Name part
+    if include_name and product_name:
+        parts.append(product_name)
+    
+    # Combine with separator
+    display = " - ".join(parts) if parts else (product_name or "Unknown")
+    
+    # Package size
+    if package_size:
+        display += f" [{package_size}]"
+    
+    return display
+
+
+def format_product_display_from_row(row: Union[pd.Series, Dict], 
+                                    include_name: bool = True) -> str:
+    """
+    Format product display from DataFrame row or dict
+    
+    Args:
+        row: DataFrame row or dict with product fields
+        include_name: Whether to include product name
+    
+    Returns:
+        Formatted product display string
+    """
+    if isinstance(row, pd.Series):
+        row = row.to_dict()
+    
+    return format_product_display(
+        pt_code=row.get('pt_code'),
+        legacy_pt_code=row.get('legacy_pt_code'),
+        product_name=row.get('product_name') or row.get('name'),
+        package_size=row.get('package_size'),
+        include_name=include_name
+    )

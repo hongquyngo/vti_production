@@ -19,7 +19,7 @@ from .forms import render_issue_form
 from .dialogs import show_detail_dialog, show_pdf_dialog, check_pending_dialogs
 from .common import (
     format_number, create_status_indicator, format_datetime, format_datetime_vn,
-    get_vietnam_today, export_to_excel, IssueConstants
+    get_vietnam_today, export_to_excel, IssueConstants, format_product_display_from_row
 )
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ def _render_filter_bar() -> Dict[str, Any]:
     default_from = default_to - timedelta(days=30)
     
     with st.expander("🔍 Filters", expanded=False):
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
         
         with col1:
             from_date = st.date_input(
@@ -70,28 +70,17 @@ def _render_filter_bar() -> Dict[str, Any]:
             )
         
         with col4:
-            order_no = st.text_input(
-                "🔍 Search Order No",
-                placeholder="Enter order number...",
-                key="issue_filter_order"
-            )
-        
-        # Second row for product search
-        col5, col6 = st.columns([2, 2])
-        
-        with col5:
-            product_search = st.text_input(
-                "🔍 Search Product",
-                placeholder="VTI code, name, package size, legacy code...",
-                key="issue_filter_product"
+            search = st.text_input(
+                "🔍 Search",
+                placeholder="Order no, VTI code, product name, package size, legacy code...",
+                key="issue_filter_search"
             )
     
     return {
         'from_date': from_date,
         'to_date': to_date,
         'status': status if status != 'All' else None,
-        'order_no': order_no if order_no else None,
-        'product_search': product_search if product_search else None
+        'search': search if search else None
     }
 
 
@@ -105,9 +94,8 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
     issues = queries.get_issues(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
-        order_no=filters['order_no'],
+        search=filters.get('search'),
         status=filters['status'],
-        product_search=filters.get('product_search'),
         page=page,
         page_size=page_size
     )
@@ -122,9 +110,8 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
     total_count = queries.get_issues_count(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
-        order_no=filters['order_no'],
-        status=filters['status'],
-        product_search=filters.get('product_search')
+        search=filters.get('search'),
+        status=filters['status']
     )
     
     # Check for empty data (returns empty DataFrame)
@@ -147,10 +134,7 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
     display_df['issue_date_display'] = display_df['issue_date'].apply(format_datetime_vn)
     display_df['product_display'] = display_df.apply(
-        lambda x: f"{x['pt_code']}" + 
-                  (f" ({x['legacy_pt_code']})" if x.get('legacy_pt_code') else "") +
-                  f" - {x['product_name']}" +
-                  (f" [{x['package_size']}]" if x.get('package_size') else ""),
+        lambda x: format_product_display_from_row(x, include_name=True),
         axis=1
     )
     
@@ -265,9 +249,8 @@ def _export_issues_excel(queries: IssueQueries, filters: Dict[str, Any]):
         issues = queries.get_issues(
             from_date=filters['from_date'],
             to_date=filters['to_date'],
-            order_no=filters['order_no'],
+            search=filters.get('search'),
             status=filters['status'],
-            product_search=filters.get('product_search'),
             page=1,
             page_size=10000
         )

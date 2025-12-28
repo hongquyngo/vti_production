@@ -16,7 +16,7 @@ import pandas as pd
 from .queries import IssueQueries
 from .common import (
     format_number, create_status_indicator, format_datetime,
-    get_vietnam_now
+    get_vietnam_now, format_product_display
 )
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,14 @@ def show_detail_dialog(issue_id: int):
         st.markdown("**📅 Issue Information**")
         st.write(f"• **Date:** {format_datetime(issue['issue_date'])}")
         st.write(f"• **Order:** {issue['order_no']}")
-        st.write(f"• **Product:** {issue['product_name']}")
+        # Product với full format: VTI code (legacy) - Name [package]
+        product_display = format_product_display(
+            pt_code=issue.get('pt_code'),
+            legacy_pt_code=issue.get('legacy_pt_code'),
+            product_name=issue.get('product_name'),
+            package_size=issue.get('package_size')
+        )
+        st.write(f"• **Product:** {product_display}")
         st.write(f"• **Warehouse:** {issue['warehouse_name']}")
     
     with col2:
@@ -137,8 +144,7 @@ def show_detail_dialog(issue_id: int):
             axis=1
         )
         display_df['code_display'] = display_df.apply(
-            lambda x: f"{x['pt_code']}" + 
-                     (f" ({x['legacy_pt_code']})" if x.get('legacy_pt_code') else ""),
+            lambda x: f"{x['pt_code']} ({x['legacy_pt_code'] if x.get('legacy_pt_code') else 'N/A'})",
             axis=1
         )
         display_df['qty'] = display_df['quantity'].apply(lambda x: format_number(x, 4))

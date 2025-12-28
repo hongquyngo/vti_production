@@ -56,9 +56,8 @@ class IssueQueries:
     def get_issues(self,
                    from_date: Optional[date] = None,
                    to_date: Optional[date] = None,
-                   order_no: Optional[str] = None,
+                   search: Optional[str] = None,
                    status: Optional[str] = None,
-                   product_search: Optional[str] = None,
                    page: int = 1,
                    page_size: int = 20) -> pd.DataFrame:
         """
@@ -67,9 +66,8 @@ class IssueQueries:
         Args:
             from_date: Filter from date
             to_date: Filter to date
-            order_no: Search by order number
+            search: Search by order number, product code, name, package size, legacy code
             status: Filter by status
-            product_search: Search by product code, name, package size, legacy code
             page: Page number (1-indexed)
             page_size: Records per page
             
@@ -113,19 +111,16 @@ class IssueQueries:
             query += " AND DATE(mi.issue_date) <= %s"
             params.append(to_date)
         
-        if order_no:
-            query += " AND mo.order_no LIKE %s"
-            params.append(f"%{order_no}%")
-        
-        if product_search:
+        if search:
             query += """ AND (
-                p.pt_code LIKE %s 
+                mo.order_no LIKE %s
+                OR p.pt_code LIKE %s 
                 OR p.legacy_pt_code LIKE %s 
                 OR p.name LIKE %s 
                 OR p.package_size LIKE %s
             )"""
-            search_pattern = f"%{product_search}%"
-            params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern, search_pattern, search_pattern, search_pattern, search_pattern])
         
         if status:
             query += " AND mi.status = %s"
@@ -154,9 +149,8 @@ class IssueQueries:
     def get_issues_count(self,
                         from_date: Optional[date] = None,
                         to_date: Optional[date] = None,
-                        order_no: Optional[str] = None,
-                        status: Optional[str] = None,
-                        product_search: Optional[str] = None) -> int:
+                        search: Optional[str] = None,
+                        status: Optional[str] = None) -> int:
         """Get total count of issues matching filters"""
         query = """
             SELECT COUNT(*) as total
@@ -176,23 +170,20 @@ class IssueQueries:
             query += " AND DATE(mi.issue_date) <= %s"
             params.append(to_date)
         
-        if order_no:
-            query += " AND mo.order_no LIKE %s"
-            params.append(f"%{order_no}%")
-        
-        if status:
-            query += " AND mi.status = %s"
-            params.append(status)
-        
-        if product_search:
+        if search:
             query += """ AND (
-                p.pt_code LIKE %s 
+                mo.order_no LIKE %s
+                OR p.pt_code LIKE %s 
                 OR p.legacy_pt_code LIKE %s 
                 OR p.name LIKE %s 
                 OR p.package_size LIKE %s
             )"""
-            search_pattern = f"%{product_search}%"
-            params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern, search_pattern, search_pattern, search_pattern, search_pattern])
+        
+        if status:
+            query += " AND mi.status = %s"
+            params.append(status)
         
         try:
             result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
@@ -216,6 +207,7 @@ class IssueQueries:
                 mo.id as order_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
                 p.package_size,
                 mo.planned_qty,
                 mo.uom as product_uom,

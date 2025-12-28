@@ -347,8 +347,9 @@ class IssuePDFGenerator:
             mat_info_lines = [f"<b>{lbl_name}:</b> {mat_name}"]
             if detail.get('pt_code'):
                 mat_info_lines.append(f"<b>{lbl_code}:</b> {detail['pt_code']}")
-            if detail.get('legacy_pt_code'):
-                mat_info_lines.append(f"<b>{lbl_legacy}:</b> {detail['legacy_pt_code']}")
+            # Legacy code - hiển thị N/A nếu không có
+            legacy_code = detail.get('legacy_pt_code') or 'N/A'
+            mat_info_lines.append(f"<b>{lbl_legacy}:</b> {legacy_code}")
             if detail.get('batch_no'):
                 mat_info_lines.append(f"<b>{lbl_batch}:</b> {detail['batch_no']}")
             if detail.get('package_size'):
