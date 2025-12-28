@@ -3,7 +3,10 @@
 Production Management - Entry Point
 Routes to domain-specific modules
 
-Version: 2.0.0 - Refactored with Domain Isolation
+Version: 2.1.0 - Added Overview tab
+Changes:
+- v2.1.0: Added Overview tab for comprehensive production monitoring
+- v2.0.0: Refactored with Domain Isolation
 """
 
 import streamlit as st
@@ -50,27 +53,38 @@ def main():
         render_header()
         st.markdown("---")
         
-        # Tab navigation
-        tab_labels = ["📋 Orders", "📦 Material Issue", "↩️ Material Return", "✅ Completion"]
+        # Tab navigation - Added Overview tab
+        tab_labels = [
+            "📊 Overview",      # NEW
+            "📋 Orders", 
+            "📦 Material Issue", 
+            "↩️ Material Return", 
+            "✅ Completion"
+        ]
         tabs = st.tabs(tab_labels)
         
-        # Orders Tab
+        # Overview Tab (NEW)
         with tabs[0]:
+            from utils.production.overview.page import render_overview_tab
+            render_overview_tab()
+        
+        # Orders Tab
+        with tabs[1]:
             from utils.production.orders.page import render_orders_tab
             render_orders_tab()
         
         # Issues Tab
-        with tabs[1]:
+        with tabs[2]:
             from utils.production.issues.page import render_issues_tab
             render_issues_tab()
         
         # Returns Tab
-        with tabs[2]:
+        with tabs[3]:
             from utils.production.returns.page import render_returns_tab
             render_returns_tab()
         
         # Completions Tab
-        with tabs[3]:
+        with tabs[4]:
             from utils.production.completions.page import render_completions_tab
             render_completions_tab()
     
@@ -83,7 +97,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Manufacturing Module v2.0 - Domain Isolation Architecture")
+    st.caption("Manufacturing Module v2.1 - Domain Isolation Architecture")
 
 
 if __name__ == "__main__":
