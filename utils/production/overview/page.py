@@ -45,7 +45,6 @@ def _init_session_state():
         'overview_selected_id': None,
         'overview_selected_idx': None,
         'overview_date_preset': OverviewConstants.DATE_PRESET_THIS_MONTH,
-        'overview_show_analytics': True,
     }
     
     for key, value in defaults.items():
@@ -190,11 +189,8 @@ def _render_lifecycle_table(queries: OverviewQueries, filters: Dict[str, Any]) -
     if st.session_state.overview_selected_idx is not None and st.session_state.overview_selected_idx < len(display_df):
         display_df.loc[st.session_state.overview_selected_idx, 'Select'] = True
     
-    # Format columns for lifecycle stages
-    display_df['product_display'] = display_df.apply(
-        lambda r: f"{r['pt_code']} | {r['product_name']}" if r['pt_code'] else r['product_name'],
-        axis=1
-    )
+    # Format columns for lifecycle stages - use standard format
+    display_df['product_display'] = display_df.apply(format_product_display, axis=1)
     display_df['type_display'] = display_df['bom_type'].apply(
         lambda x: {'CUTTING': '✂️', 'REPACKING': '📦', 'KITTING': '🔧'}.get(x, '📋') + f' {x}'
     )
@@ -337,8 +333,8 @@ def _render_stage_drilldown(queries: OverviewQueries, order: pd.Series):
     with col3:
         st.markdown(f"**{get_health_indicator(order['health_status'])}**")
     
-    # Product info line
-    st.caption(f"{order['pt_code']} | {order['product_name']} | {order.get('package_size', '')} | {order.get('brand_name', '')}")
+    # Product info line - use standard format
+    st.caption(format_product_display(order))
     
     st.markdown("---")
     
@@ -536,7 +532,7 @@ def _render_qc_stage(queries: OverviewQueries, order: pd.Series):
 # ==================== Analytics Section ====================
 
 def _render_analytics_section(df: pd.DataFrame):
-    """Render analytics section with Plotly charts"""
+    """Render analytics section with Plotly charts - shown after dashboard"""
     if not PLOTLY_AVAILABLE:
         st.warning("📊 Charts require Plotly. Install with: `pip install plotly`")
         return
@@ -544,8 +540,8 @@ def _render_analytics_section(df: pd.DataFrame):
     if df is None or df.empty:
         return
     
-    with st.expander("📈 Analytics", expanded=st.session_state.overview_show_analytics):
-        # Health summary bar
+    with st.expander("📈 Analytics", expanded=True):
+        # Health summary bar at top
         health_chart = create_health_summary_chart(df)
         if health_chart:
             st.plotly_chart(health_chart, use_container_width=True)
@@ -579,7 +575,7 @@ def _render_analytics_section(df: pd.DataFrame):
 
 def _render_action_bar(queries: OverviewQueries, filters: Dict[str, Any], data: Optional[pd.DataFrame]):
     """Render action bar with export and refresh"""
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+    col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
         if st.button("📥 Export Excel", use_container_width=True, key="btn_export_overview"):
@@ -591,16 +587,8 @@ def _render_action_bar(queries: OverviewQueries, filters: Dict[str, Any], data: 
             st.rerun()
     
     with col3:
-        show_analytics = st.checkbox(
-            "📈 Analytics",
-            value=st.session_state.overview_show_analytics,
-            key="chk_show_analytics"
-        )
-        st.session_state.overview_show_analytics = show_analytics
-    
-    with col4:
         timestamp = get_vietnam_now().strftime('%H:%M:%S')
-        st.markdown(f"<div style='text-align:center; color:gray; padding-top:8px'>🕐 {timestamp}</div>", 
+        st.markdown(f"<div style='text-align:right; color:gray; padding-top:8px'>🕐 Last updated: {timestamp}</div>", 
                    unsafe_allow_html=True)
 
 
@@ -624,7 +612,7 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
         export_df = df[[
             'order_no', 'order_date', 'scheduled_date', 'completion_date',
             'status', 'priority', 'health_status',
-            'pt_code', 'product_name', 'package_size', 'brand_name', 'bom_type',
+            'pt_code', 'legacy_pt_code', 'product_name', 'package_size', 'brand_name', 'bom_type',
             'planned_qty', 'uom',
             'total_material_required', 'total_material_issued', 'total_returned', 'material_percentage',
             'produced_qty', 'progress_percentage', 'total_receipts',
@@ -638,7 +626,7 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
         export_df.columns = [
             'Order No', 'Order Date', 'Scheduled Date', 'Completion Date',
             'Status', 'Priority', 'Health',
-            'PT Code', 'Product Name', 'Package Size', 'Brand', 'BOM Type',
+            'PT Code', 'Legacy Code', 'Product Name', 'Package Size', 'Brand', 'BOM Type',
             'Planned Qty', 'UOM',
             'Mat Required', 'Mat Issued', 'Mat Returned', 'Mat %',
             'Produced Qty', 'Progress %', 'Receipts',
@@ -675,11 +663,25 @@ def render_overview_tab():
     st.subheader("📊 Production Lifecycle Overview")
     st.caption("Monitor complete production workflow: Planning → Material → Production → Quality")
     
-    # Filters
+    # Filters (get early to pass to dashboard and analytics)
     filters = _render_filter_bar()
     
-    # Dashboard KPIs
+    # Dashboard KPIs + Status Breakdown
     render_dashboard(from_date=filters['from_date'], to_date=filters['to_date'])
+    
+    # Analytics section - right after dashboard for better overview
+    # Get data for analytics (need to fetch here for charts)
+    analytics_df = queries.get_production_overview(
+        from_date=filters['from_date'],
+        to_date=filters['to_date'],
+        status=filters['status'],
+        search=filters['search'],
+        page=1,
+        page_size=10000  # Get all for analytics
+    )
+    
+    if analytics_df is not None and not analytics_df.empty:
+        _render_analytics_section(analytics_df)
     
     st.markdown("---")
     
@@ -687,8 +689,4 @@ def render_overview_tab():
     _render_action_bar(queries, filters, None)
     
     # Lifecycle table with drill-down
-    df = _render_lifecycle_table(queries, filters)
-    
-    # Analytics section
-    if df is not None and st.session_state.overview_show_analytics:
-        _render_analytics_section(df)
+    _render_lifecycle_table(queries, filters)
