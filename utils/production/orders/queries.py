@@ -109,7 +109,7 @@ class OrderQueries:
                 b.bom_type,
                 b.bom_name,
                 b.bom_code,
-                br.name as brand_name,
+                br.brand_name,
                 w1.name as warehouse_name,
                 w2.name as target_warehouse_name,
                 o.created_date,
@@ -158,7 +158,7 @@ class OrderQueries:
                     OR p.legacy_pt_code LIKE %s
                     OR b.bom_name LIKE %s
                     OR b.bom_code LIKE %s
-                    OR br.name LIKE %s
+                    OR br.brand_name LIKE %s
                     OR o.notes LIKE %s
                     OR CONCAT(e.first_name, ' ', e.last_name) LIKE %s
                 )
@@ -237,7 +237,7 @@ class OrderQueries:
                     OR p.legacy_pt_code LIKE %s
                     OR b.bom_name LIKE %s
                     OR b.bom_code LIKE %s
-                    OR br.name LIKE %s
+                    OR br.brand_name LIKE %s
                     OR o.notes LIKE %s
                     OR CONCAT(e.first_name, ' ', e.last_name) LIKE %s
                 )
