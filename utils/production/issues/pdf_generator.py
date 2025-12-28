@@ -322,10 +322,10 @@ class IssuePDFGenerator:
         
         if language == 'vi':
             headers = ['STT', 'Thông tin vật tư', 'SL', 'ĐVT', 'HSD', 'SL Trả', 'Ghi chú']
-            lbl_name, lbl_code, lbl_batch, lbl_size = 'Tên VT', 'Mã VT', 'Batch', 'Size'
+            lbl_name, lbl_code, lbl_legacy, lbl_batch, lbl_size = 'Tên VT', 'Mã VT', 'Mã cũ', 'Batch', 'Size'
         else:
             headers = ['No.', 'Material Info', 'Qty', 'UOM', 'Expiry', 'Return', 'Note']
-            lbl_name, lbl_code, lbl_batch, lbl_size = 'Name', 'Code', 'Batch', 'Size'
+            lbl_name, lbl_code, lbl_legacy, lbl_batch, lbl_size = 'Name', 'Code', 'Legacy', 'Batch', 'Size'
         
         header_row = [Paragraph(f"<b>{h}</b>", styles['TableHeader']) for h in headers]
         table_data = [header_row]
@@ -347,6 +347,8 @@ class IssuePDFGenerator:
             mat_info_lines = [f"<b>{lbl_name}:</b> {mat_name}"]
             if detail.get('pt_code'):
                 mat_info_lines.append(f"<b>{lbl_code}:</b> {detail['pt_code']}")
+            if detail.get('legacy_pt_code'):
+                mat_info_lines.append(f"<b>{lbl_legacy}:</b> {detail['legacy_pt_code']}")
             if detail.get('batch_no'):
                 mat_info_lines.append(f"<b>{lbl_batch}:</b> {detail['batch_no']}")
             if detail.get('package_size'):

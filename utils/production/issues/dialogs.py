@@ -136,13 +136,19 @@ def show_detail_dialog(issue_id: int):
                      (f" (Alt: {x['original_material_name']})" if x.get('is_alternative') else ""),
             axis=1
         )
+        display_df['code_display'] = display_df.apply(
+            lambda x: f"{x['pt_code']}" + 
+                     (f" ({x['legacy_pt_code']})" if x.get('legacy_pt_code') else ""),
+            axis=1
+        )
         display_df['qty'] = display_df['quantity'].apply(lambda x: format_number(x, 4))
         display_df['expiry'] = pd.to_datetime(display_df['expired_date']).dt.strftime('%d/%m/%Y')
         
         st.dataframe(
-            display_df[['material_info', 'pt_code', 'batch_no', 'qty', 'uom', 'expiry']].rename(columns={
+            display_df[['material_info', 'code_display', 'package_size', 'batch_no', 'qty', 'uom', 'expiry']].rename(columns={
                 'material_info': 'Material',
-                'pt_code': 'PT Code',
+                'code_display': 'Code',
+                'package_size': 'Package',
                 'batch_no': 'Batch',
                 'qty': 'Quantity',
                 'uom': 'UOM',

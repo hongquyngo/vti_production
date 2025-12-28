@@ -301,7 +301,9 @@ class IssueForms:
                     acol1, acol2, acol3 = st.columns([3, 2, 1])
                     
                     with acol1:
-                        st.write(f"    ↳ {alt_name[:35]}... (P{alt_priority})")
+                        # Hiển thị tên alternative kèm stock info
+                        stock_display = f"Stock: {alt_available:,.4f}".rstrip('0').rstrip('.')
+                        st.write(f"    ↳ {alt_name[:30]}... (P{alt_priority}) | {stock_display}")
                     
                     with acol2:
                         max_alt = max(0.0, alt_available)

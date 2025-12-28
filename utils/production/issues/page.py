@@ -46,7 +46,7 @@ def _render_filter_bar() -> Dict[str, Any]:
     default_from = default_to - timedelta(days=30)
     
     with st.expander("🔍 Filters", expanded=False):
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
         
         with col1:
             from_date = st.date_input(
@@ -75,12 +75,23 @@ def _render_filter_bar() -> Dict[str, Any]:
                 placeholder="Enter order number...",
                 key="issue_filter_order"
             )
+        
+        # Second row for product search
+        col5, col6 = st.columns([2, 2])
+        
+        with col5:
+            product_search = st.text_input(
+                "🔍 Search Product",
+                placeholder="VTI code, name, package size, legacy code...",
+                key="issue_filter_product"
+            )
     
     return {
         'from_date': from_date,
         'to_date': to_date,
         'status': status if status != 'All' else None,
-        'order_no': order_no if order_no else None
+        'order_no': order_no if order_no else None,
+        'product_search': product_search if product_search else None
     }
 
 
@@ -96,6 +107,7 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
         to_date=filters['to_date'],
         order_no=filters['order_no'],
         status=filters['status'],
+        product_search=filters.get('product_search'),
         page=page,
         page_size=page_size
     )
@@ -111,7 +123,8 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
         from_date=filters['from_date'],
         to_date=filters['to_date'],
         order_no=filters['order_no'],
-        status=filters['status']
+        status=filters['status'],
+        product_search=filters.get('product_search')
     )
     
     # Check for empty data (returns empty DataFrame)
@@ -134,7 +147,10 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
     display_df['issue_date_display'] = display_df['issue_date'].apply(format_datetime_vn)
     display_df['product_display'] = display_df.apply(
-        lambda x: f"{x['pt_code']} - {x['product_name']}" if x['pt_code'] else x['product_name'],
+        lambda x: f"{x['pt_code']}" + 
+                  (f" ({x['legacy_pt_code']})" if x.get('legacy_pt_code') else "") +
+                  f" - {x['product_name']}" +
+                  (f" [{x['package_size']}]" if x.get('package_size') else ""),
         axis=1
     )
     
@@ -251,6 +267,7 @@ def _export_issues_excel(queries: IssueQueries, filters: Dict[str, Any]):
             to_date=filters['to_date'],
             order_no=filters['order_no'],
             status=filters['status'],
+            product_search=filters.get('product_search'),
             page=1,
             page_size=10000
         )
@@ -261,12 +278,14 @@ def _export_issues_excel(queries: IssueQueries, filters: Dict[str, Any]):
         
         export_df = issues[[
             'issue_no', 'issue_date', 'order_no', 'product_name', 'pt_code',
-            'item_count', 'status', 'warehouse_name', 'issued_by_name', 'received_by_name'
+            'legacy_pt_code', 'package_size', 'item_count', 'status', 
+            'warehouse_name', 'issued_by_name', 'received_by_name'
         ]].copy()
         
         export_df.columns = [
             'Issue No', 'Issue Date', 'Order No', 'Product', 'PT Code',
-            'Items', 'Status', 'Warehouse', 'Issued By', 'Received By'
+            'Legacy Code', 'Package Size', 'Items', 'Status', 
+            'Warehouse', 'Issued By', 'Received By'
         ]
         
         excel_data = export_to_excel(export_df)

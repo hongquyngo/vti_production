@@ -58,6 +58,7 @@ class IssueQueries:
                    to_date: Optional[date] = None,
                    order_no: Optional[str] = None,
                    status: Optional[str] = None,
+                   product_search: Optional[str] = None,
                    page: int = 1,
                    page_size: int = 20) -> pd.DataFrame:
         """
@@ -68,6 +69,7 @@ class IssueQueries:
             to_date: Filter to date
             order_no: Search by order number
             status: Filter by status
+            product_search: Search by product code, name, package size, legacy code
             page: Page number (1-indexed)
             page_size: Records per page
             
@@ -86,6 +88,8 @@ class IssueQueries:
                 mo.id as order_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
                 w.name as warehouse_name,
                 CONCAT(e_issued.first_name, ' ', e_issued.last_name) as issued_by_name,
                 CONCAT(e_received.first_name, ' ', e_received.last_name) as received_by_name,
@@ -112,6 +116,16 @@ class IssueQueries:
         if order_no:
             query += " AND mo.order_no LIKE %s"
             params.append(f"%{order_no}%")
+        
+        if product_search:
+            query += """ AND (
+                p.pt_code LIKE %s 
+                OR p.legacy_pt_code LIKE %s 
+                OR p.name LIKE %s 
+                OR p.package_size LIKE %s
+            )"""
+            search_pattern = f"%{product_search}%"
+            params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
         
         if status:
             query += " AND mi.status = %s"
@@ -141,12 +155,14 @@ class IssueQueries:
                         from_date: Optional[date] = None,
                         to_date: Optional[date] = None,
                         order_no: Optional[str] = None,
-                        status: Optional[str] = None) -> int:
+                        status: Optional[str] = None,
+                        product_search: Optional[str] = None) -> int:
         """Get total count of issues matching filters"""
         query = """
             SELECT COUNT(*) as total
             FROM material_issues mi
             JOIN manufacturing_orders mo ON mi.manufacturing_order_id = mo.id
+            JOIN products p ON mo.product_id = p.id
             WHERE 1=1
         """
         
@@ -167,6 +183,16 @@ class IssueQueries:
         if status:
             query += " AND mi.status = %s"
             params.append(status)
+        
+        if product_search:
+            query += """ AND (
+                p.pt_code LIKE %s 
+                OR p.legacy_pt_code LIKE %s 
+                OR p.name LIKE %s 
+                OR p.package_size LIKE %s
+            )"""
+            search_pattern = f"%{product_search}%"
+            params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
         
         try:
             result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
@@ -226,6 +252,7 @@ class IssueQueries:
                 mid.material_id,
                 p.name as material_name,
                 p.pt_code,
+                p.legacy_pt_code,
                 p.package_size,
                 mid.batch_no,
                 mid.quantity,
@@ -233,7 +260,8 @@ class IssueQueries:
                 mid.expired_date,
                 COALESCE(mid.is_alternative, 0) as is_alternative,
                 mid.original_material_id,
-                op.name as original_material_name
+                op.name as original_material_name,
+                op.legacy_pt_code as original_legacy_pt_code
             FROM material_issue_details mid
             JOIN products p ON mid.material_id = p.id
             LEFT JOIN products op ON mid.original_material_id = op.id
@@ -264,6 +292,8 @@ class IssueQueries:
                 mo.warehouse_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
                 b.bom_name,
                 b.bom_type,
                 w.name as warehouse_name,
@@ -308,6 +338,8 @@ class IssueQueries:
                 mo.entity_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
                 b.bom_name,
                 b.bom_type,
                 w.name as warehouse_name
@@ -343,6 +375,7 @@ class IssueQueries:
                 mom.material_id,
                 p.name as material_name,
                 p.pt_code,
+                p.legacy_pt_code,
                 p.package_size,
                 mom.required_qty,
                 COALESCE(mom.issued_qty, 0) as issued_qty,
@@ -431,6 +464,8 @@ class IssueQueries:
                 alt.alternative_material_id,
                 p.name,
                 p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
                 alt.quantity,
                 alt.uom,
                 alt.priority,
@@ -445,7 +480,7 @@ class IssueQueries:
             WHERE alt.bom_detail_id = %s
                 AND alt.is_active = 1
             GROUP BY alt.id, alt.alternative_material_id, p.name, p.pt_code,
-                     alt.quantity, alt.uom, alt.priority
+                     p.legacy_pt_code, p.package_size, alt.quantity, alt.uom, alt.priority
             ORDER BY alt.priority ASC
         """
         
