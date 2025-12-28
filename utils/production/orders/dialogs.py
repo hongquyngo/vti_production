@@ -17,7 +17,8 @@ from .queries import OrderQueries
 from .manager import OrderManager
 from .common import (
     format_number, create_status_indicator, calculate_percentage,
-    OrderValidator, format_material_display, format_date, get_vietnam_now
+    OrderValidator, format_material_display, format_date, get_vietnam_now,
+    format_product_display
 )
 
 logger = logging.getLogger(__name__)
@@ -216,9 +217,18 @@ def show_detail_dialog(order_id: int):
     
     with col1:
         st.markdown("**📦 Product Information**")
+        # Format: PT_CODE (LEGACY) | NAME | PKG_SIZE (BRAND)
+        legacy_code = order.get('legacy_pt_code', '') or ''
+        legacy_display = legacy_code if legacy_code else 'NEW'
+        st.write(f"• **Code:** {order.get('pt_code', 'N/A')} ({legacy_display})")
         st.write(f"• **Product:** {order['product_name']}")
-        st.write(f"• **PT Code:** {order.get('pt_code', 'N/A')}")
-        st.write(f"• **Package:** {order.get('package_size', 'N/A')}")
+        pkg_size = order.get('package_size', '') or ''
+        brand = order.get('brand_name', '') or ''
+        if pkg_size or brand:
+            size_brand = pkg_size
+            if brand:
+                size_brand = f"{pkg_size} ({brand})" if pkg_size else f"({brand})"
+            st.write(f"• **Package/Brand:** {size_brand}")
         st.write(f"• **BOM:** {order['bom_name']} ({order['bom_type']})")
     
     with col2:

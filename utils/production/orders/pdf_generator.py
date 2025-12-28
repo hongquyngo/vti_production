@@ -53,7 +53,7 @@ except ImportError:
                 return None
 
 from .queries import OrderQueries
-from .common import format_number, get_vietnam_now, format_datetime_vn
+from .common import format_number, get_vietnam_now, format_datetime_vn, format_product_display_html
 
 logger = logging.getLogger(__name__)
 
@@ -365,12 +365,35 @@ class OrderPDFGenerator:
                 return dt[:10]
             return dt.strftime('%Y-%m-%d')
         
-        # Build product info with details (Name, Code, Size)
-        product_info = str(order['product_name'])
-        if order.get('pt_code'):
-            product_info += f"<br/>Mã VT: {order['pt_code']}" if language == 'vi' else f"<br/>Code: {order['pt_code']}"
-        if order.get('package_size'):
-            product_info += f"<br/>Size: {order['package_size']}"
+        # Build product info with unified format:
+        # PT_CODE (LEGACY or NEW) | NAME | PKG_SIZE (BRAND)
+        pt_code = order.get('pt_code', '') or ''
+        legacy_code = order.get('legacy_pt_code', '') or ''
+        legacy_display = legacy_code if legacy_code else 'NEW'
+        product_name = str(order['product_name'])
+        package_size = order.get('package_size', '') or ''
+        brand = order.get('brand_name', '') or ''
+        
+        # Build multi-line product info for PDF
+        product_lines = []
+        product_lines.append(f"<b>{product_name}</b>")
+        
+        if pt_code:
+            if language == 'vi':
+                product_lines.append(f"Mã VT: {pt_code} ({legacy_display})")
+            else:
+                product_lines.append(f"Code: {pt_code} ({legacy_display})")
+        
+        # Size and Brand line
+        size_brand_parts = []
+        if package_size:
+            size_brand_parts.append(f"Size: {package_size}")
+        if brand:
+            size_brand_parts.append(f"Brand: {brand}")
+        if size_brand_parts:
+            product_lines.append(" | ".join(size_brand_parts))
+        
+        product_info = "<br/>".join(product_lines)
         
         # Build info data - single column, right-aligned labels
         info_data = [
@@ -428,22 +451,40 @@ class OrderPDFGenerator:
         story.append(Spacer(1, 3*mm))
         
         # Build table data with detailed material info
+        # Format: PT_CODE (LEGACY or NEW) | NAME | PKG_SIZE (BRAND)
         table_data = [headers]
         
         for idx, row in materials.iterrows():
-            # Build material info cell with name, code, size
+            # Get material info fields
             material_name = str(row['material_name'])[:50]
             pt_code = row.get('pt_code', '') or ''
+            legacy_code = row.get('legacy_pt_code', '') or ''
+            legacy_display = legacy_code if legacy_code else 'NEW'
             package_size = row.get('package_size', '') or ''
+            brand = row.get('brand_name', '') or ''
             
-            if language == 'vi':
-                material_info = f"<b>{material_name}</b><br/>Mã VT: {pt_code}"
-                if package_size:
-                    material_info += f"<br/>Size: {package_size}"
-            else:
-                material_info = f"<b>{material_name}</b><br/>Code: {pt_code}"
-                if package_size:
-                    material_info += f"<br/>Size: {package_size}"
+            # Build multi-line material info for PDF
+            # Line 1: Name (bold)
+            # Line 2: Code: PT_CODE (LEGACY)
+            # Line 3: Size: PKG_SIZE | Brand: BRAND
+            material_lines = [f"<b>{material_name}</b>"]
+            
+            if pt_code:
+                if language == 'vi':
+                    material_lines.append(f"Mã VT: {pt_code} ({legacy_display})")
+                else:
+                    material_lines.append(f"Code: {pt_code} ({legacy_display})")
+            
+            # Size and Brand line
+            size_brand_parts = []
+            if package_size:
+                size_brand_parts.append(f"Size: {package_size}")
+            if brand:
+                size_brand_parts.append(f"Brand: {brand}")
+            if size_brand_parts:
+                material_lines.append(" | ".join(size_brand_parts))
+            
+            material_info = "<br/>".join(material_lines)
             
             table_data.append([
                 str(idx + 1),

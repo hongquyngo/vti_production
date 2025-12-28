@@ -377,16 +377,94 @@ def show_message(message: str, type: str = "info"):
     show_func(message)
 
 
-def format_material_display(row) -> str:
-    """Format material display with PT code and package size"""
-    name = row.get('material_name', 'Unknown')
-    pt_code = row.get('pt_code', '')
-    package_size = row.get('package_size', '')
+def format_product_display(row, bold_name: bool = False) -> str:
+    """
+    Format product/material display with unified format:
+    PT_CODE (LEGACY_CODE or NEW) | NAME | PKG_SIZE (BRAND)
     
-    display = f"**{name}**"
+    Args:
+        row: Dict or Series with product fields
+        bold_name: If True, wrap name in ** for markdown bold
+        
+    Returns:
+        Formatted string
+        
+    Example:
+        PT001 (OLD001) | Sản phẩm A | 500g (BrandX)
+        PT002 (NEW) | Sản phẩm B | 1kg (BrandY)
+    """
+    # Get fields - support both 'name' and 'material_name'/'product_name'
+    pt_code = row.get('pt_code', '') or ''
+    legacy_code = row.get('legacy_pt_code', '') or ''
+    name = row.get('material_name') or row.get('product_name') or row.get('name', 'Unknown')
+    package_size = row.get('package_size', '') or ''
+    brand = row.get('brand_name', '') or ''
+    
+    parts = []
+    
+    # Part 1: PT_CODE (LEGACY_CODE or NEW)
     if pt_code:
-        display += f" | {pt_code}"
-    if package_size:
-        display += f" | {package_size}"
+        legacy_display = legacy_code if legacy_code else 'NEW'
+        parts.append(f"{pt_code} ({legacy_display})")
     
-    return display
+    # Part 2: NAME (with optional bold)
+    if bold_name:
+        parts.append(f"**{name}**")
+    else:
+        parts.append(name)
+    
+    # Part 3: PKG_SIZE (BRAND)
+    if package_size or brand:
+        size_brand = package_size if package_size else ''
+        if brand:
+            size_brand = f"{size_brand} ({brand})" if size_brand else f"({brand})"
+        if size_brand:
+            parts.append(size_brand)
+    
+    return " | ".join(parts)
+
+
+def format_material_display(row) -> str:
+    """
+    Format material display - wrapper for format_product_display
+    Kept for backward compatibility
+    """
+    return format_product_display(row, bold_name=False)
+
+
+def format_product_display_html(row) -> str:
+    """
+    Format product/material for HTML/PDF with line breaks:
+    <b>NAME</b><br/>
+    Code: PT_CODE (LEGACY)<br/>
+    Size: PKG_SIZE | Brand: BRAND
+    
+    Args:
+        row: Dict or Series with product fields
+        
+    Returns:
+        HTML formatted string for PDF
+    """
+    pt_code = row.get('pt_code', '') or ''
+    legacy_code = row.get('legacy_pt_code', '') or ''
+    name = row.get('material_name') or row.get('product_name') or row.get('name', 'Unknown')
+    package_size = row.get('package_size', '') or ''
+    brand = row.get('brand_name', '') or ''
+    
+    lines = [f"<b>{name}</b>"]
+    
+    # Code line
+    if pt_code:
+        legacy_display = legacy_code if legacy_code else 'NEW'
+        lines.append(f"Code: {pt_code} ({legacy_display})")
+    
+    # Size & Brand line
+    size_brand_parts = []
+    if package_size:
+        size_brand_parts.append(f"Size: {package_size}")
+    if brand:
+        size_brand_parts.append(f"Brand: {brand}")
+    if size_brand_parts:
+        lines.append(" | ".join(size_brand_parts))
+    
+    return "<br/>".join(lines)

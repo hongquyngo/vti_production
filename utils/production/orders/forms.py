@@ -23,7 +23,7 @@ from .queries import OrderQueries
 from .manager import OrderManager
 from .common import (
     format_number, create_status_indicator, get_vietnam_today,
-    OrderValidator, show_message, format_material_display
+    OrderValidator, show_message, format_material_display, format_product_display
 )
 
 logger = logging.getLogger(__name__)
@@ -51,9 +51,31 @@ class OrderForms:
             st.error("❌ No active BOMs available. Please create a BOM first.")
             return
         
-        # Create BOM options
+        # Create BOM options with unified format
+        def format_bom_option(row) -> str:
+            """Format: BOM_NAME | PT_CODE (LEGACY) | PRODUCT_NAME | PKG_SIZE (BRAND) (TYPE)"""
+            pt_code = row.get('pt_code', '') or ''
+            legacy = row.get('legacy_pt_code', '') or ''
+            legacy_display = legacy if legacy else 'NEW'
+            name = row.get('product_name', '')
+            pkg = row.get('package_size', '') or ''
+            brand = row.get('brand_name', '') or ''
+            
+            parts = [row['bom_name']]
+            if pt_code:
+                parts.append(f"{pt_code} ({legacy_display})")
+            parts.append(name)
+            if pkg or brand:
+                size_brand = pkg
+                if brand:
+                    size_brand = f"{pkg} ({brand})" if pkg else f"({brand})"
+                if size_brand:
+                    parts.append(size_brand)
+            
+            return f"{' | '.join(parts)} [{row['bom_type']}]"
+        
         bom_options = {
-            f"{row['bom_name']} | {row['pt_code']} - {row['product_name']} ({row['bom_type']})": row['id']
+            format_bom_option(row): row['id']
             for _, row in bom_list.iterrows()
         }
         

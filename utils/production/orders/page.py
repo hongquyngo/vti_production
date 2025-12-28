@@ -26,7 +26,8 @@ from .dialogs import (
 )
 from .common import (
     format_number, create_status_indicator, calculate_percentage, format_datetime_vn,
-    get_vietnam_today, export_to_excel, OrderConstants, OrderValidator
+    get_vietnam_today, export_to_excel, OrderConstants, OrderValidator,
+    format_product_display
 )
 
 logger = logging.getLogger(__name__)
@@ -176,11 +177,7 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         lambda x: f"{format_number(x['produced_qty'], 0)}/{format_number(x['planned_qty'], 0)} {x['uom']}",
         axis=1
     )
-    display_df['product_display'] = display_df.apply(
-        lambda x: f"{x['pt_code']} | {x['product_name']}" + 
-                  (f" | {x['package_size']}" if x['package_size'] else ""),
-        axis=1
-    )
+    display_df['product_display'] = display_df.apply(format_product_display, axis=1)
     display_df['scheduled'] = display_df['scheduled_date'].apply(
         lambda x: format_datetime_vn(x, '%d/%m/%Y') if x else ''
     )
@@ -335,17 +332,34 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
             st.warning("No orders to export")
             return
         
-        # Prepare export dataframe
-        export_df = orders[[
-            'order_no', 'order_date', 'product_name', 'pt_code',
+        # Prepare export dataframe with full product info
+        export_df = orders.copy()
+        
+        # Add formatted product display column
+        export_df['product_display'] = export_df.apply(format_product_display, axis=1)
+        
+        # Select and rename columns
+        export_df = export_df[[
+            'order_no', 'order_date', 
+            'pt_code', 'legacy_pt_code', 'product_name', 'package_size', 'brand_name',
+            'product_display',
+            'bom_name', 'bom_type',
             'planned_qty', 'produced_qty', 'uom', 'status', 'priority',
-            'scheduled_date', 'warehouse_name', 'target_warehouse_name', 'bom_name'
+            'scheduled_date', 'warehouse_name', 'target_warehouse_name',
+            'created_by_name'
         ]].copy()
         
+        # Fill empty legacy codes with 'NEW'
+        export_df['legacy_pt_code'] = export_df['legacy_pt_code'].fillna('NEW').replace('', 'NEW')
+        
         export_df.columns = [
-            'Order No', 'Order Date', 'Product', 'PT Code',
+            'Order No', 'Order Date',
+            'PT Code', 'Legacy Code', 'Product Name', 'Package Size', 'Brand',
+            'Product (Full)',
+            'BOM', 'BOM Type',
             'Planned Qty', 'Produced Qty', 'UOM', 'Status', 'Priority',
-            'Scheduled Date', 'Source Warehouse', 'Target Warehouse', 'BOM'
+            'Scheduled Date', 'Source Warehouse', 'Target Warehouse',
+            'Created By'
         ]
         
         excel_data = export_to_excel(export_df)

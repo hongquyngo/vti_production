@@ -260,7 +260,9 @@ class OrderQueries:
                 p.name as product_name,
                 p.pt_code,
                 p.package_size,
+                p.legacy_pt_code,
                 p.description as product_description,
+                br.brand_name,
                 b.bom_name,
                 b.bom_type,
                 b.output_qty as bom_output_qty,
@@ -270,6 +272,7 @@ class OrderQueries:
             FROM manufacturing_orders o
             JOIN products p ON o.product_id = p.id
             JOIN bom_headers b ON o.bom_header_id = b.id
+            JOIN brands br ON p.brand_id = br.id
             JOIN warehouses w1 ON o.warehouse_id = w1.id
             JOIN warehouses w2 ON o.target_warehouse_id = w2.id
             LEFT JOIN users u ON o.created_by = u.id
@@ -293,6 +296,8 @@ class OrderQueries:
                 p.name as material_name,
                 p.pt_code,
                 p.package_size,
+                p.legacy_pt_code,
+                br.brand_name,
                 m.required_qty,
                 COALESCE(m.issued_qty, 0) as issued_qty,
                 m.uom,
@@ -300,6 +305,7 @@ class OrderQueries:
                 (m.required_qty - COALESCE(m.issued_qty, 0)) as pending_qty
             FROM manufacturing_order_materials m
             JOIN products p ON m.material_id = p.id
+            JOIN brands br ON p.brand_id = br.id
             WHERE m.manufacturing_order_id = %s
             ORDER BY p.name
         """
@@ -324,9 +330,12 @@ class OrderQueries:
                 b.product_id,
                 p.name as product_name,
                 p.pt_code,
-                p.package_size
+                p.package_size,
+                p.legacy_pt_code,
+                br.brand_name
             FROM bom_headers b
             JOIN products p ON b.product_id = p.id
+            JOIN brands br ON p.brand_id = br.id
             WHERE b.delete_flag = 0
                 AND b.status = 'ACTIVE'
             ORDER BY b.bom_name
@@ -350,9 +359,12 @@ class OrderQueries:
                 b.product_id,
                 p.name as product_name,
                 p.pt_code,
-                p.package_size
+                p.package_size,
+                p.legacy_pt_code,
+                br.brand_name
             FROM bom_headers b
             JOIN products p ON b.product_id = p.id
+            JOIN brands br ON p.brand_id = br.id
             WHERE b.id = %s AND b.delete_flag = 0
         """
         
@@ -372,6 +384,8 @@ class OrderQueries:
                 p.name as material_name,
                 p.pt_code,
                 p.package_size,
+                p.legacy_pt_code,
+                br.brand_name,
                 d.quantity,
                 d.uom,
                 d.scrap_rate,
@@ -379,6 +393,7 @@ class OrderQueries:
             FROM bom_details d
             JOIN bom_headers h ON d.bom_header_id = h.id
             JOIN products p ON d.material_id = p.id
+            JOIN brands br ON p.brand_id = br.id
             WHERE h.id = %s
             ORDER BY p.name
         """
@@ -502,6 +517,8 @@ class OrderQueries:
                 p.name as material_name,
                 p.pt_code,
                 p.package_size,
+                p.legacy_pt_code,
+                br.brand_name,
                 d.quantity * %s / h.output_qty * (1 + d.scrap_rate/100) as required_qty,
                 d.uom,
                 COALESCE(SUM(ih.remain), 0) as available_qty,
@@ -516,6 +533,7 @@ class OrderQueries:
             FROM bom_details d
             JOIN bom_headers h ON d.bom_header_id = h.id
             JOIN products p ON d.material_id = p.id
+            JOIN brands br ON p.brand_id = br.id
             LEFT JOIN inventory_histories ih 
                 ON ih.product_id = d.material_id 
                 AND ih.warehouse_id = %s
@@ -523,6 +541,7 @@ class OrderQueries:
                 AND ih.delete_flag = 0
             WHERE h.id = %s
             GROUP BY d.id, d.material_id, p.name, p.pt_code, p.package_size, 
+                     p.legacy_pt_code, br.brand_name,
                      d.quantity, d.uom, d.scrap_rate, h.output_qty
             ORDER BY p.name
         """
