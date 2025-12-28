@@ -376,7 +376,9 @@ def _render_clone_materials_list(materials: list):
         if alternatives and st.session_state.get('clone_keep_alternatives', True):
             with st.expander(f"   ↳ {len(alternatives)} Alternative(s)", expanded=False):
                 for alt in alternatives:
-                    alt_product = get_product_by_id(alt['alternative_material_id'])
+                    # Support both 'alternative_material_id' and 'material_id' keys
+                    alt_mat_id = alt.get('alternative_material_id') or alt.get('material_id')
+                    alt_product = get_product_by_id(alt_mat_id)
                     if alt_product:
                         alt_display = format_product_display(
                             code=alt_product['code'],
