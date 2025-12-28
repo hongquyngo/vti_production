@@ -134,7 +134,7 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
     display_df['issue_date_display'] = display_df['issue_date'].apply(format_datetime_vn)
     display_df['product_display'] = display_df.apply(
-        lambda x: format_product_display_from_row(x, include_name=True),
+        lambda x: format_product_display_from_row(x),
         axis=1
     )
     
@@ -261,13 +261,13 @@ def _export_issues_excel(queries: IssueQueries, filters: Dict[str, Any]):
         
         export_df = issues[[
             'issue_no', 'issue_date', 'order_no', 'product_name', 'pt_code',
-            'legacy_pt_code', 'package_size', 'item_count', 'status', 
+            'legacy_pt_code', 'package_size', 'brand_name', 'item_count', 'status', 
             'warehouse_name', 'issued_by_name', 'received_by_name'
         ]].copy()
         
         export_df.columns = [
             'Issue No', 'Issue Date', 'Order No', 'Product', 'PT Code',
-            'Legacy Code', 'Package Size', 'Items', 'Status', 
+            'Legacy Code', 'Package Size', 'Brand', 'Items', 'Status', 
             'Warehouse', 'Issued By', 'Received By'
         ]
         

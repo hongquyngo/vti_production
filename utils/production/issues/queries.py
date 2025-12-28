@@ -88,6 +88,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
+                b.name as brand_name,
                 w.name as warehouse_name,
                 CONCAT(e_issued.first_name, ' ', e_issued.last_name) as issued_by_name,
                 CONCAT(e_received.first_name, ' ', e_received.last_name) as received_by_name,
@@ -95,6 +96,7 @@ class IssueQueries:
             FROM material_issues mi
             JOIN manufacturing_orders mo ON mi.manufacturing_order_id = mo.id
             JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             JOIN warehouses w ON mi.warehouse_id = w.id
             LEFT JOIN employees e_issued ON mi.issued_by = e_issued.id
             LEFT JOIN employees e_received ON mi.received_by = e_received.id
@@ -209,6 +211,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
+                br.name as brand_name,
                 mo.planned_qty,
                 mo.uom as product_uom,
                 w.name as warehouse_name,
@@ -221,6 +224,7 @@ class IssueQueries:
             FROM material_issues mi
             JOIN manufacturing_orders mo ON mi.manufacturing_order_id = mo.id
             JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands br ON p.brand_id = br.id
             JOIN warehouses w ON mi.warehouse_id = w.id
             LEFT JOIN employees e_issued ON mi.issued_by = e_issued.id
             LEFT JOIN employees e_received ON mi.received_by = e_received.id
@@ -246,6 +250,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
+                br.name as brand_name,
                 mid.batch_no,
                 mid.quantity,
                 mid.uom,
@@ -256,6 +261,7 @@ class IssueQueries:
                 op.legacy_pt_code as original_legacy_pt_code
             FROM material_issue_details mid
             JOIN products p ON mid.material_id = p.id
+            LEFT JOIN brands br ON p.brand_id = br.id
             LEFT JOIN products op ON mid.original_material_id = op.id
             WHERE mid.material_issue_id = %s
             ORDER BY p.name, mid.batch_no
@@ -286,6 +292,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
+                br.name as brand_name,
                 b.bom_name,
                 b.bom_type,
                 w.name as warehouse_name,
@@ -293,6 +300,7 @@ class IssueQueries:
                  WHERE manufacturing_order_id = mo.id AND status = 'PENDING') as pending_materials
             FROM manufacturing_orders mo
             JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands br ON p.brand_id = br.id
             JOIN bom_headers b ON mo.bom_header_id = b.id
             JOIN warehouses w ON mo.warehouse_id = w.id
             WHERE mo.delete_flag = 0
@@ -332,11 +340,13 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
+                br.name as brand_name,
                 b.bom_name,
                 b.bom_type,
                 w.name as warehouse_name
             FROM manufacturing_orders mo
             JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands br ON p.brand_id = br.id
             JOIN bom_headers b ON mo.bom_header_id = b.id
             JOIN warehouses w ON mo.warehouse_id = w.id
             WHERE mo.id = %s AND mo.delete_flag = 0
@@ -369,6 +379,7 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
+                br.name as brand_name,
                 mom.required_qty,
                 COALESCE(mom.issued_qty, 0) as issued_qty,
                 mom.required_qty - COALESCE(mom.issued_qty, 0) as pending_qty,
@@ -380,6 +391,7 @@ class IssueQueries:
             FROM manufacturing_order_materials mom
             JOIN manufacturing_orders mo ON mom.manufacturing_order_id = mo.id
             JOIN products p ON mom.material_id = p.id
+            LEFT JOIN brands br ON p.brand_id = br.id
             LEFT JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
                 AND bd.material_id = mom.material_id
             LEFT JOIN inventory_histories ih 
@@ -388,9 +400,9 @@ class IssueQueries:
                 AND ih.remain > 0
                 AND ih.delete_flag = 0
             WHERE mom.manufacturing_order_id = %s
-            GROUP BY mom.id, mom.material_id, p.name, p.pt_code, p.package_size,
-                     mom.required_qty, mom.issued_qty, mom.uom, mom.status,
-                     mo.warehouse_id, bd.id
+            GROUP BY mom.id, mom.material_id, p.name, p.pt_code, p.legacy_pt_code, 
+                     p.package_size, br.name, mom.required_qty, mom.issued_qty, 
+                     mom.uom, mom.status, mo.warehouse_id, bd.id
             ORDER BY p.name
         """
         
@@ -458,12 +470,14 @@ class IssueQueries:
                 p.pt_code,
                 p.legacy_pt_code,
                 p.package_size,
+                br.name as brand_name,
                 alt.quantity,
                 alt.uom,
                 alt.priority,
                 COALESCE(SUM(ih.remain), 0) as available
             FROM bom_material_alternatives alt
             JOIN products p ON alt.alternative_material_id = p.id
+            LEFT JOIN brands br ON p.brand_id = br.id
             LEFT JOIN inventory_histories ih 
                 ON ih.product_id = alt.alternative_material_id
                 AND ih.warehouse_id = %s
@@ -472,7 +486,8 @@ class IssueQueries:
             WHERE alt.bom_detail_id = %s
                 AND alt.is_active = 1
             GROUP BY alt.id, alt.alternative_material_id, p.name, p.pt_code,
-                     p.legacy_pt_code, p.package_size, alt.quantity, alt.uom, alt.priority
+                     p.legacy_pt_code, p.package_size, br.name, alt.quantity, 
+                     alt.uom, alt.priority
             ORDER BY alt.priority ASC
         """
         
