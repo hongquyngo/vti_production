@@ -1,7 +1,11 @@
 # utils/bom/common.py
 """
-Common utilities for BOM module - ENHANCED VERSION v2.1
+Common utilities for BOM module - ENHANCED VERSION v2.2
 Formatting, UI helpers, product queries, and Edit Level system
+
+Changes in v2.2:
+- Changed legacy code display from "N/A" to "NEW" for products without legacy code
+- Format: code (legacy|NEW) | name | pkg (brand)
 
 Changes in v2.1:
 - Updated format_product_display() to include legacy_code
@@ -356,7 +360,7 @@ def format_product_display(code: str, name: str,
         name: Product name
         package_size: Package size (optional)
         brand: Brand name (optional)
-        legacy_code: Legacy product code (optional), shows N/A if not provided
+        legacy_code: Legacy product code (optional), shows NEW if not provided
         max_name_length: Maximum length for product name before truncation
     
     Returns:
@@ -364,16 +368,16 @@ def format_product_display(code: str, name: str,
     
     Examples:
         "PT-001 (OLD-001) | Product ABC | 100g (Brand A)"
-        "PT-002 (N/A) | Product XYZ | 500ml"
-        "PT-003 (N/A) | Service Item (Brand C)"
+        "PT-002 (NEW) | Product XYZ | 500ml"
+        "PT-003 (NEW) | Service Item (Brand C)"
         "PT-004 (OLD-004) | Product Name"
     """
     # Truncate name if too long
     if name and len(name) > max_name_length:
         name = name[:max_name_length - 3] + "..."
     
-    # Format legacy code - show N/A if not available
-    legacy_display = "N/A"
+    # Format legacy code - show NEW if not available
+    legacy_display = "NEW"
     if legacy_code and str(legacy_code).strip() and str(legacy_code).strip() != '-':
         legacy_display = str(legacy_code).strip()
     

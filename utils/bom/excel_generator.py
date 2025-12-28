@@ -3,7 +3,11 @@
 Professional Excel Generator for BOM
 Creates styled Excel workbook with single comprehensive sheet (like PDF)
 
-VERSION: 3.1.0
+VERSION: 3.2.0
+
+CHANGES in v3.2.0:
+- Changed legacy code display from "N/A" to "NEW" for products without legacy code
+- Format: code (legacy|NEW) | name | pkg (brand)
 
 CHANGES in v3.1.0:
 - Updated product display format: code (legacy | N/A) | name | pkg (brand)
@@ -77,16 +81,16 @@ def remove_vietnamese_diacritics(text: str) -> str:
 
 def format_product_code_with_legacy(code: str, legacy_code: Optional[str] = None) -> str:
     """
-    Format product code with legacy code: code (legacy | N/A)
+    Format product code with legacy code: code (legacy | NEW)
     
     Args:
         code: Product code (pt_code)
         legacy_code: Legacy product code
         
     Returns:
-        Formatted string like "VTI001 (OLD-001)" or "VTI001 (N/A)"
+        Formatted string like "VTI001 (OLD-001)" or "VTI001 (NEW)"
     """
-    legacy_display = "N/A"
+    legacy_display = "NEW"
     if legacy_code and str(legacy_code).strip() and str(legacy_code).strip() != '-':
         legacy_display = str(legacy_code).strip()
     
