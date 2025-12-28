@@ -324,11 +324,11 @@ def format_product_display(row: Dict[str, Any],
     """
     Format product display with standardized format across module.
     
-    Format: PT_CODE (LEGACY|NEW or NEW) | NAME | PKG_SIZE (BRAND)
+    Format: PT_CODE (LEGACY or NEW) | NAME | PKG_SIZE (BRAND)
     
     Examples:
-    - With legacy: VT001 (OLD001|NEW) | Vietape FP5309 Tape | 100m/roll (3M)
-    - Without legacy: VT001 (NEW) | Vietape FP5309 Tape | 100m/roll (3M)
+    - With legacy: VT001 (OLD001) | Vietape FP5309 Tape | 100m/roll (3M)
+    - Without legacy (new product): VT001 (NEW) | Vietape FP5309 Tape | 100m/roll (3M)
     - No package_size: VT001 (NEW) | Vietape FP5309 Tape (3M)
     
     Args:
@@ -348,11 +348,13 @@ def format_product_display(row: Dict[str, Any],
     package_size = row.get('package_size', '') or ''
     brand_name = row.get('brand_name', '') or ''
     
-    # Build PT code part: PT_CODE (LEGACY|NEW) or PT_CODE (NEW)
+    # Build PT code part: PT_CODE (LEGACY) or PT_CODE (NEW)
     if pt_code:
         if legacy_pt_code and legacy_pt_code != pt_code:
-            code_part = f"{pt_code} ({legacy_pt_code}|NEW)"
+            # Has legacy code - show legacy only
+            code_part = f"{pt_code} ({legacy_pt_code})"
         else:
+            # No legacy code - new product
             code_part = f"{pt_code} (NEW)"
     else:
         code_part = ''

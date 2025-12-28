@@ -367,13 +367,23 @@ def _render_stage_drilldown(queries: OverviewQueries, order: pd.Series):
     with st.expander("📦 Material Details", expanded=False):
         materials = queries.get_order_materials_detail(order['id'])
         if not materials.empty:
+            # Format product display: PT_CODE (LEGACY or NEW) | NAME | PKG_SIZE (BRAND)
+            materials['product_display'] = materials.apply(
+                lambda r: format_product_display({
+                    'pt_code': r['pt_code'],
+                    'legacy_pt_code': r['legacy_pt_code'],
+                    'product_name': r['material_name'],
+                    'package_size': r['package_size'],
+                    'brand_name': r['brand_name']
+                }), axis=1
+            )
+            
             st.dataframe(
                 materials[[
-                    'pt_code', 'material_name', 'required_qty', 'issued_qty', 
+                    'product_display', 'required_qty', 'issued_qty', 
                     'returned_qty', 'net_used', 'uom', 'status'
                 ]].rename(columns={
-                    'pt_code': 'Code',
-                    'material_name': 'Material',
+                    'product_display': 'Material',
                     'required_qty': 'Required',
                     'issued_qty': 'Issued',
                     'returned_qty': 'Returned',
