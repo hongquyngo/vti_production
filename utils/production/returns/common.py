@@ -59,6 +59,178 @@ class ReturnConstants:
     ]
 
 
+# ==================== Product Display Formatting ====================
+
+def format_product_display(
+    pt_code: str,
+    name: str,
+    legacy_pt_code: Optional[str] = None,
+    package_size: Optional[str] = None,
+    brand_name: Optional[str] = None,
+    include_all: bool = True
+) -> str:
+    """
+    Format product display string with standardized format.
+    
+    Format: PT_CODE (LEGACY|NEW) | NAME | PKG_SIZE (BRAND)
+    
+    Args:
+        pt_code: Product code (required)
+        name: Product name (required)
+        legacy_pt_code: Legacy product code (optional, shows 'NEW' if None)
+        package_size: Package size (optional)
+        brand_name: Brand name (optional)
+        include_all: If True, include all parts; if False, only code and name
+    
+    Returns:
+        Formatted product display string
+    
+    Examples:
+        - Full: "PT-001 (OLD-001) | Nguồn điện 24V | 100pcs (Samsung)"
+        - No legacy: "PT-001 (NEW) | Nguồn điện 24V | 100pcs (Samsung)"
+        - Minimal: "PT-001 (NEW) | Nguồn điện 24V"
+    """
+    # Part 1: PT_CODE (LEGACY|NEW)
+    legacy_indicator = legacy_pt_code if legacy_pt_code else 'NEW'
+    code_part = f"{pt_code} ({legacy_indicator})"
+    
+    # Part 2: NAME
+    name_part = name or ''
+    
+    # Build display string
+    parts = [code_part, name_part]
+    
+    # Part 3: PKG_SIZE (BRAND) - optional
+    if include_all and (package_size or brand_name):
+        size_brand_parts = []
+        if package_size:
+            size_brand_parts.append(package_size)
+        if brand_name:
+            size_brand_parts.append(f"({brand_name})")
+        if size_brand_parts:
+            parts.append(' '.join(size_brand_parts))
+    
+    return ' | '.join(parts)
+
+
+def format_material_display(
+    pt_code: str,
+    name: str,
+    legacy_pt_code: Optional[str] = None,
+    package_size: Optional[str] = None,
+    brand_name: Optional[str] = None,
+    is_alternative: bool = False,
+    original_name: Optional[str] = None,
+    include_all: bool = True
+) -> str:
+    """
+    Format material display string with alternative indicator.
+    
+    Format: PT_CODE (LEGACY|NEW) | NAME | PKG_SIZE (BRAND)
+    For alternatives: (*) PT_CODE (LEGACY|NEW) | NAME [Alt: Original] | PKG_SIZE (BRAND)
+    
+    Args:
+        pt_code: Product code
+        name: Material name
+        legacy_pt_code: Legacy product code
+        package_size: Package size
+        brand_name: Brand name
+        is_alternative: Whether this is an alternative material
+        original_name: Original material name (for alternatives)
+        include_all: If True, include all parts
+    
+    Returns:
+        Formatted material display string
+    """
+    # Build base display
+    base_display = format_product_display(
+        pt_code=pt_code,
+        name=name,
+        legacy_pt_code=legacy_pt_code,
+        package_size=package_size,
+        brand_name=brand_name,
+        include_all=include_all
+    )
+    
+    # Add alternative indicator
+    if is_alternative:
+        prefix = "(*) "
+        if original_name:
+            # Insert [Alt: Original] after name
+            parts = base_display.split(' | ')
+            if len(parts) >= 2:
+                parts[1] = f"{parts[1]} [Alt: {original_name}]"
+            base_display = ' | '.join(parts)
+        return prefix + base_display
+    
+    return base_display
+
+
+def format_product_display_html(
+    pt_code: str,
+    name: str,
+    legacy_pt_code: Optional[str] = None,
+    package_size: Optional[str] = None,
+    brand_name: Optional[str] = None,
+    is_alternative: bool = False,
+    original_name: Optional[str] = None
+) -> str:
+    """
+    Format product display for PDF/HTML with line breaks.
+    
+    Format (multi-line):
+        PT_CODE (LEGACY|NEW)
+        NAME [Alt: Original]
+        PKG_SIZE (BRAND)
+    
+    Returns:
+        HTML formatted string with <br/> tags
+    """
+    lines = []
+    
+    # Line 1: PT_CODE (LEGACY|NEW)
+    legacy_indicator = legacy_pt_code if legacy_pt_code else 'NEW'
+    code_line = f"<b>{pt_code}</b> ({legacy_indicator})"
+    if is_alternative:
+        code_line = "(*) " + code_line
+    lines.append(code_line)
+    
+    # Line 2: NAME [Alt: Original]
+    name_line = name or ''
+    if is_alternative and original_name:
+        name_line = f"{name_line} <i>[Alt: {original_name}]</i>"
+    lines.append(name_line)
+    
+    # Line 3: PKG_SIZE (BRAND)
+    if package_size or brand_name:
+        size_brand_parts = []
+        if package_size:
+            size_brand_parts.append(package_size)
+        if brand_name:
+            size_brand_parts.append(f"({brand_name})")
+        if size_brand_parts:
+            lines.append(' '.join(size_brand_parts))
+    
+    return '<br/>'.join(lines)
+
+
+def format_order_display(
+    order_no: str,
+    pt_code: str,
+    product_name: str,
+    legacy_pt_code: Optional[str] = None
+) -> str:
+    """
+    Format order display for dropdown selection.
+    
+    Format: ORDER_NO | PT_CODE (LEGACY|NEW) | NAME
+    
+    Example: "MO-20241201-001 | PT-001 (NEW) | Nguồn điện 24V"
+    """
+    legacy_indicator = legacy_pt_code if legacy_pt_code else 'NEW'
+    return f"{order_no} | {pt_code} ({legacy_indicator}) | {product_name}"
+
+
 # ==================== Timezone Helpers ====================
 
 def get_vietnam_now() -> datetime:

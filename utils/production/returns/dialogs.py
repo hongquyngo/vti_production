@@ -15,7 +15,7 @@ import pandas as pd
 from .queries import ReturnQueries
 from .common import (
     format_number, create_status_indicator, create_reason_display,
-    format_datetime, get_vietnam_now
+    format_datetime, get_vietnam_now, format_product_display, format_material_display
 )
 
 logger = logging.getLogger(__name__)
@@ -50,11 +50,21 @@ def show_detail_dialog(return_id: int):
     # Return info
     col1, col2 = st.columns(2)
     
+    # Format product display with standardized format
+    product_display = format_product_display(
+        pt_code=return_data['pt_code'],
+        name=return_data['product_name'],
+        legacy_pt_code=return_data.get('legacy_pt_code'),
+        package_size=return_data.get('package_size'),
+        brand_name=return_data.get('brand_name'),
+        include_all=True
+    )
+    
     with col1:
         st.markdown("**📅 Return Information**")
         st.write(f"• **Date:** {format_datetime(return_data['return_date'])}")
         st.write(f"• **Order:** {return_data['order_no']}")
-        st.write(f"• **Product:** {return_data['product_name']}")
+        st.write(f"• **Product:** {product_display}")
         st.write(f"• **Warehouse:** {return_data['warehouse_name']}")
         st.write(f"• **Reason:** {create_reason_display(return_data['reason'])}")
     
@@ -74,9 +84,18 @@ def show_detail_dialog(return_id: int):
     
     if not materials.empty:
         display_df = materials.copy()
-        display_df['material_info'] = display_df.apply(
-            lambda x: f"{x['material_name']}" + 
-                     (f" (Alt: {x['original_material_name']})" if x.get('is_alternative') else ""),
+        # Use standardized format for material display
+        display_df['material_display'] = display_df.apply(
+            lambda x: format_material_display(
+                pt_code=x['pt_code'],
+                name=x['material_name'],
+                legacy_pt_code=x.get('legacy_pt_code'),
+                package_size=x.get('package_size'),
+                brand_name=x.get('brand_name'),
+                is_alternative=bool(x.get('is_alternative')),
+                original_name=x.get('original_material_name'),
+                include_all=True
+            ),
             axis=1
         )
         display_df['qty'] = display_df['quantity'].apply(lambda x: format_number(x, 4))
@@ -84,9 +103,8 @@ def show_detail_dialog(return_id: int):
         display_df['expiry'] = pd.to_datetime(display_df['expired_date']).dt.strftime('%d/%m/%Y')
         
         st.dataframe(
-            display_df[['material_info', 'pt_code', 'batch_no', 'qty', 'uom', 'condition_display', 'expiry']].rename(columns={
-                'material_info': 'Material',
-                'pt_code': 'PT Code',
+            display_df[['material_display', 'batch_no', 'qty', 'uom', 'condition_display', 'expiry']].rename(columns={
+                'material_display': 'Material',
                 'batch_no': 'Batch',
                 'qty': 'Quantity',
                 'uom': 'UOM',

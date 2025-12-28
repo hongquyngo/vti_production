@@ -19,7 +19,8 @@ from .forms import render_return_form
 from .dialogs import show_detail_dialog, show_pdf_dialog, check_pending_dialogs
 from .common import (
     format_number, create_status_indicator, create_reason_display,
-    format_datetime, format_datetime_vn, get_vietnam_today, export_to_excel, ReturnConstants
+    format_datetime, format_datetime_vn, get_vietnam_today, export_to_excel, 
+    ReturnConstants, format_product_display, format_material_display
 )
 
 logger = logging.getLogger(__name__)
@@ -145,7 +146,14 @@ def _render_return_history(queries: ReturnQueries, filters: Dict[str, Any]):
     display_df['reason_display'] = display_df['reason'].apply(create_reason_display)
     display_df['return_date_display'] = display_df['return_date'].apply(format_datetime_vn)
     display_df['product_display'] = display_df.apply(
-        lambda x: f"{x['pt_code']} - {x['product_name']}" if x['pt_code'] else x['product_name'],
+        lambda x: format_product_display(
+            pt_code=x['pt_code'],
+            name=x['product_name'],
+            legacy_pt_code=x.get('legacy_pt_code'),
+            package_size=x.get('package_size'),
+            brand_name=x.get('brand_name'),
+            include_all=True
+        ),
         axis=1
     )
     display_df['total_qty_display'] = display_df['total_qty'].apply(lambda x: format_number(x, 4))
@@ -273,14 +281,27 @@ def _export_returns_excel(queries: ReturnQueries, filters: Dict[str, Any]):
             st.warning("No returns to export")
             return
         
+        # Create product display column with standardized format
+        returns['product_display'] = returns.apply(
+            lambda x: format_product_display(
+                pt_code=x['pt_code'],
+                name=x['product_name'],
+                legacy_pt_code=x.get('legacy_pt_code'),
+                package_size=x.get('package_size'),
+                brand_name=x.get('brand_name'),
+                include_all=True
+            ),
+            axis=1
+        )
+        
         export_df = returns[[
-            'return_no', 'return_date', 'order_no', 'product_name', 'pt_code',
+            'return_no', 'return_date', 'order_no', 'product_display',
             'reason', 'item_count', 'total_qty', 'status', 'warehouse_name',
             'returned_by_name', 'received_by_name'
         ]].copy()
         
         export_df.columns = [
-            'Return No', 'Return Date', 'Order No', 'Product', 'PT Code',
+            'Return No', 'Return Date', 'Order No', 'Product',
             'Reason', 'Items', 'Total Qty', 'Status', 'Warehouse',
             'Returned By', 'Received By'
         ]

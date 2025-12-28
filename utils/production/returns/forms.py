@@ -20,7 +20,8 @@ from .queries import ReturnQueries
 from .manager import ReturnManager
 from .common import (
     format_number, create_status_indicator, format_date,
-    ReturnConstants, ReturnValidator, get_user_audit_info
+    ReturnConstants, ReturnValidator, get_user_audit_info,
+    format_order_display, format_material_display
 )
 
 logger = logging.getLogger(__name__)
@@ -70,9 +71,14 @@ class ReturnForms:
             st.caption("Only IN_PROGRESS orders can have materials returned")
             return
         
-        # Create order options
+        # Create order options with standardized format
         order_options = {
-            f"{row['order_no']} | {row['pt_code']} - {row['product_name']}": row['id']
+            format_order_display(
+                order_no=row['order_no'],
+                pt_code=row['pt_code'],
+                product_name=row['product_name'],
+                legacy_pt_code=row.get('legacy_pt_code')
+            ): row['id']
             for _, row in orders.iterrows()
         }
         
@@ -96,6 +102,22 @@ class ReturnForms:
         st.markdown("### 📦 Issued Materials")
         
         display_df = returnable.copy()
+        
+        # Create material display using standardized format
+        display_df['material_display'] = display_df.apply(
+            lambda x: format_material_display(
+                pt_code=x['pt_code'],
+                name=x['material_name'],
+                legacy_pt_code=x.get('legacy_pt_code'),
+                package_size=x.get('package_size'),
+                brand_name=x.get('brand_name'),
+                is_alternative=bool(x.get('is_alternative')),
+                original_name=x.get('original_material_name'),
+                include_all=True
+            ),
+            axis=1
+        )
+        
         display_df['issued'] = display_df.apply(
             lambda x: f"{format_number(x['issued_qty'], 4)} {x['uom']}", axis=1
         )
@@ -105,8 +127,8 @@ class ReturnForms:
         display_df['issue_date_display'] = pd.to_datetime(display_df['issue_date']).dt.strftime('%d/%m/%Y')
         
         st.dataframe(
-            display_df[['display_name', 'batch_no', 'issued', 'returnable', 'issue_no', 'issue_date_display']].rename(columns={
-                'display_name': 'Material',
+            display_df[['material_display', 'batch_no', 'issued', 'returnable', 'issue_no', 'issue_date_display']].rename(columns={
+                'material_display': 'Material',
                 'batch_no': 'Batch',
                 'issued': 'Issued Qty',
                 'returnable': 'Returnable',
@@ -158,12 +180,22 @@ class ReturnForms:
             
             for idx, row in returnable.iterrows():
                 issue_detail_id = row['issue_detail_id']
-                material_name = row['display_name']
+                # Use standardized format for material display
+                material_display = format_material_display(
+                    pt_code=row['pt_code'],
+                    name=row['material_name'],
+                    legacy_pt_code=row.get('legacy_pt_code'),
+                    package_size=row.get('package_size'),
+                    brand_name=row.get('brand_name'),
+                    is_alternative=bool(row.get('is_alternative')),
+                    original_name=row.get('original_material_name'),
+                    include_all=True
+                )
                 batch_no = row['batch_no']
                 returnable_qty = float(row['returnable_qty'])
                 uom = row['uom']
                 
-                st.markdown(f"**{material_name}** (Batch: {batch_no})")
+                st.markdown(f"**{material_display}** (Batch: {batch_no})")
                 
                 col1, col2 = st.columns([2, 1])
                 

@@ -79,6 +79,9 @@ class ReturnQueries:
                 mo.id as order_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
+                b.name as brand_name,
                 w.name as warehouse_name,
                 CONCAT(e_returned.first_name, ' ', e_returned.last_name) as returned_by_name,
                 CONCAT(e_received.first_name, ' ', e_received.last_name) as received_by_name,
@@ -87,6 +90,7 @@ class ReturnQueries:
             FROM material_returns mr
             JOIN manufacturing_orders mo ON mr.manufacturing_order_id = mo.id
             JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             JOIN warehouses w ON mr.warehouse_id = w.id
             LEFT JOIN employees e_returned ON mr.returned_by = e_returned.id
             LEFT JOIN employees e_received ON mr.received_by = e_received.id
@@ -193,7 +197,9 @@ class ReturnQueries:
                 mo.id as order_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
                 p.package_size,
+                b.name as brand_name,
                 w.name as warehouse_name,
                 mi.issue_no,
                 mr.returned_by as returned_by_id,
@@ -205,6 +211,7 @@ class ReturnQueries:
             FROM material_returns mr
             JOIN manufacturing_orders mo ON mr.manufacturing_order_id = mo.id
             JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             JOIN warehouses w ON mr.warehouse_id = w.id
             LEFT JOIN material_issues mi ON mr.material_issue_id = mi.id
             LEFT JOIN employees e_returned ON mr.returned_by = e_returned.id
@@ -229,7 +236,9 @@ class ReturnQueries:
                 mrd.material_id,
                 p.name as material_name,
                 p.pt_code,
+                p.legacy_pt_code,
                 p.package_size,
+                b.name as brand_name,
                 mrd.batch_no,
                 mrd.quantity,
                 mrd.uom,
@@ -240,6 +249,7 @@ class ReturnQueries:
                 op.name as original_material_name
             FROM material_return_details mrd
             JOIN products p ON mrd.material_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             LEFT JOIN material_issue_details mid ON mrd.original_issue_detail_id = mid.id
             LEFT JOIN products op ON mid.original_material_id = op.id
             WHERE mrd.material_return_id = %s
@@ -264,11 +274,15 @@ class ReturnQueries:
                 mo.status,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
+                b.name as brand_name,
                 w.name as warehouse_name,
                 (SELECT COUNT(*) FROM material_issues mi 
                  WHERE mi.manufacturing_order_id = mo.id AND mi.status = 'CONFIRMED') as issue_count
             FROM manufacturing_orders mo
             JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             JOIN warehouses w ON mo.warehouse_id = w.id
             WHERE mo.delete_flag = 0
                 AND mo.status = 'IN_PROGRESS'
@@ -296,6 +310,9 @@ class ReturnQueries:
                 mid.material_id,
                 p.name as material_name,
                 p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
+                b.name as brand_name,
                 mid.batch_no,
                 mid.quantity as issued_qty,
                 COALESCE(SUM(mrd.quantity), 0) as returned_qty,
@@ -306,14 +323,11 @@ class ReturnQueries:
                 mi.issue_no,
                 COALESCE(mid.is_alternative, 0) as is_alternative,
                 mid.original_material_id,
-                CASE 
-                    WHEN mid.is_alternative = 1 THEN 
-                        CONCAT(p.name, ' (Alt for: ', p2.name, ')')
-                    ELSE p.name
-                END as display_name
+                p2.name as original_material_name
             FROM material_issues mi
             JOIN material_issue_details mid ON mi.id = mid.material_issue_id
             JOIN products p ON mid.material_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             LEFT JOIN products p2 ON mid.original_material_id = p2.id
             LEFT JOIN material_return_details mrd 
                 ON mrd.original_issue_detail_id = mid.id
@@ -321,7 +335,8 @@ class ReturnQueries:
                 ON mr.id = mrd.material_return_id AND mr.status = 'CONFIRMED'
             WHERE mi.manufacturing_order_id = %s
                 AND mi.status = 'CONFIRMED'
-            GROUP BY mid.id, mid.material_id, p.name, p.pt_code, mid.batch_no, 
+            GROUP BY mid.id, mid.material_id, p.name, p.pt_code, p.legacy_pt_code,
+                     p.package_size, b.name, mid.batch_no, 
                      mid.quantity, mid.uom, mid.expired_date,
                      mid.is_alternative, mid.original_material_id, p2.name,
                      mi.issue_date, mi.issue_no

@@ -43,7 +43,10 @@ except ImportError:
             return None
 
 from .queries import ReturnQueries
-from .common import format_number, get_vietnam_now, create_reason_display, format_datetime_vn
+from .common import (
+    format_number, get_vietnam_now, create_reason_display, format_datetime_vn,
+    format_product_display_html
+)
 
 logger = logging.getLogger(__name__)
 
@@ -263,14 +266,16 @@ class ReturnPDFGenerator:
         
         reason_display = create_reason_display(return_data['reason']).replace('📦 ', '').replace('⚠️ ', '').replace('❌ ', '').replace('📋 ', '').replace('📝 ', '')
         
-        # Build product info with details (Name, Code, Batch, Size)
-        product_info = str(return_data['product_name'])
-        if return_data.get('pt_code'):
-            product_info += f"<br/>Mã VT: {return_data['pt_code']}" if language == 'vi' else f"<br/>Code: {return_data['pt_code']}"
-        if return_data.get('product_batch'):
-            product_info += f"<br/>Batch: {return_data['product_batch']}"
-        if return_data.get('package_size'):
-            product_info += f"<br/>Size: {return_data['package_size']}"
+        # Build product info with standardized format (multi-line for PDF)
+        product_info = format_product_display_html(
+            pt_code=return_data['pt_code'],
+            name=return_data['product_name'],
+            legacy_pt_code=return_data.get('legacy_pt_code'),
+            package_size=return_data.get('package_size'),
+            brand_name=return_data.get('brand_name'),
+            is_alternative=False,
+            original_name=None
+        )
         
         left_data = [
             [Paragraph(f"<b>{labels['return_no']}</b>", styles['NormalViet']),
@@ -326,11 +331,9 @@ class ReturnPDFGenerator:
         
         if language == 'vi':
             headers = ['STT', 'Thông tin vật tư', 'SL', 'ĐVT', 'Tình trạng', 'HSD', 'Ghi chú']
-            lbl_name, lbl_code, lbl_batch, lbl_size = 'Tên VT', 'Mã VT', 'Batch', 'Size'
             cond_good, cond_damaged = 'Tốt', 'Hư hỏng'
         else:
             headers = ['No.', 'Material Info', 'Qty', 'UOM', 'Condition', 'Expiry', 'Note']
-            lbl_name, lbl_code, lbl_batch, lbl_size = 'Name', 'Code', 'Batch', 'Size'
             cond_good, cond_damaged = 'Good', 'Damaged'
         
         header_row = [Paragraph(f"<b>{h}</b>", styles['TableHeader']) for h in headers]
@@ -345,20 +348,19 @@ class ReturnPDFGenerator:
                 else:
                     exp_date = detail['expired_date'].strftime('%d/%m/%Y')
             
-            # Material info
-            mat_name = detail['material_name']
-            if detail.get('is_alternative'):
-                mat_name = f"(*) {mat_name}"
-            
-            mat_info_lines = [f"<b>{lbl_name}:</b> {mat_name}"]
-            if detail.get('pt_code'):
-                mat_info_lines.append(f"<b>{lbl_code}:</b> {detail['pt_code']}")
+            # Material info with standardized format (multi-line for PDF)
+            mat_info = format_product_display_html(
+                pt_code=detail.get('pt_code', ''),
+                name=detail['material_name'],
+                legacy_pt_code=detail.get('legacy_pt_code'),
+                package_size=detail.get('package_size'),
+                brand_name=detail.get('brand_name'),
+                is_alternative=bool(detail.get('is_alternative')),
+                original_name=detail.get('original_material_name')
+            )
+            # Add batch info
             if detail.get('batch_no'):
-                mat_info_lines.append(f"<b>{lbl_batch}:</b> {detail['batch_no']}")
-            if detail.get('package_size'):
-                mat_info_lines.append(f"<b>{lbl_size}:</b> {detail['package_size']}")
-            
-            mat_info = "<br/>".join(mat_info_lines)
+                mat_info += f"<br/><b>Batch:</b> {detail['batch_no']}"
             
             qty = detail['quantity']
             qty_str = f"{float(qty):,.4f}".rstrip('0').rstrip('.')
