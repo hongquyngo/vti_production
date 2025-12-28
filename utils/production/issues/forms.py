@@ -3,11 +3,11 @@
 Form components for Issues domain
 Issue materials form with quantity editing and alternatives
 
-Version: 2.2.0
-Changes from 2.1.0:
-- Minor improvements to session state cleanup
-- Added explicit form_data initialization pattern for consistency with other domains
-- Preserved existing st.form() implementation (already correct)
+Version: 2.3.0
+Changes from 2.2.0:
+- Wrapped confirmation dialog in st.form() to prevent rerun on dropdown change
+- Employee selection and notes now batched - only submit on button click
+- Improves UX by eliminating page reload when selecting employees
 
 NOTE: This file was already well-implemented with st.form() to prevent reruns.
       Changes are minimal for consistency with other domains.
@@ -410,7 +410,7 @@ class IssueForms:
                 st.rerun()
             return
         
-        # Employee selection
+        # Employee selection - WRAP IN FORM to prevent rerun on dropdown change
         employees = self.queries.get_employees()
         
         if employees.empty:
@@ -423,34 +423,48 @@ class IssueForms:
         }
         emp_list = ["-- Select --"] + list(emp_options.keys())
         
-        col1, col2 = st.columns(2)
-        with col1:
-            issued_by = st.selectbox("Issued By (Warehouse)", emp_list, key="issue_issued_by")
-        with col2:
-            received_by = st.selectbox("Received By (Production)", emp_list, key="issue_received_by")
+        # Use form to batch all inputs - no rerun until submit
+        with st.form(key="confirm_issue_form", clear_on_submit=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                issued_by = st.selectbox("Issued By (Warehouse)", emp_list, key="issue_issued_by")
+            with col2:
+                received_by = st.selectbox("Received By (Production)", emp_list, key="issue_received_by")
+            
+            notes = st.text_area("Notes (Optional)", height=80, key="issue_notes")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                submit_btn = st.form_submit_button(
+                    "✅ Yes, Issue Now", 
+                    type="primary", 
+                    use_container_width=True
+                )
+            
+            with col2:
+                cancel_btn = st.form_submit_button(
+                    "❌ Cancel", 
+                    use_container_width=True
+                )
         
-        notes = st.text_area("Notes (Optional)", height=80, key="issue_notes")
+        # Handle form submission outside the form block
+        if cancel_btn:
+            st.session_state['confirm_issue'] = False
+            st.rerun()
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("✅ Yes, Issue Now", type="primary", use_container_width=True):
-                if issued_by == "-- Select --":
-                    st.error("❌ Please select warehouse staff")
-                elif received_by == "-- Select --":
-                    st.error("❌ Please select production staff")
-                else:
-                    self._execute_issue(
-                        order['id'],
-                        emp_options[issued_by],
-                        emp_options[received_by],
-                        notes
-                    )
-        
-        with col2:
-            if st.button("❌ Cancel", use_container_width=True):
-                st.session_state['confirm_issue'] = False
-                st.rerun()
+        if submit_btn:
+            if issued_by == "-- Select --":
+                st.error("❌ Please select warehouse staff")
+            elif received_by == "-- Select --":
+                st.error("❌ Please select production staff")
+            else:
+                self._execute_issue(
+                    order['id'],
+                    emp_options[issued_by],
+                    emp_options[received_by],
+                    notes
+                )
     
     def _execute_issue(self, order_id: int, issued_by: int, 
                       received_by: int, notes: str):
