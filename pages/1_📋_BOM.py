@@ -1,7 +1,10 @@
 # pages/1___BOM.py
 """
-Bill of Materials (BOM) Management - VERSION 2.2
+Bill of Materials (BOM) Management - VERSION 2.3
 Clean single-page UI with dialog-driven workflows
+
+Changes in v2.3:
+- Updated search placeholder to reflect extended search capabilities
 
 Changes in v2.2:
 - Added duplicate materials warning badge in BOM list
@@ -201,7 +204,7 @@ def render_filters_and_metrics():
     with col3:
         filter_search = st.text_input(
             "Search",
-            placeholder="Code, name or product...",
+            placeholder="BOM, product, material, brand, creator...",
             key="filter_search"
         )
     
@@ -521,7 +524,7 @@ def render_footer():
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.caption("Manufacturing Module v2.1 - BOM Management | Usage-based Edit Levels")
+        st.caption("Manufacturing Module v2.3 - BOM Management | Extended Search")
     
     with col2:
         st.caption(f"Session: {st.session_state.get('user_name', 'Guest')}")

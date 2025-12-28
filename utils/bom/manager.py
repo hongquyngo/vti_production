@@ -1,7 +1,11 @@
 # utils/bom/manager.py
 """
-Bill of Materials (BOM) Management - VERSION 2.2
+Bill of Materials (BOM) Management - VERSION 2.3
 Complete CRUD operations with creator info support
+
+Changes in v2.3:
+- Extended search to include: Product Code, Material Names, Brand, 
+  Creator Name, Notes, Package Size, Legacy Code
 
 Changes in v2.2:
 - Added get_bom_complete_data() method for Clone dialog and other features
@@ -78,7 +82,16 @@ class BOMManager:
     def get_boms(self, bom_type: Optional[str] = None,
                  status: Optional[str] = None,
                  search: Optional[str] = None) -> pd.DataFrame:
-        """Get BOMs with filters, full product info and creator info"""
+        """
+        Get BOMs with filters, full product info and creator info
+        
+        Search covers:
+        - BOM Code, BOM Name, Notes
+        - Product: Code, Name, Package Size, Legacy Code
+        - Brand Name
+        - Creator Name (first_name + last_name or username)
+        - Material Names (in BOM details)
+        """
         query = """
             SELECT 
                 h.id,
@@ -132,13 +145,28 @@ class BOMManager:
             params.append(str(status))
         
         if search:
+            # Extended search across multiple fields
             query += """ AND (
                 h.bom_code LIKE %s 
                 OR h.bom_name LIKE %s 
+                OR h.notes LIKE %s
                 OR p.name LIKE %s
+                OR p.pt_code LIKE %s
+                OR p.package_size LIKE %s
+                OR p.legacy_pt_code LIKE %s
+                OR b.brand_name LIKE %s
+                OR CONCAT(e.first_name, ' ', e.last_name) LIKE %s
+                OR u.username LIKE %s
+                OR EXISTS (
+                    SELECT 1 FROM bom_details bd
+                    JOIN products mp ON bd.material_id = mp.id
+                    WHERE bd.bom_header_id = h.id
+                    AND (mp.name LIKE %s OR mp.pt_code LIKE %s)
+                )
             )"""
             search_pattern = f"%{search}%"
-            params.extend([search_pattern, search_pattern, search_pattern])
+            # 12 parameters total for the search
+            params.extend([search_pattern] * 12)
         
         query += """ 
             GROUP BY h.id, h.bom_code, h.bom_name, h.bom_type, h.product_id,
