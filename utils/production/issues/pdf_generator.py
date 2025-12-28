@@ -262,10 +262,13 @@ class IssuePDFGenerator:
         issue_date = issue['issue_date']
         issue_date_str = format_datetime_vn(issue_date, '%d/%m/%Y %H:%M')
         
-        # Build product info with details (Name, Code, Size)
+        # Build product info with details (Name, Code, Legacy, Size)
         product_info = str(issue['product_name'])
         if issue.get('pt_code'):
             product_info += f"<br/>Mã VT: {issue['pt_code']}" if language == 'vi' else f"<br/>Code: {issue['pt_code']}"
+        # Legacy code - hiển thị N/A nếu không có
+        legacy_code = issue.get('legacy_pt_code') or 'N/A'
+        product_info += f"<br/>Mã cũ: {legacy_code}" if language == 'vi' else f"<br/>Legacy: {legacy_code}"
         if issue.get('package_size'):
             product_info += f"<br/>Size: {issue['package_size']}"
         
