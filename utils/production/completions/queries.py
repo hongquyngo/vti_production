@@ -102,7 +102,9 @@ class CompletionQueries:
                 p.id as product_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
                 p.package_size,
+                b.name as brand_name,
                 w.id as warehouse_id,
                 w.name as warehouse_name,
                 CASE 
@@ -113,6 +115,7 @@ class CompletionQueries:
             FROM production_receipts pr
             JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
             JOIN products p ON pr.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             JOIN warehouses w ON pr.warehouse_id = w.id
             WHERE 1=1
         """
@@ -245,7 +248,9 @@ class CompletionQueries:
                 p.id as product_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
                 p.package_size,
+                br.name as brand_name,
                 w.id as warehouse_id,
                 w.name as warehouse_name,
                 bh.bom_name,
@@ -253,6 +258,7 @@ class CompletionQueries:
             FROM production_receipts pr
             JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
             JOIN products p ON pr.product_id = p.id
+            LEFT JOIN brands br ON p.brand_id = br.id
             JOIN warehouses w ON pr.warehouse_id = w.id
             LEFT JOIN bom_headers bh ON mo.bom_header_id = bh.id
             LEFT JOIN users u ON pr.created_by = u.id
@@ -273,8 +279,13 @@ class CompletionQueries:
         """Get material usage for an order"""
         query = """
             SELECT 
+                p.id as material_id,
                 p.name as material_name,
                 p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
+                b.name as brand_name,
+                bd.material_type,
                 mom.required_qty,
                 COALESCE(mom.issued_qty, 0) as issued_qty,
                 mom.uom,
@@ -285,8 +296,12 @@ class CompletionQueries:
                 END as status
             FROM manufacturing_order_materials mom
             JOIN products p ON mom.material_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
+            LEFT JOIN manufacturing_orders mo ON mom.manufacturing_order_id = mo.id
+            LEFT JOIN bom_details bd ON bd.bom_header_id = mo.bom_header_id 
+                AND bd.material_id = mom.material_id
             WHERE mom.manufacturing_order_id = %s
-            ORDER BY p.name
+            ORDER BY bd.material_type, p.name
         """
         
         try:
@@ -312,7 +327,9 @@ class CompletionQueries:
                 p.id as product_id,
                 p.name as product_name,
                 p.pt_code,
+                p.legacy_pt_code,
                 p.package_size,
+                b.name as brand_name,
                 w.id as warehouse_id,
                 w.name as warehouse_name,
                 tw.id as target_warehouse_id,
@@ -320,6 +337,7 @@ class CompletionQueries:
                 bh.bom_name as bom_name
             FROM manufacturing_orders mo
             JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
             JOIN warehouses w ON mo.warehouse_id = w.id
             JOIN warehouses tw ON mo.target_warehouse_id = tw.id
             LEFT JOIN bom_headers bh ON mo.bom_header_id = bh.id

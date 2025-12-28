@@ -28,7 +28,8 @@ from .dialogs import (
 from .common import (
     format_number, create_status_indicator, get_yield_indicator,
     calculate_percentage, format_datetime, format_datetime_vn, get_vietnam_today, get_vietnam_now,
-    export_to_excel, get_date_filter_presets, CompletionConstants
+    export_to_excel, get_date_filter_presets, CompletionConstants,
+    format_product_display, format_material_display
 )
 
 logger = logging.getLogger(__name__)
@@ -49,29 +50,14 @@ def _init_session_state():
 
 # ==================== Helper Functions ====================
 
-def _format_product_display(row) -> str:
+def _format_product_display_row(row) -> str:
     """
-    Format product display: pt_code | name (package_size)
+    Format product display for DataFrame row.
+    Wrapper around common.format_product_display() for apply() usage.
     
-    Examples:
-    - VT001 | Vietape FP5309 Gasket PU Foam Tape (100m/roll)
-    - VT002 | 3M Polyester Film Electrical Tape 74
+    Format: PT_CODE (LEGACY|NEW) | NAME | PKG_SIZE (BRAND)
     """
-    pt_code = row.get('pt_code', '') or ''
-    name = row.get('product_name', '') or ''
-    package_size = row.get('package_size', '') or ''
-    
-    # Build display string
-    if pt_code:
-        display = f"{pt_code} | {name}"
-    else:
-        display = name
-    
-    # Add package_size if available
-    if package_size:
-        display = f"{display} ({package_size})"
-    
-    return display
+    return format_product_display(row.to_dict() if hasattr(row, 'to_dict') else dict(row))
 
 
 def _format_date_display(dt, fmt: str = '%d-%b-%Y') -> str:
@@ -542,7 +528,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     )
     
     # Format Product: pt_code | name (package_size)
-    display_df['product_display'] = display_df.apply(_format_product_display, axis=1)
+    display_df['product_display'] = display_df.apply(_format_product_display_row, axis=1)
     
     # Format other columns
     display_df['quality_display'] = display_df['quality_status'].apply(create_status_indicator)
@@ -613,7 +599,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         
         st.markdown("---")
         # Show selected receipt info with improved product display
-        product_info = _format_product_display(selected_receipt)
+        product_info = format_product_display(selected_receipt.to_dict())
         st.markdown(f"**Selected:** `{selected_receipt['receipt_no']}` | {selected_receipt['order_no']} | {product_info}")
         
         col1, col2, col3, col4 = st.columns(4)
@@ -703,7 +689,7 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
         export_df = receipts.copy()
         
         # Format product display
-        export_df['Product'] = export_df.apply(_format_product_display, axis=1)
+        export_df['Product'] = export_df.apply(_format_product_display_row, axis=1)
         
         # Format dates
         export_df['Receipt Date'] = export_df['receipt_date'].apply(
@@ -716,17 +702,17 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
             lambda x: _format_date_display(x, '%d/%m/%Y') if pd.notna(x) else ''
         )
         
-        # Select and rename columns
+        # Select and rename columns - include legacy code and brand for detailed export
         export_df = export_df[[
             'receipt_no', 'Receipt Date', 'Order Date', 'Scheduled Date', 'order_no', 
-            'Product', 'pt_code', 'quantity', 'uom', 'batch_no', 'quality_status', 
-            'yield_rate', 'warehouse_name'
+            'Product', 'pt_code', 'legacy_pt_code', 'brand_name', 'quantity', 'uom', 
+            'batch_no', 'quality_status', 'yield_rate', 'warehouse_name'
         ]].copy()
         
         export_df.columns = [
             'Receipt No', 'Receipt Date', 'Order Date', 'Scheduled Date', 'Order No', 
-            'Product', 'PT Code', 'Quantity', 'UOM', 'Batch', 'Quality Status', 
-            'Yield Rate', 'Warehouse'
+            'Product (Full)', 'PT Code', 'Legacy Code', 'Brand', 'Quantity', 'UOM', 
+            'Batch', 'Quality Status', 'Yield Rate', 'Warehouse'
         ]
         
         excel_data = export_to_excel(export_df)

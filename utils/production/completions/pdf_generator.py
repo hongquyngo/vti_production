@@ -45,7 +45,7 @@ except ImportError:
             return None
 
 from .queries import CompletionQueries
-from .common import format_number, get_vietnam_now, create_status_indicator, format_datetime_vn
+from .common import format_number, get_vietnam_now, create_status_indicator, format_datetime_vn, format_product_display
 
 logger = logging.getLogger(__name__)
 
@@ -280,12 +280,8 @@ class ReceiptPDFGenerator:
         elif quality_display == 'FAILED':
             quality_display = 'Không đạt / Failed' if language == 'vi' else 'Failed'
         
-        # Build product info with details (Name, Code, Size)
-        product_info = str(receipt['product_name'])
-        if receipt.get('pt_code'):
-            product_info += f"<br/>Mã VT: {receipt['pt_code']}" if language == 'vi' else f"<br/>Code: {receipt['pt_code']}"
-        if receipt.get('package_size'):
-            product_info += f"<br/>Size: {receipt['package_size']}"
+        # Build product info with new standardized format (multiline for PDF)
+        product_info = format_product_display(receipt, include_brand=True, multiline=True, language=language)
         
         left_data = [
             [Paragraph(f"<b>{labels['receipt_no']}</b>", styles['NormalViet']),

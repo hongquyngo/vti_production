@@ -313,3 +313,113 @@ def get_user_audit_info() -> Dict[str, Any]:
 def generate_batch_no() -> str:
     """Generate default batch number"""
     return f"BATCH-{get_vietnam_now().strftime('%Y%m%d-%H%M')}"
+
+
+# ==================== Product Display Formatting ====================
+
+def format_product_display(row: Dict[str, Any], 
+                          include_brand: bool = True,
+                          multiline: bool = False,
+                          language: str = 'en') -> str:
+    """
+    Format product display with standardized format across module.
+    
+    Format: PT_CODE (LEGACY|NEW or NEW) | NAME | PKG_SIZE (BRAND)
+    
+    Examples:
+    - With legacy: VT001 (OLD001|NEW) | Vietape FP5309 Tape | 100m/roll (3M)
+    - Without legacy: VT001 (NEW) | Vietape FP5309 Tape | 100m/roll (3M)
+    - No package_size: VT001 (NEW) | Vietape FP5309 Tape (3M)
+    
+    Args:
+        row: Dict containing product fields (pt_code, legacy_pt_code, product_name/name, 
+             package_size, brand_name)
+        include_brand: Whether to include brand in output
+        multiline: If True, use <br/> for PDF/HTML output
+        language: 'vi' or 'en' for labels
+    
+    Returns:
+        Formatted product display string
+    """
+    # Extract fields with fallbacks
+    pt_code = row.get('pt_code', '') or ''
+    legacy_pt_code = row.get('legacy_pt_code', '') or ''
+    name = row.get('product_name') or row.get('name', '') or ''
+    package_size = row.get('package_size', '') or ''
+    brand_name = row.get('brand_name', '') or ''
+    
+    # Build PT code part: PT_CODE (LEGACY|NEW) or PT_CODE (NEW)
+    if pt_code:
+        if legacy_pt_code and legacy_pt_code != pt_code:
+            code_part = f"{pt_code} ({legacy_pt_code}|NEW)"
+        else:
+            code_part = f"{pt_code} (NEW)"
+    else:
+        code_part = ''
+    
+    # Build size and brand part
+    size_brand_parts = []
+    if package_size:
+        size_brand_parts.append(package_size)
+    if include_brand and brand_name:
+        size_brand_parts.append(f"({brand_name})")
+    
+    size_brand = ' '.join(size_brand_parts)
+    
+    # Combine parts
+    if multiline:
+        # For PDF/HTML - use line breaks
+        separator = '<br/>'
+        parts = []
+        if code_part:
+            label = 'Mã VT' if language == 'vi' else 'Code'
+            parts.append(f"<b>{label}:</b> {code_part}")
+        if name:
+            parts.append(f"<b>{'Tên' if language == 'vi' else 'Name'}:</b> {name}")
+        if size_brand:
+            parts.append(f"<b>{'Quy cách' if language == 'vi' else 'Spec'}:</b> {size_brand}")
+        return separator.join(parts) if parts else name
+    else:
+        # For table display - single line with pipe separator
+        parts = []
+        if code_part:
+            parts.append(code_part)
+        if name:
+            parts.append(name)
+        if size_brand:
+            parts.append(size_brand)
+        
+        return ' | '.join(parts) if parts else name
+
+
+def format_material_display(row: Dict[str, Any], 
+                           include_brand: bool = True,
+                           show_type: bool = False) -> str:
+    """
+    Format material display (input materials for production).
+    Uses same format as product display.
+    
+    Format: PT_CODE (LEGACY|NEW) | NAME | PKG_SIZE (BRAND) [TYPE]
+    
+    Args:
+        row: Dict containing material fields
+        include_brand: Whether to include brand
+        show_type: Whether to show material_type (RAW_MATERIAL, PACKAGING, etc)
+    
+    Returns:
+        Formatted material display string
+    """
+    base_display = format_product_display(row, include_brand=include_brand)
+    
+    if show_type:
+        material_type = row.get('material_type', '') or ''
+        if material_type:
+            type_icons = {
+                'RAW_MATERIAL': '🔧',
+                'PACKAGING': '📦',
+                'CONSUMABLE': '🔩'
+            }
+            icon = type_icons.get(material_type, '')
+            return f"{base_display} {icon}[{material_type}]"
+    
+    return base_display

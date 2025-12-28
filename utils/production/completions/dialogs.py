@@ -26,7 +26,7 @@ from .pdf_generator import ReceiptPDFGenerator
 from .common import (
     format_number, calculate_percentage, create_status_indicator,
     format_datetime, get_vietnam_now, get_user_audit_info,
-    CompletionConstants
+    CompletionConstants, format_product_display, format_material_display
 )
 
 logger = logging.getLogger(__name__)
@@ -60,15 +60,17 @@ def show_receipt_details_dialog(receipt_id: int):
     
     # Output info
     st.markdown("### 📦 Output Information")
+    
+    # Product display with new format
+    product_display = format_product_display(receipt)
+    st.info(f"**Product:** {product_display}")
+    
     col1, col2 = st.columns(2)
     
     with col1:
         st.write(f"• **Receipt No:** {receipt['receipt_no']}")
         st.write(f"• **Receipt Date:** {format_datetime(receipt['receipt_date'])}")
         st.write(f"• **Batch No:** {receipt['batch_no']}")
-        st.write(f"• **Product:** {receipt['product_name']}")
-        if receipt.get('pt_code'):
-            st.write(f"• **PT Code:** {receipt['pt_code']}")
     
     with col2:
         st.write(f"• **Quantity:** {format_number(receipt['quantity'], 2)} {receipt['uom']}")
@@ -111,14 +113,18 @@ def show_receipt_details_dialog(receipt_id: int):
         materials = queries.get_receipt_materials(receipt['manufacturing_order_id'])
         if not materials.empty:
             display_df = materials.copy()
+            
+            # Format material display with new format
+            display_df['material_display'] = display_df.apply(
+                lambda row: format_material_display(row.to_dict(), show_type=True), axis=1
+            )
             display_df['required_qty'] = display_df['required_qty'].apply(lambda x: format_number(x, 4))
             display_df['issued_qty'] = display_df['issued_qty'].apply(lambda x: format_number(x, 4))
             display_df['status'] = display_df['status'].apply(create_status_indicator)
             
             st.dataframe(
-                display_df[['material_name', 'pt_code', 'required_qty', 'issued_qty', 'uom', 'status']].rename(columns={
-                    'material_name': 'Material',
-                    'pt_code': 'PT Code',
+                display_df[['material_display', 'required_qty', 'issued_qty', 'uom', 'status']].rename(columns={
+                    'material_display': 'Material',
                     'required_qty': 'Required',
                     'issued_qty': 'Issued',
                     'uom': 'UOM',
@@ -200,10 +206,13 @@ def show_update_quality_dialog(receipt_id: int):
     # Header
     st.markdown(f"### Receipt: {receipt['receipt_no']}")
     
+    # Product display with new format
+    product_display = format_product_display(receipt)
+    st.info(f"**Product:** {product_display}")
+    
     # Receipt info cards
     col1, col2 = st.columns(2)
     with col1:
-        st.info(f"**Product:** {receipt['product_name']}")
         st.info(f"**Total Qty:** {format_number(total_qty, 2)} {receipt['uom']}")
     with col2:
         st.info(f"**Batch:** {receipt['batch_no']}")

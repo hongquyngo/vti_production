@@ -24,7 +24,7 @@ from .manager import CompletionManager
 from .common import (
     format_number, calculate_percentage, create_status_indicator,
     CompletionConstants, CompletionValidator, get_user_audit_info,
-    get_vietnam_today, generate_batch_no
+    get_vietnam_today, generate_batch_no, format_product_display
 )
 
 logger = logging.getLogger(__name__)
@@ -82,9 +82,9 @@ class CompletionForms:
             st.caption("Only IN_PROGRESS orders can have production completed")
             return
         
-        # Create order options
+        # Create order options with new product format
         order_options = {
-            f"{row['order_no']} | {row['pt_code']} - {row['product_name']}": row['id']
+            f"{row['order_no']} | {format_product_display(row.to_dict())}": row['id']
             for _, row in orders.iterrows()
         }
         
@@ -99,10 +99,14 @@ class CompletionForms:
         
         # Order Information
         st.markdown("### 📋 Order Information")
+        
+        # Product display with new format
+        product_display = format_product_display(order)
+        st.info(f"**Product:** {product_display}")
+        
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.info(f"**Product:** {order['product_name']}")
             st.info(f"**Planned:** {format_number(order['planned_qty'], 2)} {order['uom']}")
         
         with col2:
