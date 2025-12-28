@@ -1,9 +1,12 @@
 # utils/production/overview/page.py
 """
-Main UI orchestrator for Production Overview domain
-Renders overview tab with dashboard, filters, summary table, and drill-down panel
+Main UI orchestrator for Production Lifecycle Overview domain
+Renders overview tab with lifecycle table, stage-by-stage drill-down, and analytics
 
-Version: 1.0.0
+Version: 2.0.0
+Changes:
+- v2.0.0: Redesigned with lifecycle stages, stage-by-stage drill-down, Plotly analytics
+- v1.0.0: Initial version
 """
 
 import logging
@@ -20,7 +23,14 @@ from .common import (
     format_product_display, create_status_indicator, get_health_indicator,
     get_health_color, calculate_percentage, get_vietnam_today, get_vietnam_now,
     get_date_presets, get_preset_label, export_to_excel,
-    OverviewConstants, HealthStatus, calculate_days_variance, get_variance_display
+    OverviewConstants, HealthStatus, calculate_days_variance, get_variance_display,
+    # Lifecycle formatters
+    format_schedule_display, format_material_stage_display,
+    format_production_stage_display, format_qc_stage_display,
+    # Chart helpers
+    create_yield_by_product_chart, create_schedule_performance_chart,
+    create_material_efficiency_chart, create_health_summary_chart,
+    PLOTLY_AVAILABLE
 )
 
 logger = logging.getLogger(__name__)
@@ -33,8 +43,9 @@ def _init_session_state():
     defaults = {
         'overview_page': 1,
         'overview_selected_id': None,
+        'overview_selected_idx': None,
         'overview_date_preset': OverviewConstants.DATE_PRESET_THIS_MONTH,
-        'overview_detail_tab': 'overview',
+        'overview_show_analytics': True,
     }
     
     for key, value in defaults.items():
@@ -52,7 +63,6 @@ def _render_filter_bar() -> Dict[str, Any]:
         col1, col2, col3, col4, col5 = st.columns([1.5, 1, 1, 1, 1.5])
         
         with col1:
-            # Date preset selector
             preset_options = [
                 OverviewConstants.DATE_PRESET_THIS_MONTH,
                 OverviewConstants.DATE_PRESET_THIS_WEEK,
@@ -69,7 +79,6 @@ def _render_filter_bar() -> Dict[str, Any]:
             st.session_state.overview_date_preset = date_preset
         
         with col2:
-            # Determine date range based on preset
             if date_preset == OverviewConstants.DATE_PRESET_CUSTOM:
                 from_date = st.date_input(
                     "From",
@@ -131,10 +140,10 @@ def _render_filter_bar() -> Dict[str, Any]:
     }
 
 
-# ==================== Summary Table ====================
+# ==================== Lifecycle Table ====================
 
-def _render_summary_table(queries: OverviewQueries, filters: Dict[str, Any]):
-    """Render summary table with health indicators and progress"""
+def _render_lifecycle_table(queries: OverviewQueries, filters: Dict[str, Any]) -> Optional[pd.DataFrame]:
+    """Render lifecycle table with stages side-by-side"""
     page_size = OverviewConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.overview_page
     
@@ -154,9 +163,9 @@ def _render_summary_table(queries: OverviewQueries, filters: Dict[str, Any]):
         error_msg = queries.get_last_error() or "Cannot connect to database"
         st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
         st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
-        return
+        return None
     
-    # Get total count (without health filter for accurate pagination)
+    # Get total count
     total_count = queries.get_overview_count(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
@@ -167,7 +176,7 @@ def _render_summary_table(queries: OverviewQueries, filters: Dict[str, Any]):
     # Check for empty data
     if df.empty:
         st.info("📭 No orders found matching the filters")
-        return
+        return None
     
     # Initialize selected index
     if 'overview_selected_idx' not in st.session_state:
@@ -181,57 +190,88 @@ def _render_summary_table(queries: OverviewQueries, filters: Dict[str, Any]):
     if st.session_state.overview_selected_idx is not None and st.session_state.overview_selected_idx < len(display_df):
         display_df.loc[st.session_state.overview_selected_idx, 'Select'] = True
     
-    # Format columns for display
-    display_df['product_display'] = display_df.apply(format_product_display, axis=1)
-    display_df['status_display'] = display_df['status'].apply(create_status_indicator)
-    display_df['health_display'] = display_df['health_status'].apply(get_health_indicator)
-    display_df['progress_display'] = display_df.apply(
-        lambda x: f"{format_number(x['produced_qty'], 0)}/{format_number(x['planned_qty'], 0)} ({x['progress_percentage']}%)",
+    # Format columns for lifecycle stages
+    display_df['product_display'] = display_df.apply(
+        lambda r: f"{r['pt_code']} | {r['product_name']}" if r['pt_code'] else r['product_name'],
         axis=1
     )
-    display_df['material_display'] = display_df.apply(
-        lambda x: f"{x['material_percentage']}%" if x['material_percentage'] else "0%",
+    display_df['type_display'] = display_df['bom_type'].apply(
+        lambda x: {'CUTTING': '✂️', 'REPACKING': '📦', 'KITTING': '🔧'}.get(x, '📋') + f' {x}'
+    )
+    
+    # Planning stage
+    display_df['plan_qty_display'] = display_df.apply(
+        lambda r: f"{format_number(r['planned_qty'], 0)} {r['uom']}",
         axis=1
     )
-    display_df['quality_display'] = display_df.apply(
-        lambda x: f"{x['quality_percentage']}%" if pd.notna(x['quality_percentage']) else "-",
-        axis=1
-    )
-    display_df['schedule_display'] = display_df.apply(
-        lambda x: get_variance_display(x['schedule_variance_days']) if x['status'] == 'IN_PROGRESS' else "-",
+    display_df['schedule_display'] = display_df.apply(format_schedule_display, axis=1)
+    
+    # Material stage - show progress bar
+    display_df['material_pct'] = display_df['material_percentage'].fillna(0)
+    display_df['material_detail'] = display_df.apply(
+        lambda r: f"{format_number(r['total_material_issued'], 0)}/{format_number(r['total_material_required'], 0)}"
+                  + (f" ↩️{format_number(r['total_returned'], 0)}" if r['total_returned'] > 0 else ""),
         axis=1
     )
     
-    # Render table
+    # Production stage - show progress bar
+    display_df['prod_pct'] = display_df['progress_percentage'].fillna(0)
+    display_df['prod_detail'] = display_df.apply(
+        lambda r: f"{format_number(r['produced_qty'], 0)}/{format_number(r['planned_qty'], 0)} ({r['total_receipts']}📦)",
+        axis=1
+    )
+    
+    # QC stage
+    display_df['qc_display'] = display_df.apply(
+        lambda r: (f"✅ {r['quality_percentage']:.0f}%" if r['quality_percentage'] and r['quality_percentage'] >= 95
+                   else (f"⚠️ {r['quality_percentage']:.0f}%" if r['quality_percentage'] and r['quality_percentage'] >= 80
+                         else (f"❌ {r['quality_percentage']:.0f}%" if r['quality_percentage'] 
+                               else "-"))) if r['total_receipts'] > 0 else "-",
+        axis=1
+    )
+    
+    # Health & Status
+    display_df['health_display'] = display_df['health_status'].apply(get_health_indicator)
+    display_df['status_display'] = display_df['status'].apply(create_status_indicator)
+    
+    # Render table using data_editor
     edited_df = st.data_editor(
         display_df[[
-            'Select', 'order_no', 'product_display', 'progress_display',
-            'material_display', 'quality_display', 'schedule_display',
-            'status_display', 'health_display'
+            'Select', 'order_no', 'product_display',
+            'plan_qty_display', 'schedule_display',
+            'material_pct', 'material_detail',
+            'prod_pct', 'prod_detail',
+            'qc_display', 'health_display'
         ]].rename(columns={
-            'order_no': 'Order No',
+            'order_no': 'Order',
             'product_display': 'Product',
-            'progress_display': 'Progress',
-            'material_display': 'Material',
-            'quality_display': 'QC',
+            'plan_qty_display': 'Plan Qty',
             'schedule_display': 'Schedule',
-            'status_display': 'Status',
+            'material_pct': 'Mat %',
+            'material_detail': 'Mat Detail',
+            'prod_pct': 'Prod %',
+            'prod_detail': 'Prod Detail',
+            'qc_display': 'QC',
             'health_display': 'Health'
         }),
         use_container_width=True,
         hide_index=True,
-        disabled=['Order No', 'Product', 'Progress', 'Material', 'QC', 'Schedule', 'Status', 'Health'],
+        disabled=['Order', 'Product', 'Plan Qty', 'Schedule', 'Mat %', 'Mat Detail', 
+                  'Prod %', 'Prod Detail', 'QC', 'Health'],
         column_config={
-            'Select': st.column_config.CheckboxColumn(
-                '✓',
-                help='Select to view details',
-                default=False,
-                width='small'
-            ),
-            'Product': st.column_config.TextColumn('Product', width='large'),
-            'Progress': st.column_config.TextColumn('Progress', width='medium'),
+            'Select': st.column_config.CheckboxColumn('✓', help='Select to view details', width='small'),
+            'Order': st.column_config.TextColumn('Order', width='small'),
+            'Product': st.column_config.TextColumn('Product', width='medium'),
+            'Plan Qty': st.column_config.TextColumn('Plan', width='small'),
+            'Schedule': st.column_config.TextColumn('Schedule', width='small'),
+            'Mat %': st.column_config.ProgressColumn('Material', format='%.0f%%', min_value=0, max_value=100, width='small'),
+            'Mat Detail': st.column_config.TextColumn('Detail', width='small'),
+            'Prod %': st.column_config.ProgressColumn('Production', format='%.0f%%', min_value=0, max_value=100, width='small'),
+            'Prod Detail': st.column_config.TextColumn('Detail', width='small'),
+            'QC': st.column_config.TextColumn('QC', width='small'),
+            'Health': st.column_config.TextColumn('Health', width='small'),
         },
-        key="overview_table_editor"
+        key="lifecycle_table_editor"
     )
     
     # Handle selection
@@ -248,12 +288,12 @@ def _render_summary_table(queries: OverviewQueries, filters: Dict[str, Any]):
     else:
         st.session_state.overview_selected_idx = None
     
-    # Show detail panel if row selected
+    # Show drill-down if row selected
     if st.session_state.overview_selected_idx is not None:
         selected_order = df.iloc[st.session_state.overview_selected_idx]
-        _render_detail_panel(queries, selected_order)
+        _render_stage_drilldown(queries, selected_order)
     else:
-        st.info("💡 Tick checkbox to select an order and view details below")
+        st.info("💡 Tick checkbox to select an order and view lifecycle details below")
     
     # Pagination
     st.markdown("---")
@@ -282,234 +322,257 @@ def _render_summary_table(queries: OverviewQueries, filters: Dict[str, Any]):
     return df
 
 
-# ==================== Detail Panel ====================
+# ==================== Stage-by-Stage Drill-down ====================
 
-def _render_detail_panel(queries: OverviewQueries, order: pd.Series):
-    """Render inline detail panel for selected order"""
+def _render_stage_drilldown(queries: OverviewQueries, order: pd.Series):
+    """Render stage-by-stage drill-down panel (Option A)"""
     st.markdown("---")
     
     # Header
     col1, col2, col3 = st.columns([2, 1, 1])
-    
     with col1:
-        st.markdown(f"### 📋 {order['order_no']}")
+        st.markdown(f"### 📋 {order['order_no']} - Lifecycle Detail")
     with col2:
         st.markdown(f"**{create_status_indicator(order['status'])}**")
     with col3:
         st.markdown(f"**{get_health_indicator(order['health_status'])}**")
     
-    # Product info
-    st.caption(format_product_display(order))
+    # Product info line
+    st.caption(f"{order['pt_code']} | {order['product_name']} | {order.get('package_size', '')} | {order.get('brand_name', '')}")
     
-    # Detail tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "📦 Materials", "✅ Receipts", "📅 Timeline"])
+    st.markdown("---")
     
-    with tab1:
-        _render_overview_tab(order)
+    # Stage cards in columns
+    col1, col2, col3, col4 = st.columns(4)
     
-    with tab2:
-        _render_materials_tab(queries, order['id'])
-    
-    with tab3:
-        _render_receipts_tab(queries, order['id'])
-    
-    with tab4:
-        _render_timeline_tab(queries, order['id'])
-
-
-def _render_overview_tab(order: pd.Series):
-    """Render overview comparison tab"""
-    col1, col2 = st.columns(2)
-    
+    # Stage 1: Planning
     with col1:
-        st.markdown("#### 📋 Planned")
-        st.write(f"• **Quantity:** {format_number(order['planned_qty'], 0)} {order['uom']}")
-        st.write(f"• **Order Date:** {format_date(order['order_date'])}")
-        st.write(f"• **Scheduled End:** {format_date(order['scheduled_date'])}")
-        st.write(f"• **BOM:** {order['bom_name']} ({order['bom_type']})")
+        st.markdown("#### 📅 PLANNING")
+        _render_planning_stage(order)
     
+    # Stage 2: Material
     with col2:
-        st.markdown("#### ✅ Actual")
-        progress_pct = order['progress_percentage']
-        st.write(f"• **Produced:** {format_number(order['produced_qty'], 0)} {order['uom']} ({progress_pct}%)")
-        
-        if order['status'] == 'COMPLETED' and order['completion_date']:
-            st.write(f"• **Completed:** {format_date(order['completion_date'])} ✅")
-        elif order['status'] == 'IN_PROGRESS':
-            variance = order['schedule_variance_days']
-            variance_text = get_variance_display(variance)
-            variance_icon = "✅" if variance <= 0 else ("⚠️" if variance <= 2 else "🔴")
-            st.write(f"• **Schedule:** {variance_text} {variance_icon}")
+        st.markdown("#### 📦 MATERIAL")
+        _render_material_stage(queries, order)
+    
+    # Stage 3: Production
+    with col3:
+        st.markdown("#### 🏭 PRODUCTION")
+        _render_production_stage(queries, order)
+    
+    # Stage 4: QC
+    with col4:
+        st.markdown("#### ✅ QUALITY")
+        _render_qc_stage(queries, order)
+    
+    # Expandable details
+    st.markdown("---")
+    
+    with st.expander("📦 Material Details", expanded=False):
+        materials = queries.get_order_materials_detail(order['id'])
+        if not materials.empty:
+            st.dataframe(
+                materials[[
+                    'pt_code', 'material_name', 'required_qty', 'issued_qty', 
+                    'returned_qty', 'net_used', 'uom', 'status'
+                ]].rename(columns={
+                    'pt_code': 'Code',
+                    'material_name': 'Material',
+                    'required_qty': 'Required',
+                    'issued_qty': 'Issued',
+                    'returned_qty': 'Returned',
+                    'net_used': 'Net Used',
+                    'uom': 'UOM',
+                    'status': 'Status'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
         else:
-            st.write(f"• **Status:** {create_status_indicator(order['status'])}")
+            st.info("No materials found")
+    
+    with st.expander("📋 Receipt Details", expanded=False):
+        receipts = queries.get_order_receipts_detail(order['id'])
+        if not receipts.empty:
+            receipts['date_display'] = receipts['receipt_date'].apply(
+                lambda x: format_datetime_vn(x, '%d/%m %H:%M')
+            )
+            st.dataframe(
+                receipts[[
+                    'receipt_no', 'date_display', 'quantity', 'uom',
+                    'batch_no', 'quality_status', 'defect_type'
+                ]].rename(columns={
+                    'receipt_no': 'Receipt',
+                    'date_display': 'Date',
+                    'quantity': 'Qty',
+                    'uom': 'UOM',
+                    'batch_no': 'Batch',
+                    'quality_status': 'QC Status',
+                    'defect_type': 'Defect'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No receipts found")
+    
+    with st.expander("📅 Event Timeline", expanded=False):
+        timeline = queries.get_order_timeline(order['id'])
+        if not timeline.empty:
+            for _, event in timeline.iterrows():
+                icon = {'ISSUE': '📦', 'RETURN': '↩️', 'RECEIPT': '✅'}.get(event['event_type'], '📌')
+                event_date = format_datetime_vn(event['event_date'], '%d/%m %H:%M')
+                st.markdown(f"**{event_date}** | {icon} {event['document_no']} - {event['description']}")
+        else:
+            st.info("No events found")
+
+
+def _render_planning_stage(order: pd.Series):
+    """Render planning stage card"""
+    with st.container():
+        st.metric("Planned Qty", f"{format_number(order['planned_qty'], 0)} {order['uom']}")
+        st.write(f"**Order Date:** {format_date(order['order_date'])}")
+        st.write(f"**Scheduled:** {format_date(order['scheduled_date'])}")
         
-        # Quality summary
-        if order['total_receipts'] > 0:
-            quality_pct = order['quality_percentage'] or 0
-            st.write(f"• **QC Pass Rate:** {quality_pct}%")
-    
-    st.markdown("---")
-    
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        material_pct = order['material_percentage'] or 0
-        st.metric("Material Issued", f"{material_pct}%")
-    
-    with col2:
-        st.metric("Progress", f"{order['progress_percentage']}%")
-    
-    with col3:
-        quality_pct = order['quality_percentage']
-        st.metric("QC Pass Rate", f"{quality_pct}%" if pd.notna(quality_pct) else "-")
-    
-    with col4:
-        st.metric("Receipts", format_number(order['total_receipts'], 0))
-    
-    # Notes
-    if order.get('notes'):
-        st.markdown("---")
-        st.markdown("**📝 Notes:**")
-        st.text(order['notes'])
-
-
-def _render_materials_tab(queries: OverviewQueries, order_id: int):
-    """Render materials detail tab"""
-    materials = queries.get_order_materials_detail(order_id)
-    
-    if materials.empty:
-        st.info("No materials found for this order")
-        return
-    
-    # Summary
-    total_required = materials['required_qty'].sum()
-    total_issued = materials['issued_qty'].sum()
-    total_returned = materials['returned_qty'].sum()
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Required", format_number(total_required, 2))
-    with col2:
-        st.metric("Total Issued", format_number(total_issued, 2))
-    with col3:
-        st.metric("Total Returned", format_number(total_returned, 2))
-    with col4:
-        efficiency = calculate_percentage(total_issued - total_returned, total_required)
-        st.metric("Efficiency", f"{efficiency}%")
-    
-    st.markdown("---")
-    
-    # Materials table
-    display_df = materials.copy()
-    display_df['material_display'] = display_df.apply(
-        lambda x: f"{x['pt_code']} | {x['material_name']}" if x['pt_code'] else x['material_name'],
-        axis=1
-    )
-    display_df['status_display'] = display_df['status'].apply(create_status_indicator)
-    
-    st.dataframe(
-        display_df[[
-            'material_display', 'required_qty', 'issued_qty', 
-            'returned_qty', 'net_used', 'uom', 'issue_percentage', 'status_display'
-        ]].rename(columns={
-            'material_display': 'Material',
-            'required_qty': 'Required',
-            'issued_qty': 'Issued',
-            'returned_qty': 'Returned',
-            'net_used': 'Net Used',
-            'uom': 'UOM',
-            'issue_percentage': 'Issue %',
-            'status_display': 'Status'
-        }),
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-def _render_receipts_tab(queries: OverviewQueries, order_id: int):
-    """Render receipts detail tab"""
-    receipts = queries.get_order_receipts_detail(order_id)
-    
-    if receipts.empty:
-        st.info("No production receipts found for this order")
-        return
-    
-    # Summary
-    total_qty = receipts['quantity'].sum()
-    passed_qty = receipts[receipts['quality_status'] == 'PASSED']['quantity'].sum()
-    failed_qty = receipts[receipts['quality_status'] == 'FAILED']['quantity'].sum()
-    pending_qty = receipts[receipts['quality_status'] == 'PENDING']['quantity'].sum()
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Produced", format_number(total_qty, 0))
-    with col2:
-        st.metric("✅ Passed", format_number(passed_qty, 0))
-    with col3:
-        st.metric("❌ Failed", format_number(failed_qty, 0))
-    with col4:
-        st.metric("⏳ Pending", format_number(pending_qty, 0))
-    
-    st.markdown("---")
-    
-    # Receipts table
-    display_df = receipts.copy()
-    display_df['date_display'] = display_df['receipt_date'].apply(
-        lambda x: format_datetime_vn(x, '%d/%m %H:%M')
-    )
-    display_df['quality_display'] = display_df['quality_status'].apply(create_status_indicator)
-    
-    st.dataframe(
-        display_df[[
-            'receipt_no', 'date_display', 'quantity', 'uom',
-            'batch_no', 'quality_display', 'defect_type', 'warehouse_name'
-        ]].rename(columns={
-            'receipt_no': 'Receipt No',
-            'date_display': 'Date',
-            'quantity': 'Quantity',
-            'uom': 'UOM',
-            'batch_no': 'Batch',
-            'quality_display': 'Quality',
-            'defect_type': 'Defect',
-            'warehouse_name': 'Warehouse'
-        }),
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-def _render_timeline_tab(queries: OverviewQueries, order_id: int):
-    """Render timeline events tab"""
-    timeline = queries.get_order_timeline(order_id)
-    
-    if timeline.empty:
-        st.info("No events found for this order")
-        return
-    
-    # Event type icons
-    event_icons = {
-        'ISSUE': '📦',
-        'RETURN': '↩️',
-        'RECEIPT': '✅'
-    }
-    
-    # Render as timeline
-    for _, event in timeline.iterrows():
-        icon = event_icons.get(event['event_type'], '📌')
-        event_date = format_datetime_vn(event['event_date'], '%d/%m/%Y %H:%M')
+        if order['status'] == 'COMPLETED' and order.get('completion_date'):
+            st.write(f"**Completed:** {format_date(order['completion_date'])}")
+            st.success("✅ Done")
+        elif order['status'] == 'IN_PROGRESS':
+            variance = order.get('schedule_variance_days', 0) or 0
+            if variance <= 0:
+                st.success(f"✅ {get_variance_display(variance)}")
+            elif variance <= 2:
+                st.warning(f"⚠️ {get_variance_display(variance)}")
+            else:
+                st.error(f"🔴 {get_variance_display(variance)}")
+        elif order['status'] == 'CANCELLED':
+            st.error("❌ Cancelled")
+        else:
+            st.info(f"🕐 {order['status']}")
         
-        col1, col2, col3 = st.columns([1, 3, 1])
+        st.write(f"**BOM:** {order['bom_type']}")
+
+
+def _render_material_stage(queries: OverviewQueries, order: pd.Series):
+    """Render material stage card"""
+    with st.container():
+        issued = order.get('total_material_issued', 0) or 0
+        required = order.get('total_material_required', 0) or 0
+        returned = order.get('total_returned', 0) or 0
+        net_used = issued - returned
+        
+        pct = order.get('material_percentage', 0) or 0
+        st.metric("Material Issued", f"{pct:.0f}%")
+        
+        st.write(f"**Required:** {format_number(required, 0)}")
+        st.write(f"**Issued:** {format_number(issued, 0)}")
+        st.write(f"**Returned:** {format_number(returned, 0)}")
+        st.write(f"**Net Used:** {format_number(net_used, 0)}")
+        
+        if required > 0:
+            efficiency = (net_used / required) * 100
+            if efficiency <= 100:
+                st.success(f"✅ Efficiency: {efficiency:.1f}%")
+            else:
+                st.warning(f"⚠️ Over-used: {efficiency:.1f}%")
+        
+        st.caption(f"{order.get('material_count', 0)} materials")
+
+
+def _render_production_stage(queries: OverviewQueries, order: pd.Series):
+    """Render production stage card"""
+    with st.container():
+        produced = order.get('produced_qty', 0) or 0
+        planned = order.get('planned_qty', 0) or 0
+        
+        pct = order.get('progress_percentage', 0) or 0
+        st.metric("Progress", f"{pct:.0f}%")
+        
+        st.write(f"**Produced:** {format_number(produced, 0)} {order['uom']}")
+        st.write(f"**Planned:** {format_number(planned, 0)} {order['uom']}")
+        st.write(f"**Remaining:** {format_number(planned - produced, 0)} {order['uom']}")
+        
+        total_receipts = order.get('total_receipts', 0) or 0
+        st.write(f"**Receipts:** {total_receipts}")
+        
+        if planned > 0 and produced > 0:
+            yield_rate = (produced / planned) * 100
+            if yield_rate >= 95:
+                st.success(f"✅ Yield: {yield_rate:.1f}%")
+            elif yield_rate >= 80:
+                st.warning(f"⚠️ Yield: {yield_rate:.1f}%")
+            else:
+                st.error(f"❌ Yield: {yield_rate:.1f}%")
+
+
+def _render_qc_stage(queries: OverviewQueries, order: pd.Series):
+    """Render QC stage card"""
+    with st.container():
+        passed = order.get('passed_qty', 0) or 0
+        failed = order.get('failed_qty', 0) or 0
+        pending = order.get('pending_qty', 0) or 0
+        total = passed + failed + pending
+        
+        quality_pct = order.get('quality_percentage')
+        
+        if total > 0:
+            st.metric("Pass Rate", f"{quality_pct:.0f}%" if quality_pct else "N/A")
+            st.write(f"**✅ Passed:** {format_number(passed, 0)}")
+            st.write(f"**❌ Failed:** {format_number(failed, 0)}")
+            st.write(f"**⏳ Pending:** {format_number(pending, 0)}")
+            
+            if quality_pct is not None:
+                if quality_pct >= 95:
+                    st.success("✅ Excellent")
+                elif quality_pct >= 80:
+                    st.warning("⚠️ Acceptable")
+                else:
+                    st.error("❌ Below target")
+        else:
+            st.metric("Pass Rate", "-")
+            st.info("No QC data yet")
+
+
+# ==================== Analytics Section ====================
+
+def _render_analytics_section(df: pd.DataFrame):
+    """Render analytics section with Plotly charts"""
+    if not PLOTLY_AVAILABLE:
+        st.warning("📊 Charts require Plotly. Install with: `pip install plotly`")
+        return
+    
+    if df is None or df.empty:
+        return
+    
+    with st.expander("📈 Analytics", expanded=st.session_state.overview_show_analytics):
+        # Health summary bar
+        health_chart = create_health_summary_chart(df)
+        if health_chart:
+            st.plotly_chart(health_chart, use_container_width=True)
+        
+        # Three charts in columns
+        col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.markdown(f"**{event_date}**")
+            yield_chart = create_yield_by_product_chart(df)
+            if yield_chart:
+                st.plotly_chart(yield_chart, use_container_width=True)
+            else:
+                st.info("No yield data")
+        
         with col2:
-            st.markdown(f"{icon} **{event['document_no']}** - {event['description']}")
+            schedule_chart = create_schedule_performance_chart(df)
+            if schedule_chart:
+                st.plotly_chart(schedule_chart, use_container_width=True)
+            else:
+                st.info("No schedule data")
+        
         with col3:
-            st.markdown(f"`{event['status']}`")
-    
-    st.markdown("---")
-    st.caption(f"Total events: {len(timeline)}")
+            efficiency_chart = create_material_efficiency_chart(df)
+            if efficiency_chart:
+                st.plotly_chart(efficiency_chart, use_container_width=True)
+            else:
+                st.info("No efficiency data")
 
 
 # ==================== Action Bar ====================
@@ -528,14 +591,21 @@ def _render_action_bar(queries: OverviewQueries, filters: Dict[str, Any], data: 
             st.rerun()
     
     with col3:
-        # Show last updated timestamp
+        show_analytics = st.checkbox(
+            "📈 Analytics",
+            value=st.session_state.overview_show_analytics,
+            key="chk_show_analytics"
+        )
+        st.session_state.overview_show_analytics = show_analytics
+    
+    with col4:
         timestamp = get_vietnam_now().strftime('%H:%M:%S')
         st.markdown(f"<div style='text-align:center; color:gray; padding-top:8px'>🕐 {timestamp}</div>", 
                    unsafe_allow_html=True)
 
 
 def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
-    """Export overview to Excel"""
+    """Export overview to Excel with lifecycle data"""
     with st.spinner("Exporting..."):
         df = queries.get_production_overview(
             from_date=filters['from_date'],
@@ -543,35 +613,43 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             status=filters['status'],
             search=filters['search'],
             page=1,
-            page_size=10000  # Get all
+            page_size=10000
         )
         
         if df is None or df.empty:
             st.warning("No data to export")
             return
         
-        # Prepare export dataframe
+        # Prepare export dataframe with lifecycle stages
         export_df = df[[
-            'order_no', 'order_date', 'scheduled_date', 'status', 'priority',
-            'pt_code', 'product_name', 'package_size', 'brand_name',
-            'planned_qty', 'produced_qty', 'uom', 'progress_percentage',
-            'material_percentage', 'quality_percentage',
-            'total_receipts', 'health_status',
+            'order_no', 'order_date', 'scheduled_date', 'completion_date',
+            'status', 'priority', 'health_status',
+            'pt_code', 'product_name', 'package_size', 'brand_name', 'bom_type',
+            'planned_qty', 'uom',
+            'total_material_required', 'total_material_issued', 'total_returned', 'material_percentage',
+            'produced_qty', 'progress_percentage', 'total_receipts',
+            'passed_qty', 'failed_qty', 'pending_qty', 'quality_percentage',
             'source_warehouse', 'target_warehouse'
         ]].copy()
         
+        export_df['net_material_used'] = export_df['total_material_issued'] - export_df['total_returned']
+        export_df['remaining_qty'] = export_df['planned_qty'] - export_df['produced_qty']
+        
         export_df.columns = [
-            'Order No', 'Order Date', 'Scheduled Date', 'Status', 'Priority',
-            'PT Code', 'Product Name', 'Package Size', 'Brand',
-            'Planned Qty', 'Produced Qty', 'UOM', 'Progress %',
-            'Material %', 'QC %',
-            'Receipts', 'Health',
-            'Source WH', 'Target WH'
+            'Order No', 'Order Date', 'Scheduled Date', 'Completion Date',
+            'Status', 'Priority', 'Health',
+            'PT Code', 'Product Name', 'Package Size', 'Brand', 'BOM Type',
+            'Planned Qty', 'UOM',
+            'Mat Required', 'Mat Issued', 'Mat Returned', 'Mat %',
+            'Produced Qty', 'Progress %', 'Receipts',
+            'QC Passed', 'QC Failed', 'QC Pending', 'QC Pass %',
+            'Source WH', 'Target WH',
+            'Net Material Used', 'Remaining Qty'
         ]
         
         excel_data = export_to_excel(export_df)
         
-        filename = f"Production_Overview_{get_vietnam_today().strftime('%Y%m%d')}.xlsx"
+        filename = f"Production_Lifecycle_{get_vietnam_today().strftime('%Y%m%d')}.xlsx"
         
         st.download_button(
             label="💾 Download Excel",
@@ -586,7 +664,7 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
 
 def render_overview_tab():
     """
-    Main function to render the Overview tab
+    Main function to render the Production Lifecycle Overview tab
     Called from the main Production page
     """
     _init_session_state()
@@ -594,12 +672,13 @@ def render_overview_tab():
     queries = OverviewQueries()
     
     # Header
-    st.subheader("📊 Production Overview")
+    st.subheader("📊 Production Lifecycle Overview")
+    st.caption("Monitor complete production workflow: Planning → Material → Production → Quality")
     
-    # Filters (get date range for dashboard)
+    # Filters
     filters = _render_filter_bar()
     
-    # Dashboard with date range
+    # Dashboard KPIs
     render_dashboard(from_date=filters['from_date'], to_date=filters['to_date'])
     
     st.markdown("---")
@@ -607,5 +686,9 @@ def render_overview_tab():
     # Action bar
     _render_action_bar(queries, filters, None)
     
-    # Summary table with detail panel
-    _render_summary_table(queries, filters)
+    # Lifecycle table with drill-down
+    df = _render_lifecycle_table(queries, filters)
+    
+    # Analytics section
+    if df is not None and st.session_state.overview_show_analytics:
+        _render_analytics_section(df)

@@ -1,9 +1,12 @@
 # utils/production/overview/common.py
 """
 Common utilities for Production Overview domain
-Constants, health calculation, formatters, date utilities
+Constants, health calculation, formatters, date utilities, chart helpers
 
-Version: 1.0.0
+Version: 2.0.0
+Changes:
+- v2.0.0: Added chart helpers for Plotly, lifecycle formatters
+- v1.0.0: Initial version
 """
 
 import logging
@@ -15,6 +18,16 @@ from enum import Enum
 
 import pandas as pd
 import streamlit as st
+
+# Plotly for charts
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    logging.warning("Plotly not available. Charts will be disabled.")
 
 # Timezone support
 try:
@@ -475,3 +488,387 @@ def show_message(message: str, type: str = "info"):
     
     show_func = message_functions.get(type, st.info)
     show_func(message)
+
+
+# ==================== Lifecycle Display Formatters ====================
+
+def format_schedule_display(row) -> str:
+    """
+    Format schedule info for lifecycle table
+    Returns: "25→28 Dec\n✅ On time" or "25→28 Dec\n⚠️ +2d"
+    """
+    order_date = row.get('order_date')
+    scheduled_date = row.get('scheduled_date')
+    completion_date = row.get('completion_date')
+    status = row.get('status', '')
+    variance = row.get('schedule_variance_days', 0) or 0
+    
+    # Format dates
+    start = format_date(order_date, '%d-%b') if order_date else '?'
+    end = format_date(scheduled_date, '%d-%b') if scheduled_date else '?'
+    
+    date_range = f"{start} → {end}"
+    
+    # Status indicator
+    if status == 'COMPLETED':
+        if completion_date:
+            actual_end = format_date(completion_date, '%d-%b')
+            indicator = f"✅ Done {actual_end}"
+        else:
+            indicator = "✅ Completed"
+    elif status == 'CANCELLED':
+        indicator = "❌ Cancelled"
+    elif status in ['DRAFT', 'CONFIRMED']:
+        days_to_start = calculate_days_variance(order_date)
+        if days_to_start < 0:
+            indicator = f"🕐 Starts in {abs(days_to_start)}d"
+        else:
+            indicator = "🕐 Not started"
+    elif status == 'IN_PROGRESS':
+        if variance <= 0:
+            if variance == 0:
+                indicator = "✅ On time"
+            else:
+                indicator = f"✅ {abs(variance)}d ahead"
+        elif variance <= 2:
+            indicator = f"⚠️ +{variance}d"
+        else:
+            indicator = f"🔴 +{variance}d behind"
+    else:
+        indicator = ""
+    
+    return f"{date_range}\n{indicator}"
+
+
+def format_material_stage_display(row) -> str:
+    """
+    Format material stage info for lifecycle table
+    Returns: "████ 95%\n520/500 M\n↩️ 15 M"
+    """
+    issued = row.get('total_material_issued', 0) or 0
+    required = row.get('total_material_required', 0) or 0
+    returned = row.get('total_returned', 0) or 0
+    material_pct = row.get('material_percentage', 0) or 0
+    
+    # Progress bar (text-based)
+    filled = int(material_pct / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    
+    # Detail line
+    detail = f"{format_number(issued, 0)}/{format_number(required, 0)}"
+    
+    # Return line (if any)
+    return_line = f"↩️ {format_number(returned, 0)}" if returned > 0 else ""
+    
+    lines = [f"{bar} {material_pct:.0f}%", detail]
+    if return_line:
+        lines.append(return_line)
+    
+    return "\n".join(lines)
+
+
+def format_production_stage_display(row) -> str:
+    """
+    Format production stage info for lifecycle table
+    Returns: "████░ 80%\n800/1000 PCS\n📦 3 receipts"
+    """
+    produced = row.get('produced_qty', 0) or 0
+    planned = row.get('planned_qty', 0) or 0
+    progress_pct = row.get('progress_percentage', 0) or 0
+    total_receipts = row.get('total_receipts', 0) or 0
+    uom = row.get('uom', '')
+    status = row.get('status', '')
+    
+    # Progress bar (text-based)
+    filled = int(progress_pct / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    
+    # Detail line
+    detail = f"{format_number(produced, 0)}/{format_number(planned, 0)} {uom}"
+    
+    # Receipt line
+    if status in ['DRAFT', 'CONFIRMED']:
+        receipt_line = "Not started"
+    elif total_receipts > 0:
+        receipt_line = f"📦 {total_receipts} receipt{'s' if total_receipts > 1 else ''}"
+    else:
+        receipt_line = "📦 No receipts"
+    
+    return f"{bar} {progress_pct:.0f}%\n{detail}\n{receipt_line}"
+
+
+def format_qc_stage_display(row) -> str:
+    """
+    Format QC stage info for lifecycle table
+    Returns: "✅ 95%\nP:760 F:40"
+    """
+    passed = row.get('passed_qty', 0) or 0
+    failed = row.get('failed_qty', 0) or 0
+    pending = row.get('pending_qty', 0) or 0
+    quality_pct = row.get('quality_percentage')
+    total_receipts = row.get('total_receipts', 0) or 0
+    status = row.get('status', '')
+    
+    if status in ['DRAFT', 'CONFIRMED'] or total_receipts == 0:
+        return "-\nNo QC yet"
+    
+    # QC indicator
+    if quality_pct is None:
+        indicator = "⏳ Pending"
+        pct_display = ""
+    elif quality_pct >= 95:
+        indicator = "✅"
+        pct_display = f"{quality_pct:.0f}%"
+    elif quality_pct >= 80:
+        indicator = "⚠️"
+        pct_display = f"{quality_pct:.0f}%"
+    else:
+        indicator = "❌"
+        pct_display = f"{quality_pct:.0f}%"
+    
+    # Breakdown line
+    breakdown_parts = []
+    if passed > 0:
+        breakdown_parts.append(f"P:{format_number(passed, 0)}")
+    if failed > 0:
+        breakdown_parts.append(f"F:{format_number(failed, 0)}")
+    if pending > 0:
+        breakdown_parts.append(f"?:{format_number(pending, 0)}")
+    
+    breakdown = " ".join(breakdown_parts) if breakdown_parts else "-"
+    
+    return f"{indicator} {pct_display}\n{breakdown}"
+
+
+# ==================== Chart Helpers (Plotly) ====================
+
+def create_yield_by_product_chart(df: pd.DataFrame) -> Optional[go.Figure]:
+    """
+    Create bar chart showing yield rate by product
+    
+    Args:
+        df: DataFrame with product_name, yield_rate columns
+    
+    Returns:
+        Plotly figure or None if Plotly not available
+    """
+    if not PLOTLY_AVAILABLE or df.empty:
+        return None
+    
+    # Aggregate by product
+    product_yield = df.groupby('product_name').agg({
+        'produced_qty': 'sum',
+        'planned_qty': 'sum'
+    }).reset_index()
+    
+    product_yield['yield_rate'] = (
+        product_yield['produced_qty'] / product_yield['planned_qty'] * 100
+    ).round(1)
+    
+    # Sort by yield rate
+    product_yield = product_yield.sort_values('yield_rate', ascending=True).tail(10)
+    
+    # Create color based on yield
+    colors = product_yield['yield_rate'].apply(
+        lambda x: '#28a745' if x >= 95 else ('#ffc107' if x >= 80 else '#dc3545')
+    )
+    
+    fig = go.Figure(data=[
+        go.Bar(
+            x=product_yield['yield_rate'],
+            y=product_yield['product_name'],
+            orientation='h',
+            marker_color=colors,
+            text=product_yield['yield_rate'].apply(lambda x: f'{x:.1f}%'),
+            textposition='outside'
+        )
+    ])
+    
+    fig.update_layout(
+        title='Yield Rate by Product',
+        xaxis_title='Yield Rate (%)',
+        yaxis_title='',
+        height=300,
+        margin=dict(l=20, r=20, t=40, b=20),
+        xaxis=dict(range=[0, 120]),
+        showlegend=False
+    )
+    
+    return fig
+
+
+def create_schedule_performance_chart(df: pd.DataFrame) -> Optional[go.Figure]:
+    """
+    Create donut chart showing schedule performance
+    
+    Args:
+        df: DataFrame with schedule_variance_days, status columns
+    
+    Returns:
+        Plotly figure or None if Plotly not available
+    """
+    if not PLOTLY_AVAILABLE or df.empty:
+        return None
+    
+    # Filter to IN_PROGRESS and COMPLETED only
+    active_df = df[df['status'].isin(['IN_PROGRESS', 'COMPLETED'])]
+    
+    if active_df.empty:
+        return None
+    
+    # Categorize
+    on_time = len(active_df[active_df['schedule_variance_days'] <= 0])
+    slight_delay = len(active_df[(active_df['schedule_variance_days'] > 0) & 
+                                  (active_df['schedule_variance_days'] <= 2)])
+    delayed = len(active_df[active_df['schedule_variance_days'] > 2])
+    
+    labels = ['On Time / Ahead', 'Slight Delay (1-2d)', 'Delayed (>2d)']
+    values = [on_time, slight_delay, delayed]
+    colors = ['#28a745', '#ffc107', '#dc3545']
+    
+    # Filter out zeros
+    data = [(l, v, c) for l, v, c in zip(labels, values, colors) if v > 0]
+    if not data:
+        return None
+    
+    labels, values, colors = zip(*data)
+    
+    fig = go.Figure(data=[
+        go.Pie(
+            labels=labels,
+            values=values,
+            hole=0.5,
+            marker_colors=colors,
+            textinfo='value+percent',
+            textposition='outside'
+        )
+    ])
+    
+    fig.update_layout(
+        title='Schedule Performance',
+        height=300,
+        margin=dict(l=20, r=20, t=40, b=20),
+        showlegend=True,
+        legend=dict(orientation='h', yanchor='bottom', y=-0.2)
+    )
+    
+    return fig
+
+
+def create_material_efficiency_chart(df: pd.DataFrame) -> Optional[go.Figure]:
+    """
+    Create gauge/indicator chart for material efficiency
+    
+    Args:
+        df: DataFrame with material_percentage columns
+    
+    Returns:
+        Plotly figure or None if Plotly not available
+    """
+    if not PLOTLY_AVAILABLE or df.empty:
+        return None
+    
+    # Calculate average material efficiency for IN_PROGRESS/COMPLETED orders
+    active_df = df[df['status'].isin(['IN_PROGRESS', 'COMPLETED'])]
+    
+    if active_df.empty or active_df['material_percentage'].isna().all():
+        return None
+    
+    avg_efficiency = active_df['material_percentage'].mean()
+    
+    # Determine color
+    if avg_efficiency >= 95:
+        color = '#28a745'
+    elif avg_efficiency >= 80:
+        color = '#ffc107'
+    else:
+        color = '#dc3545'
+    
+    fig = go.Figure(data=[
+        go.Indicator(
+            mode="gauge+number",
+            value=avg_efficiency,
+            number={'suffix': '%', 'font': {'size': 40}},
+            gauge={
+                'axis': {'range': [0, 100]},
+                'bar': {'color': color},
+                'steps': [
+                    {'range': [0, 80], 'color': '#ffebee'},
+                    {'range': [80, 95], 'color': '#fff3e0'},
+                    {'range': [95, 100], 'color': '#e8f5e9'}
+                ],
+                'threshold': {
+                    'line': {'color': 'black', 'width': 2},
+                    'thickness': 0.75,
+                    'value': 95
+                }
+            },
+            title={'text': 'Avg Material Efficiency'}
+        )
+    ])
+    
+    fig.update_layout(
+        height=250,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    
+    return fig
+
+
+def create_health_summary_chart(df: pd.DataFrame) -> Optional[go.Figure]:
+    """
+    Create horizontal stacked bar showing health distribution
+    
+    Args:
+        df: DataFrame with health_status column
+    
+    Returns:
+        Plotly figure or None if Plotly not available
+    """
+    if not PLOTLY_AVAILABLE or df.empty:
+        return None
+    
+    # Count by health status
+    health_counts = df['health_status'].value_counts()
+    
+    on_track = health_counts.get('ON_TRACK', 0)
+    at_risk = health_counts.get('AT_RISK', 0)
+    delayed = health_counts.get('DELAYED', 0)
+    not_started = health_counts.get('NOT_STARTED', 0)
+    
+    total = on_track + at_risk + delayed + not_started
+    if total == 0:
+        return None
+    
+    fig = go.Figure()
+    
+    categories = [
+        ('On Track', on_track, '#28a745'),
+        ('At Risk', at_risk, '#ffc107'),
+        ('Delayed', delayed, '#dc3545'),
+        ('Not Started', not_started, '#6c757d')
+    ]
+    
+    for name, value, color in categories:
+        if value > 0:
+            fig.add_trace(go.Bar(
+                x=[value],
+                y=['Health'],
+                orientation='h',
+                name=name,
+                marker_color=color,
+                text=[f'{name}: {value}'],
+                textposition='inside'
+            ))
+    
+    fig.update_layout(
+        barmode='stack',
+        height=100,
+        margin=dict(l=20, r=20, t=10, b=10),
+        showlegend=True,
+        legend=dict(orientation='h', yanchor='top', y=-0.5),
+        xaxis=dict(showticklabels=False),
+        yaxis=dict(showticklabels=False)
+    )
+    
+    return fig

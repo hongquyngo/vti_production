@@ -3,7 +3,10 @@
 Database queries for Production Overview domain
 Complex aggregation queries joining MO, materials, receipts
 
-Version: 1.0.0
+Version: 2.0.0
+Changes:
+- v2.0.0: Added lifecycle stage queries, analytics data methods
+- v1.0.0: Initial version
 """
 
 import logging
