@@ -593,7 +593,7 @@ def _render_action_bar(queries: OverviewQueries, filters: Dict[str, Any], data: 
 
 
 def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
-    """Export overview to Excel with lifecycle data"""
+    """Export overview to Excel with lifecycle data and metadata"""
     with st.spinner("Exporting..."):
         df = queries.get_production_overview(
             from_date=filters['from_date'],
@@ -608,7 +608,7 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             st.warning("No data to export")
             return
         
-        # Prepare export dataframe with lifecycle stages
+        # Prepare main data dataframe with lifecycle stages
         export_df = df[[
             'order_no', 'order_date', 'scheduled_date', 'completion_date',
             'status', 'priority', 'health_status',
@@ -635,9 +635,92 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             'Net Material Used', 'Remaining Qty'
         ]
         
-        excel_data = export_to_excel(export_df)
+        # Create metadata dataframe
+        now = get_vietnam_now()
         
-        filename = f"Production_Lifecycle_{get_vietnam_today().strftime('%Y%m%d')}.xlsx"
+        # Get current user info (if available)
+        current_user = "Unknown"
+        if hasattr(st.session_state, 'user'):
+            user = st.session_state.user
+            if isinstance(user, dict):
+                current_user = user.get('name') or user.get('username') or user.get('email', 'Unknown')
+            elif hasattr(user, 'name'):
+                current_user = user.name
+        elif 'user_name' in st.session_state:
+            current_user = st.session_state.user_name
+        elif 'username' in st.session_state:
+            current_user = st.session_state.username
+        
+        # Build filter description
+        filter_descriptions = []
+        if filters.get('from_date'):
+            filter_descriptions.append(f"From: {format_date(filters['from_date'])}")
+        if filters.get('to_date'):
+            filter_descriptions.append(f"To: {format_date(filters['to_date'])}")
+        if filters.get('status'):
+            filter_descriptions.append(f"Status: {filters['status']}")
+        if filters.get('health'):
+            filter_descriptions.append(f"Health: {filters['health']}")
+        if filters.get('search'):
+            filter_descriptions.append(f"Search: {filters['search']}")
+        
+        filter_text = " | ".join(filter_descriptions) if filter_descriptions else "No filters applied"
+        
+        # Date preset description
+        preset_labels = {
+            OverviewConstants.DATE_PRESET_THIS_WEEK: "This Week",
+            OverviewConstants.DATE_PRESET_THIS_MONTH: "This Month",
+            OverviewConstants.DATE_PRESET_CUSTOM: "Custom Range",
+        }
+        date_preset = st.session_state.get('overview_date_preset', 'Unknown')
+        date_preset_label = preset_labels.get(date_preset, date_preset)
+        
+        metadata = [
+            ['Report Name', 'Production Lifecycle Overview'],
+            ['Export Date', now.strftime('%Y-%m-%d')],
+            ['Export Time', now.strftime('%H:%M:%S')],
+            ['Exported By', current_user],
+            ['', ''],
+            ['Filter Conditions', ''],
+            ['Date Preset', date_preset_label],
+            ['From Date', format_date(filters.get('from_date'))],
+            ['To Date', format_date(filters.get('to_date'))],
+            ['Status Filter', filters.get('status') or 'All'],
+            ['Health Filter', filters.get('health') or 'All'],
+            ['Search Keyword', filters.get('search') or '-'],
+            ['', ''],
+            ['Data Summary', ''],
+            ['Total Records', len(df)],
+            ['Total Planned Qty', format_number(df['planned_qty'].sum(), 0)],
+            ['Total Produced Qty', format_number(df['produced_qty'].sum(), 0)],
+            ['Avg Progress %', f"{df['progress_percentage'].mean():.1f}%"],
+            ['Avg Material %', f"{df['material_percentage'].mean():.1f}%"],
+            ['', ''],
+            ['Status Breakdown', ''],
+            ['Draft', len(df[df['status'] == 'DRAFT'])],
+            ['Confirmed', len(df[df['status'] == 'CONFIRMED'])],
+            ['In Progress', len(df[df['status'] == 'IN_PROGRESS'])],
+            ['Completed', len(df[df['status'] == 'COMPLETED'])],
+            ['Cancelled', len(df[df['status'] == 'CANCELLED'])],
+            ['', ''],
+            ['Health Breakdown', ''],
+            ['On Track', len(df[df['health_status'] == 'ON_TRACK'])],
+            ['At Risk', len(df[df['health_status'] == 'AT_RISK'])],
+            ['Delayed', len(df[df['health_status'] == 'DELAYED'])],
+            ['Not Started', len(df[df['health_status'] == 'NOT_STARTED'])],
+        ]
+        
+        metadata_df = pd.DataFrame(metadata, columns=['Field', 'Value'])
+        
+        # Export with multiple sheets
+        excel_data = export_to_excel({
+            'Lifecycle Data': export_df,
+            'Export Info': metadata_df
+        })
+        
+        # Filename with timestamp
+        timestamp = now.strftime('%Y%m%d_%H%M%S')
+        filename = f"Production_Lifecycle_{timestamp}.xlsx"
         
         st.download_button(
             label="💾 Download Excel",
