@@ -1,7 +1,11 @@
 # utils/bom/manager.py
 """
-Bill of Materials (BOM) Management - VERSION 2.5
+Bill of Materials (BOM) Management - VERSION 2.6
 Complete CRUD operations with creator info support
+
+Changes in v2.6:
+- Added deactivate_boms_for_product() method for Active BOM Conflict Resolution
+- Supports auto-deactivation of existing BOMs when activating new one
 
 Changes in v2.5:
 - Added get_where_used() method for Where Used Analysis
@@ -607,6 +611,51 @@ class BOMManager:
         except Exception as e:
             logger.error(f"Error updating BOM status: {e}")
             raise BOMException(f"Failed to update status: {str(e)}")
+    
+    def deactivate_boms_for_product(self, product_id: int, exclude_bom_id: int, user_id: int) -> int:
+        """
+        Deactivate all active BOMs for a product except the specified one
+        Used when activating a new BOM and user chooses to deactivate existing ones
+        
+        Args:
+            product_id: Product ID
+            exclude_bom_id: BOM ID to keep active (the one being activated)
+            user_id: User performing the action
+            
+        Returns:
+            Number of BOMs deactivated
+        """
+        try:
+            product_id = convert_to_native(product_id)
+            exclude_bom_id = convert_to_native(exclude_bom_id)
+            user_id = convert_to_native(user_id)
+            
+            query = text("""
+                UPDATE bom_headers
+                SET status = 'INACTIVE',
+                    updated_by = :user_id,
+                    updated_date = NOW()
+                WHERE product_id = :product_id
+                AND id != :exclude_bom_id
+                AND status = 'ACTIVE'
+                AND delete_flag = 0
+            """)
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {
+                    'product_id': product_id,
+                    'exclude_bom_id': exclude_bom_id,
+                    'user_id': user_id
+                })
+                conn.commit()
+                
+                deactivated_count = result.rowcount
+                logger.info(f"Deactivated {deactivated_count} BOMs for product {product_id}, keeping BOM {exclude_bom_id} active")
+                return deactivated_count
+        
+        except Exception as e:
+            logger.error(f"Error deactivating BOMs for product: {e}")
+            raise BOMException(f"Failed to deactivate BOMs: {str(e)}")
     
     def update_bom_header(self, bom_id: int, update_data: Dict, user_id: int):
         """Update BOM header fields"""

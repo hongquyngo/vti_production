@@ -1,7 +1,13 @@
 # pages/1___BOM.py
 """
-Bill of Materials (BOM) Management - VERSION 2.4
+Bill of Materials (BOM) Management - VERSION 2.5
 Clean single-page UI with dialog-driven workflows
+
+Changes in v2.5:
+- Added Multiple Active BOM Conflict detection (Phase 2)
+- New metric card showing conflict count
+- Visual badge (🔴 2 Active) for products with multiple active BOMs
+- Click on Conflicts metric filters to show only conflicting BOMs
 
 Changes in v2.4:
 - Updated product display format: code (legacy | N/A) | name | pkg (brand)
@@ -37,7 +43,10 @@ from utils.bom.common import (
     EditLevel,
     get_edit_level,
     # Duplicate detection
-    get_boms_with_duplicate_check
+    get_boms_with_duplicate_check,
+    # Phase 2: Multiple Active BOM Conflict Detection
+    get_boms_with_active_conflict_check,
+    get_products_with_multiple_active_boms
 )
 
 # Import dialogs
@@ -132,6 +141,9 @@ def render_header():
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🔄 Refresh", use_container_width=True):
             state.clear_cache()
+            # Also clear conflict cache
+            if 'conflict_products' in st.session_state:
+                del st.session_state['conflict_products']
             st.rerun()
     
     with col4:
@@ -154,17 +166,31 @@ def render_messages():
 
 
 def render_filters_and_metrics():
-    """Render filters and metrics"""
+    """Render filters and metrics with conflict detection"""
     st.markdown("### 🔍 Filters & Metrics")
     
-    # Metrics row
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Metrics row - 6 columns now including Conflicts
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     # Get BOMs for metrics (use cached if available)
     if 'all_boms' not in st.session_state:
         st.session_state['all_boms'] = bom_manager.get_boms()
     
     all_boms = st.session_state['all_boms']
+    
+    # Get conflict data (products with multiple active BOMs)
+    if 'conflict_products' not in st.session_state:
+        st.session_state['conflict_products'] = get_products_with_multiple_active_boms()
+    
+    conflict_products = st.session_state['conflict_products']
+    conflict_product_count = len(conflict_products)
+    
+    # Count BOMs affected by conflicts
+    conflict_bom_ids = set()
+    for product_id, boms in conflict_products.items():
+        for bom in boms:
+            conflict_bom_ids.add(bom['bom_id'])
+    conflict_bom_count = len(conflict_bom_ids)
     
     with col1:
         st.metric("Total BOMs", len(all_boms))
@@ -185,10 +211,34 @@ def render_filters_and_metrics():
         in_use_count = len(all_boms[all_boms['usage_count'] > 0])
         st.metric("In Use", in_use_count)
     
+    with col6:
+        # Conflicts metric with warning color
+        if conflict_product_count > 0:
+            st.metric(
+                "⚠️ Conflicts", 
+                conflict_bom_count,
+                delta=f"{conflict_product_count} products",
+                delta_color="inverse",
+                help=f"{conflict_product_count} product(s) have multiple active BOMs"
+            )
+        else:
+            st.metric(
+                "✅ Conflicts", 
+                0,
+                help="No products with multiple active BOMs"
+            )
+    
+    # Show conflict summary warning if any
+    if conflict_product_count > 0:
+        st.warning(
+            f"⚠️ **{conflict_product_count} product(s)** have multiple active BOMs "
+            f"({conflict_bom_count} BOMs affected). Use 'Show Conflicts Only' filter to review."
+        )
+    
     st.markdown("---")
     
-    # Filters
-    col1, col2, col3, col4 = st.columns(4)
+    # Filters row - 5 columns now
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
     
     with col1:
         filter_type = st.selectbox(
@@ -212,6 +262,14 @@ def render_filters_and_metrics():
         )
     
     with col4:
+        # New filter: Show conflicts only
+        filter_conflicts = st.checkbox(
+            "🔴 Conflicts Only",
+            key="filter_conflicts",
+            help="Show only BOMs where product has multiple active BOMs"
+        )
+    
+    with col5:
         st.markdown("<br>", unsafe_allow_html=True)
         search_clicked = st.button("🔍 Search", use_container_width=True)
     
@@ -223,6 +281,11 @@ def render_filters_and_metrics():
                 status=filter_status if filter_status != "All" else None,
                 search=filter_search if filter_search else None
             )
+            
+            # Apply conflict filter if enabled
+            if filter_conflicts and conflict_bom_ids:
+                filtered_boms = filtered_boms[filtered_boms['id'].isin(conflict_bom_ids)]
+            
             st.session_state['filtered_boms'] = filtered_boms
         except Exception as e:
             logger.error(f"Error filtering BOMs: {e}")
@@ -231,7 +294,7 @@ def render_filters_and_metrics():
 
 
 def render_bom_table():
-    """Render BOM table with actions and duplicate warnings"""
+    """Render BOM table with actions, duplicate warnings, and conflict badges"""
     st.markdown("### 📋 BOM List")
     
     # Get filtered BOMs
@@ -245,10 +308,16 @@ def render_bom_table():
     bom_ids = boms['id'].tolist()
     duplicates_map = get_boms_with_duplicate_check(bom_ids)
     
+    # Phase 2: Check for active BOM conflicts
+    conflicts_map = get_boms_with_active_conflict_check(bom_ids)
+    
     # Count BOMs with duplicates for summary
     boms_with_duplicates = sum(1 for v in duplicates_map.values() if v)
     
-    # Show summary warning if any BOMs have duplicates
+    # Count BOMs with conflicts (other active BOMs for same product)
+    boms_with_conflicts = sum(1 for v in conflicts_map.values() if v > 0)
+    
+    # Show summary warnings
     if boms_with_duplicates > 0:
         st.warning(f"⚠️ **Warning:** {boms_with_duplicates} BOM(s) have duplicate materials. See 'Warning' column for details.")
     
@@ -258,8 +327,22 @@ def render_bom_table():
     # Add duplicate warning column
     display_df['has_duplicate'] = display_df['id'].apply(lambda x: duplicates_map.get(x, False))
     display_df['warning_display'] = display_df['has_duplicate'].apply(
-        lambda x: "⚠️ Duplicate" if x else "✅"
+        lambda x: "⚠️ Dup" if x else ""
     )
+    
+    # Add conflict badge column (Phase 2)
+    def format_conflict_badge(row):
+        bom_id = row['id']
+        status = row['status']
+        conflict_count = conflicts_map.get(bom_id, 0)
+        
+        # Only show conflict badge for ACTIVE BOMs
+        if status == 'ACTIVE' and conflict_count > 0:
+            total_active = conflict_count + 1  # Include current BOM
+            return f"🔴 {total_active} Active"
+        return ""
+    
+    display_df['conflict_display'] = display_df.apply(format_conflict_badge, axis=1)
     
     # Format columns for display
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
@@ -293,11 +376,11 @@ def render_bom_table():
         lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else '-'
     )
     
-    # Select columns to display (added warning_display)
+    # Select columns to display (added conflict_display)
     display_columns = [
         'bom_code', 'bom_name', 'bom_type', 'product_display',
         'output_display', 'status_display', 'materials_display', 
-        'usage_display', 'warning_display', 'created_display'
+        'usage_display', 'conflict_display', 'warning_display', 'created_display'
     ]
     
     # Column configuration
@@ -308,9 +391,10 @@ def render_bom_table():
         "product_display": st.column_config.TextColumn("Output Product", width="large"),
         "output_display": st.column_config.TextColumn("Output", width="small"),
         "status_display": st.column_config.TextColumn("Status", width="small"),
-        "materials_display": st.column_config.TextColumn("Materials", width="small"),
+        "materials_display": st.column_config.TextColumn("Mat.", width="small"),
         "usage_display": st.column_config.TextColumn("Usage", width="small"),
-        "warning_display": st.column_config.TextColumn("Warning", width="small"),
+        "conflict_display": st.column_config.TextColumn("Conflict", width="small"),
+        "warning_display": st.column_config.TextColumn("Warn", width="small"),
         "created_display": st.column_config.TextColumn("Date", width="small"),
     }
     
@@ -335,6 +419,14 @@ def render_bom_table():
         
         # Action buttons for selected BOM
         st.markdown(f"### Actions for: **{selected_bom['bom_code']}** - {selected_bom['bom_name']}")
+        
+        # Show conflict warning if this BOM has conflicts (Phase 2)
+        conflict_count = conflicts_map.get(selected_bom_id, 0)
+        if selected_bom['status'] == 'ACTIVE' and conflict_count > 0:
+            st.error(
+                f"🔴 **Multiple Active BOMs Conflict:** This product has {conflict_count + 1} active BOMs. "
+                f"Click 'Status' to deactivate others or review."
+            )
         
         # Show duplicate warning if this BOM has duplicates
         if duplicates_map.get(selected_bom_id, False):
@@ -528,7 +620,7 @@ def render_footer():
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.caption("Manufacturing Module v2.4 - BOM Management | Unified Product Display")
+        st.caption("Manufacturing Module v2.5 - BOM Management | Multiple Active BOM Conflict Detection")
     
     with col2:
         st.caption(f"Session: {st.session_state.get('user_name', 'Guest')}")

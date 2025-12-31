@@ -1,7 +1,15 @@
 # utils/bom/common.py
 """
-Common utilities for BOM module - ENHANCED VERSION v2.2
-Formatting, UI helpers, product queries, and Edit Level system
+Common utilities for BOM module - ENHANCED VERSION v2.3
+Formatting, UI helpers, product queries, Edit Level system, and Active BOM Conflict Detection
+
+Changes in v2.3:
+- Added Active BOM Conflict Detection functions for Phase 1 & 2
+- get_active_boms_for_product(): Find active BOMs for a product
+- get_products_with_multiple_active_boms(): Dashboard conflict detection
+- get_boms_with_active_conflict_check(): Efficient batch check for BOM list badges
+- check_active_bom_conflict(): Pre-activation conflict check
+- render_active_bom_conflict_warning(): UI component for conflict resolution
 
 Changes in v2.2:
 - Changed legacy code display from "N/A" to "NEW" for products without legacy code
@@ -1263,3 +1271,259 @@ def render_duplicate_warning_section(duplicate_info: Dict[str, Any]):
             st.markdown("")
         
         st.info("💡 **Recommendation:** Remove duplicate materials to ensure BOM accuracy.")
+
+
+# ==================== Active BOM Conflict Detection ====================
+
+def get_active_boms_for_product(product_id: int, exclude_bom_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """
+    Get all active BOMs for a product
+    
+    Args:
+        product_id: Product ID to check
+        exclude_bom_id: BOM ID to exclude from results (e.g., current BOM being activated)
+        
+    Returns:
+        List of dicts with active BOM info: id, bom_code, bom_name, bom_type, usage_count, created_date
+    """
+    engine = get_db_engine()
+    
+    query = """
+        SELECT 
+            h.id,
+            h.bom_code,
+            h.bom_name,
+            h.bom_type,
+            h.created_date,
+            COALESCE(
+                (SELECT COUNT(*) FROM manufacturing_orders mo 
+                 WHERE mo.bom_header_id = h.id 
+                 AND mo.delete_flag = 0), 
+                0
+            ) as usage_count
+        FROM bom_headers h
+        WHERE h.product_id = %s
+        AND h.status = 'ACTIVE'
+        AND h.delete_flag = 0
+    """
+    
+    params = [product_id]
+    
+    if exclude_bom_id:
+        query += " AND h.id != %s"
+        params.append(exclude_bom_id)
+    
+    query += " ORDER BY h.created_date DESC"
+    
+    try:
+        df = pd.read_sql(query, engine, params=tuple(params))
+        return df.to_dict('records')
+    except Exception as e:
+        logger.error(f"Error getting active BOMs for product {product_id}: {e}")
+        return []
+
+
+def get_products_with_multiple_active_boms() -> Dict[int, List[Dict[str, Any]]]:
+    """
+    Get all products that have multiple active BOMs (conflict detection for dashboard)
+    
+    Returns:
+        Dict mapping product_id to list of active BOM info dicts
+    """
+    engine = get_db_engine()
+    
+    query = """
+        WITH active_bom_counts AS (
+            SELECT 
+                product_id,
+                COUNT(*) as active_count
+            FROM bom_headers
+            WHERE status = 'ACTIVE'
+            AND delete_flag = 0
+            GROUP BY product_id
+            HAVING COUNT(*) > 1
+        )
+        SELECT 
+            h.product_id,
+            h.id as bom_id,
+            h.bom_code,
+            h.bom_name,
+            h.bom_type,
+            h.created_date,
+            COALESCE(
+                (SELECT COUNT(*) FROM manufacturing_orders mo 
+                 WHERE mo.bom_header_id = h.id 
+                 AND mo.delete_flag = 0), 
+                0
+            ) as usage_count
+        FROM bom_headers h
+        JOIN active_bom_counts abc ON h.product_id = abc.product_id
+        WHERE h.status = 'ACTIVE'
+        AND h.delete_flag = 0
+        ORDER BY h.product_id, h.created_date DESC
+    """
+    
+    try:
+        df = pd.read_sql(query, engine)
+        
+        if df.empty:
+            return {}
+        
+        # Group by product_id
+        result = {}
+        for product_id in df['product_id'].unique():
+            product_boms = df[df['product_id'] == product_id]
+            result[int(product_id)] = product_boms.to_dict('records')
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error getting products with multiple active BOMs: {e}")
+        return {}
+
+
+def get_boms_with_active_conflict_check(bom_ids: List[int] = None) -> Dict[int, int]:
+    """
+    Check multiple BOMs for active conflicts efficiently (for dashboard badge)
+    
+    A BOM has a conflict if its product has multiple active BOMs.
+    
+    Args:
+        bom_ids: List of BOM IDs to check, or None for all BOMs
+        
+    Returns:
+        Dict mapping bom_id to number of other active BOMs for same product (0 = no conflict)
+    """
+    engine = get_db_engine()
+    
+    query = """
+        WITH product_active_counts AS (
+            SELECT 
+                product_id,
+                COUNT(*) as active_count
+            FROM bom_headers
+            WHERE status = 'ACTIVE'
+            AND delete_flag = 0
+            GROUP BY product_id
+        )
+        SELECT 
+            h.id as bom_id,
+            h.product_id,
+            COALESCE(pac.active_count, 0) as active_count
+        FROM bom_headers h
+        LEFT JOIN product_active_counts pac ON h.product_id = pac.product_id
+        WHERE h.delete_flag = 0
+        AND h.status = 'ACTIVE'
+    """
+    
+    try:
+        df = pd.read_sql(query, engine)
+        
+        if df.empty:
+            return {}
+        
+        # Map bom_id to conflict count (active_count - 1 = other active BOMs)
+        result = {}
+        for _, row in df.iterrows():
+            bom_id = int(row['bom_id'])
+            # Conflict count is total active BOMs for product minus this one
+            conflict_count = int(row['active_count']) - 1
+            if bom_ids is None or bom_id in bom_ids:
+                result[bom_id] = conflict_count
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error checking BOMs for active conflicts: {e}")
+        return {}
+
+
+def check_active_bom_conflict(product_id: int, exclude_bom_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Check if activating a BOM would create a conflict (multiple active BOMs for same product)
+    
+    Args:
+        product_id: Product ID of the BOM being activated
+        exclude_bom_id: BOM ID being activated (to exclude from check)
+        
+    Returns:
+        {
+            'has_conflict': bool,
+            'conflict_count': int,
+            'conflicting_boms': List[Dict] with bom info
+        }
+    """
+    active_boms = get_active_boms_for_product(product_id, exclude_bom_id)
+    
+    return {
+        'has_conflict': len(active_boms) > 0,
+        'conflict_count': len(active_boms),
+        'conflicting_boms': active_boms
+    }
+
+
+def render_active_bom_conflict_warning(conflict_info: Dict[str, Any], bom_info: Dict[str, Any]) -> Optional[str]:
+    """
+    Render active BOM conflict warning section in Streamlit UI
+    
+    Args:
+        conflict_info: Result from check_active_bom_conflict()
+        bom_info: Current BOM information
+        
+    Returns:
+        Selected action: 'deactivate_old', 'keep_both', or None if cancelled
+    """
+    import streamlit as st
+    
+    if not conflict_info.get('has_conflict'):
+        return 'no_conflict'
+    
+    conflicting_boms = conflict_info.get('conflicting_boms', [])
+    count = conflict_info.get('conflict_count', 0)
+    
+    st.warning(f"⚠️ **Warning: Product Already Has {count} Active BOM(s)**")
+    
+    st.markdown(f"**Product:** {bom_info.get('product_code', '')} - {bom_info.get('product_name', '')}")
+    
+    st.markdown("---")
+    st.markdown("**📋 Current Active BOM(s):**")
+    
+    for bom in conflicting_boms:
+        created_str = ""
+        if bom.get('created_date'):
+            try:
+                created_str = bom['created_date'].strftime('%d/%m/%Y')
+            except:
+                created_str = str(bom['created_date'])[:10]
+        
+        usage_count = bom.get('usage_count', 0)
+        usage_badge = f"🏭 {usage_count} orders" if usage_count > 0 else "No usage"
+        
+        st.info(
+            f"**{bom['bom_code']}** | {bom['bom_name']}\n\n"
+            f"Type: {bom['bom_type']} | Created: {created_str} | {usage_badge}"
+        )
+    
+    st.markdown("---")
+    st.markdown("**Choose an action:**")
+    
+    action = st.radio(
+        "Conflict Resolution",
+        options=['deactivate_old', 'keep_both', 'cancel'],
+        format_func=lambda x: {
+            'deactivate_old': '🔄 Deactivate old BOM(s) and activate this one (Recommended)',
+            'keep_both': '⚠️ Keep both active (Not recommended - may cause confusion)',
+            'cancel': '❌ Cancel - keep current state'
+        }.get(x, x),
+        key=f"conflict_action_{bom_info.get('id', 'new')}",
+        index=0  # Default to deactivate_old
+    )
+    
+    # Show additional warning for keep_both
+    if action == 'keep_both':
+        st.error(
+            "⚠️ **Warning:** Having multiple active BOMs for the same product may cause:\n"
+            "- Confusion when creating Manufacturing Orders\n"
+            "- Inconsistent costing calculations\n"
+            "- Difficulty tracking production history"
+        )
+    
+    return action
