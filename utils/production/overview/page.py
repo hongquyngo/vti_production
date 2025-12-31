@@ -654,36 +654,30 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             'Net Material Used', 'Remaining Qty'
         ]
         
-        # Prepare material details dataframe
+        # Prepare material details dataframe - separate columns for easy Excel filtering
         if not materials_df.empty:
-            # Create full product display format: PT_CODE (LEGACY or NEW) | NAME | PKG_SIZE (BRAND)
-            materials_df['material_display'] = materials_df.apply(
-                lambda r: format_product_display({
-                    'pt_code': r['pt_code'],
-                    'legacy_pt_code': r['legacy_pt_code'],
-                    'product_name': r['material_name'],
-                    'package_size': r['package_size'],
-                    'brand_name': r['brand_name']
-                }), axis=1
+            # Handle legacy code display (show "NEW" if empty)
+            materials_df['legacy_display'] = materials_df['legacy_pt_code'].apply(
+                lambda x: x if x and str(x).strip() else 'NEW'
             )
             
             materials_export_df = materials_df[[
                 'order_no', 'order_date', 'order_status',
-                'material_display',
+                'pt_code', 'legacy_display', 'material_name', 'package_size', 'brand_name',
                 'required_qty', 'issued_qty', 'returned_qty', 'net_used',
                 'uom', 'issue_percentage', 'material_status'
             ]].copy()
             
             materials_export_df.columns = [
                 'Order No', 'Order Date', 'Order Status',
-                'Material',
+                'PT Code', 'Legacy Code', 'Material Name', 'Package Size', 'Brand',
                 'Required', 'Issued', 'Returned', 'Net Used',
                 'UOM', 'Issue %', 'Material Status'
             ]
         else:
             materials_export_df = pd.DataFrame(columns=[
                 'Order No', 'Order Date', 'Order Status',
-                'Material',
+                'PT Code', 'Legacy Code', 'Material Name', 'Package Size', 'Brand',
                 'Required', 'Issued', 'Returned', 'Net Used',
                 'UOM', 'Issue %', 'Material Status'
             ])
