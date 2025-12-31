@@ -576,3 +576,108 @@ class OverviewQueries:
             'statuses': ['All', 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'],
             'health': ['All', 'ON_TRACK', 'AT_RISK', 'DELAYED', 'NOT_STARTED'],
         }
+    
+    # ==================== Export Queries ====================
+    
+    def get_materials_for_export(self,
+                                 from_date: Optional[date] = None,
+                                 to_date: Optional[date] = None,
+                                 status: Optional[str] = None,
+                                 search: Optional[str] = None) -> pd.DataFrame:
+        """
+        Get all materials for export with full product display format
+        
+        Args:
+            from_date: Filter orders from this date
+            to_date: Filter orders to this date
+            status: Filter by order status
+            search: Search in order_no, product name, pt_code
+            
+        Returns:
+            DataFrame with material details for all matching orders
+        """
+        query = """
+            SELECT 
+                mo.order_no,
+                mo.order_date,
+                mo.status as order_status,
+                
+                -- Material product info
+                p.pt_code,
+                p.legacy_pt_code,
+                p.name as material_name,
+                p.package_size,
+                br.brand_name,
+                
+                -- Material quantities
+                mom.required_qty,
+                mom.issued_qty,
+                COALESCE(ret.returned_qty, 0) as returned_qty,
+                (mom.issued_qty - COALESCE(ret.returned_qty, 0)) as net_used,
+                mom.uom,
+                mom.status as material_status,
+                
+                -- Calculated percentage
+                CASE 
+                    WHEN mom.required_qty > 0 
+                    THEN ROUND((mom.issued_qty / mom.required_qty) * 100, 1)
+                    ELSE 0 
+                END as issue_percentage
+                
+            FROM manufacturing_orders mo
+            JOIN manufacturing_order_materials mom ON mom.manufacturing_order_id = mo.id
+            JOIN products p ON mom.material_id = p.id
+            JOIN brands br ON p.brand_id = br.id
+            
+            -- Return aggregation per material
+            LEFT JOIN (
+                SELECT 
+                    mid.manufacturing_order_material_id,
+                    SUM(mrd.quantity) as returned_qty
+                FROM material_return_details mrd
+                JOIN material_issue_details mid ON mrd.original_issue_detail_id = mid.id
+                JOIN material_returns mr ON mrd.material_return_id = mr.id
+                WHERE mr.status = 'CONFIRMED'
+                GROUP BY mid.manufacturing_order_material_id
+            ) ret ON ret.manufacturing_order_material_id = mom.id
+            
+            -- Filter by main product (for search)
+            JOIN products mp ON mo.product_id = mp.id
+            
+            WHERE mo.delete_flag = 0
+        """
+        
+        params = []
+        
+        if from_date:
+            query += " AND DATE(mo.order_date) >= %s"
+            params.append(from_date)
+        
+        if to_date:
+            query += " AND DATE(mo.order_date) <= %s"
+            params.append(to_date)
+        
+        if status:
+            query += " AND mo.status = %s"
+            params.append(status)
+        
+        if search:
+            query += """
+                AND (
+                    mo.order_no LIKE %s 
+                    OR mp.name LIKE %s 
+                    OR mp.pt_code LIKE %s
+                    OR mp.legacy_pt_code LIKE %s
+                )
+            """
+            search_pattern = f"%{search}%"
+            params.extend([search_pattern] * 4)
+        
+        query += " ORDER BY mo.order_no, p.name"
+        
+        try:
+            df = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            return df
+        except Exception as e:
+            logger.error(f"Error getting materials for export: {e}")
+            return pd.DataFrame()

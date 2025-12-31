@@ -603,8 +603,9 @@ def _render_action_bar(queries: OverviewQueries, filters: Dict[str, Any], data: 
 
 
 def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
-    """Export overview to Excel with lifecycle data and metadata"""
+    """Export overview to Excel with lifecycle data, material details, and metadata"""
     with st.spinner("Exporting..."):
+        # Get lifecycle data
         df = queries.get_production_overview(
             from_date=filters['from_date'],
             to_date=filters['to_date'],
@@ -617,6 +618,14 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
         if df is None or df.empty:
             st.warning("No data to export")
             return
+        
+        # Get material details
+        materials_df = queries.get_materials_for_export(
+            from_date=filters['from_date'],
+            to_date=filters['to_date'],
+            status=filters['status'],
+            search=filters['search']
+        )
         
         # Prepare main data dataframe with lifecycle stages
         export_df = df[[
@@ -645,6 +654,40 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             'Net Material Used', 'Remaining Qty'
         ]
         
+        # Prepare material details dataframe
+        if not materials_df.empty:
+            # Create full product display format: PT_CODE (LEGACY or NEW) | NAME | PKG_SIZE (BRAND)
+            materials_df['material_display'] = materials_df.apply(
+                lambda r: format_product_display({
+                    'pt_code': r['pt_code'],
+                    'legacy_pt_code': r['legacy_pt_code'],
+                    'product_name': r['material_name'],
+                    'package_size': r['package_size'],
+                    'brand_name': r['brand_name']
+                }), axis=1
+            )
+            
+            materials_export_df = materials_df[[
+                'order_no', 'order_date', 'order_status',
+                'material_display',
+                'required_qty', 'issued_qty', 'returned_qty', 'net_used',
+                'uom', 'issue_percentage', 'material_status'
+            ]].copy()
+            
+            materials_export_df.columns = [
+                'Order No', 'Order Date', 'Order Status',
+                'Material',
+                'Required', 'Issued', 'Returned', 'Net Used',
+                'UOM', 'Issue %', 'Material Status'
+            ]
+        else:
+            materials_export_df = pd.DataFrame(columns=[
+                'Order No', 'Order Date', 'Order Status',
+                'Material',
+                'Required', 'Issued', 'Returned', 'Net Used',
+                'UOM', 'Issue %', 'Material Status'
+            ])
+        
         # Create metadata dataframe
         now = get_vietnam_now()
         
@@ -660,21 +703,6 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             current_user = st.session_state.user_name
         elif 'username' in st.session_state:
             current_user = st.session_state.username
-        
-        # Build filter description
-        filter_descriptions = []
-        if filters.get('from_date'):
-            filter_descriptions.append(f"From: {format_date(filters['from_date'])}")
-        if filters.get('to_date'):
-            filter_descriptions.append(f"To: {format_date(filters['to_date'])}")
-        if filters.get('status'):
-            filter_descriptions.append(f"Status: {filters['status']}")
-        if filters.get('health'):
-            filter_descriptions.append(f"Health: {filters['health']}")
-        if filters.get('search'):
-            filter_descriptions.append(f"Search: {filters['search']}")
-        
-        filter_text = " | ".join(filter_descriptions) if filter_descriptions else "No filters applied"
         
         # Date preset description
         preset_labels = {
@@ -700,7 +728,8 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             ['Search Keyword', filters.get('search') or '-'],
             ['', ''],
             ['Data Summary', ''],
-            ['Total Records', len(df)],
+            ['Total MO Records', len(df)],
+            ['Total Material Lines', len(materials_df)],
             ['Total Planned Qty', format_number(df['planned_qty'].sum(), 0)],
             ['Total Produced Qty', format_number(df['produced_qty'].sum(), 0)],
             ['Avg Progress %', f"{df['progress_percentage'].mean():.1f}%"],
@@ -722,10 +751,11 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
         
         metadata_df = pd.DataFrame(metadata, columns=['Field', 'Value'])
         
-        # Export with multiple sheets
+        # Export with multiple sheets (ordered: Export Info → Lifecycle Data → Material Details)
         excel_data = export_to_excel({
+            'Export Info': metadata_df,
             'Lifecycle Data': export_df,
-            'Export Info': metadata_df
+            'Material Details': materials_export_df
         })
         
         # Filename with timestamp
@@ -739,6 +769,108 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="download_overview_excel"
         )
+
+
+# ==================== Material Details Tab ====================
+
+def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, Any]):
+    """Render Material Details tab with full material information"""
+    
+    # Get material data
+    materials_df = queries.get_materials_for_export(
+        from_date=filters['from_date'],
+        to_date=filters['to_date'],
+        status=filters['status'],
+        search=filters['search']
+    )
+    
+    if materials_df is None or materials_df.empty:
+        st.info("📭 No material data found matching the filters")
+        return
+    
+    # Create full product display format
+    materials_df['material_display'] = materials_df.apply(
+        lambda r: format_product_display({
+            'pt_code': r['pt_code'],
+            'legacy_pt_code': r['legacy_pt_code'],
+            'product_name': r['material_name'],
+            'package_size': r['package_size'],
+            'brand_name': r['brand_name']
+        }), axis=1
+    )
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_orders = materials_df['order_no'].nunique()
+        st.metric("📋 Orders", format_number(total_orders, 0))
+    
+    with col2:
+        total_lines = len(materials_df)
+        st.metric("📦 Material Lines", format_number(total_lines, 0))
+    
+    with col3:
+        total_issued = materials_df['issued_qty'].sum()
+        total_required = materials_df['required_qty'].sum()
+        avg_issue_pct = (total_issued / total_required * 100) if total_required > 0 else 0
+        st.metric("📊 Avg Issue %", f"{avg_issue_pct:.1f}%")
+    
+    with col4:
+        total_returned = materials_df['returned_qty'].sum()
+        st.metric("↩️ Total Returned", format_number(total_returned, 0))
+    
+    st.markdown("---")
+    
+    # Prepare display dataframe
+    display_df = materials_df[[
+        'order_no', 'order_status', 'material_display',
+        'required_qty', 'issued_qty', 'returned_qty', 'net_used',
+        'uom', 'issue_percentage', 'material_status'
+    ]].copy()
+    
+    # Add issue progress for visual
+    display_df['issue_pct'] = display_df['issue_percentage'].fillna(0)
+    
+    # Status indicator
+    display_df['status_display'] = display_df['material_status'].apply(create_status_indicator)
+    
+    # Render table
+    st.dataframe(
+        display_df[[
+            'order_no', 'order_status', 'material_display',
+            'required_qty', 'issued_qty', 'returned_qty', 'net_used',
+            'uom', 'issue_pct', 'status_display'
+        ]].rename(columns={
+            'order_no': 'Order No',
+            'order_status': 'Order Status',
+            'material_display': 'Material',
+            'required_qty': 'Required',
+            'issued_qty': 'Issued',
+            'returned_qty': 'Returned',
+            'net_used': 'Net Used',
+            'uom': 'UOM',
+            'issue_pct': 'Issue %',
+            'status_display': 'Status'
+        }),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            'Order No': st.column_config.TextColumn('Order No', width='small'),
+            'Order Status': st.column_config.TextColumn('Order Status', width='small'),
+            'Material': st.column_config.TextColumn('Material', width='large'),
+            'Required': st.column_config.NumberColumn('Required', format='%.2f'),
+            'Issued': st.column_config.NumberColumn('Issued', format='%.2f'),
+            'Returned': st.column_config.NumberColumn('Returned', format='%.2f'),
+            'Net Used': st.column_config.NumberColumn('Net Used', format='%.2f'),
+            'UOM': st.column_config.TextColumn('UOM', width='small'),
+            'Issue %': st.column_config.ProgressColumn('Issue %', format='%.0f%%', min_value=0, max_value=100),
+            'Status': st.column_config.TextColumn('Status', width='small'),
+        }
+    )
+    
+    # Show record count
+    st.caption(f"Showing {len(display_df)} material lines from {total_orders} orders")
 
 
 # ==================== Main Render Function ====================
@@ -762,24 +894,32 @@ def render_overview_tab():
     # Dashboard KPIs + Status Breakdown
     render_dashboard(from_date=filters['from_date'], to_date=filters['to_date'])
     
-    # Analytics section - right after dashboard for better overview
-    # Get data for analytics (need to fetch here for charts)
-    analytics_df = queries.get_production_overview(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        status=filters['status'],
-        search=filters['search'],
-        page=1,
-        page_size=10000  # Get all for analytics
-    )
-    
-    if analytics_df is not None and not analytics_df.empty:
-        _render_analytics_section(analytics_df)
-    
     st.markdown("---")
     
     # Action bar
     _render_action_bar(queries, filters, None)
     
-    # Lifecycle table with drill-down
-    _render_lifecycle_table(queries, filters)
+    # Two tabs: Lifecycle Data | Material Details
+    tab_lifecycle, tab_materials = st.tabs(["📋 Lifecycle Data", "📦 Material Details"])
+    
+    with tab_lifecycle:
+        # Analytics section
+        analytics_df = queries.get_production_overview(
+            from_date=filters['from_date'],
+            to_date=filters['to_date'],
+            status=filters['status'],
+            search=filters['search'],
+            page=1,
+            page_size=10000
+        )
+        
+        if analytics_df is not None and not analytics_df.empty:
+            _render_analytics_section(analytics_df)
+        
+        st.markdown("---")
+        
+        # Lifecycle table with drill-down
+        _render_lifecycle_table(queries, filters)
+    
+    with tab_materials:
+        _render_material_details_tab(queries, filters)
