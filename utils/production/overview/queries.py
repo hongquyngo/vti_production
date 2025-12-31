@@ -656,6 +656,10 @@ class OverviewQueries:
                 mom.uom as material_uom,
                 mom.status as material_status,
                 
+                -- Issue/Return dates
+                iss.last_issue_date,
+                ret.last_return_date,
+                
                 -- Calculated percentage
                 CASE 
                     WHEN mom.required_qty > 0 
@@ -690,11 +694,23 @@ class OverviewQueries:
                 GROUP BY manufacturing_order_id
             ) rcpt ON rcpt.manufacturing_order_id = mo.id
             
-            -- Return aggregation per material
+            -- Issue aggregation per material (with last issue date)
             LEFT JOIN (
                 SELECT 
                     mid.manufacturing_order_material_id,
-                    SUM(mrd.quantity) as returned_qty
+                    MAX(mi.issue_date) as last_issue_date
+                FROM material_issue_details mid
+                JOIN material_issues mi ON mid.material_issue_id = mi.id
+                WHERE mi.status = 'CONFIRMED'
+                GROUP BY mid.manufacturing_order_material_id
+            ) iss ON iss.manufacturing_order_material_id = mom.id
+            
+            -- Return aggregation per material (with last return date)
+            LEFT JOIN (
+                SELECT 
+                    mid.manufacturing_order_material_id,
+                    SUM(mrd.quantity) as returned_qty,
+                    MAX(mr.return_date) as last_return_date
                 FROM material_return_details mrd
                 JOIN material_issue_details mid ON mrd.original_issue_detail_id = mid.id
                 JOIN material_returns mr ON mrd.material_return_id = mr.id

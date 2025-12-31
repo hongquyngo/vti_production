@@ -693,7 +693,8 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
                 'input_pt_code', 'input_legacy_display', 'input_material_name',
                 'input_package_size', 'input_brand',
                 # Input Material Quantities
-                'required_qty', 'issued_qty', 'returned_qty', 'net_used',
+                'required_qty', 'issued_qty', 'last_issue_date',
+                'returned_qty', 'last_return_date', 'net_used',
                 'material_uom', 'issue_percentage', 'material_status'
             ]].copy()
             
@@ -714,7 +715,8 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
                 'Input PT Code', 'Input Legacy Code', 'Input Material Name',
                 'Input Package Size', 'Input Brand',
                 # Input Material Quantities
-                'Required', 'Issued', 'Returned', 'Net Used',
+                'Required', 'Issued', 'Issue Date',
+                'Returned', 'Return Date', 'Net Used',
                 'Mat UOM', 'Issue %', 'Material Status'
             ]
         else:
@@ -728,7 +730,8 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
                 'Source WH', 'Target WH',
                 'Input PT Code', 'Input Legacy Code', 'Input Material Name',
                 'Input Package Size', 'Input Brand',
-                'Required', 'Issued', 'Returned', 'Net Used',
+                'Required', 'Issued', 'Issue Date',
+                'Returned', 'Return Date', 'Net Used',
                 'Mat UOM', 'Issue %', 'Material Status'
             ])
         
@@ -869,9 +872,18 @@ def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, An
     # Prepare display dataframe
     display_df = materials_df[[
         'order_no', 'order_status', 'material_display',
-        'required_qty', 'issued_qty', 'returned_qty', 'net_used',
+        'required_qty', 'issued_qty', 'last_issue_date',
+        'returned_qty', 'last_return_date', 'net_used',
         'material_uom', 'issue_percentage', 'material_status'
     ]].copy()
+    
+    # Format dates for display
+    display_df['issue_date_display'] = display_df['last_issue_date'].apply(
+        lambda x: format_datetime_vn(x, '%d/%m/%Y') if pd.notna(x) else '-'
+    )
+    display_df['return_date_display'] = display_df['last_return_date'].apply(
+        lambda x: format_datetime_vn(x, '%d/%m/%Y') if pd.notna(x) else '-'
+    )
     
     # Add issue progress for visual
     display_df['issue_pct'] = display_df['issue_percentage'].fillna(0)
@@ -883,7 +895,8 @@ def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, An
     st.dataframe(
         display_df[[
             'order_no', 'order_status', 'material_display',
-            'required_qty', 'issued_qty', 'returned_qty', 'net_used',
+            'required_qty', 'issued_qty', 'issue_date_display',
+            'returned_qty', 'return_date_display', 'net_used',
             'material_uom', 'issue_pct', 'status_display'
         ]].rename(columns={
             'order_no': 'Order No',
@@ -891,7 +904,9 @@ def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, An
             'material_display': 'Material',
             'required_qty': 'Required',
             'issued_qty': 'Issued',
+            'issue_date_display': 'Issue Date',
             'returned_qty': 'Returned',
+            'return_date_display': 'Return Date',
             'net_used': 'Net Used',
             'material_uom': 'UOM',
             'issue_pct': 'Issue %',
@@ -905,7 +920,9 @@ def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, An
             'Material': st.column_config.TextColumn('Material', width='large'),
             'Required': st.column_config.NumberColumn('Required', format='%.2f'),
             'Issued': st.column_config.NumberColumn('Issued', format='%.2f'),
+            'Issue Date': st.column_config.TextColumn('Issue Date', width='small'),
             'Returned': st.column_config.NumberColumn('Returned', format='%.2f'),
+            'Return Date': st.column_config.TextColumn('Return Date', width='small'),
             'Net Used': st.column_config.NumberColumn('Net Used', format='%.2f'),
             'UOM': st.column_config.TextColumn('UOM', width='small'),
             'Issue %': st.column_config.ProgressColumn('Issue %', format='%.0f%%', min_value=0, max_value=100),
