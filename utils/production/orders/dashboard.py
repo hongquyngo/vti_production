@@ -3,7 +3,9 @@
 Dashboard components for Orders domain
 Metrics display and summary statistics
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- v1.1.0: Added BOM conflict metric to dashboard
 """
 
 import logging
@@ -38,19 +40,38 @@ class OrderDashboard:
         """
         return self.queries.get_order_metrics(from_date, to_date)
     
+    def get_conflict_summary(self, from_date: Optional[date] = None,
+                            to_date: Optional[date] = None,
+                            active_only: bool = True) -> Dict[str, Any]:
+        """
+        Get BOM conflict summary
+        
+        Args:
+            from_date: Filter from date
+            to_date: Filter to date
+            active_only: If True, count only active BOMs for conflict
+            
+        Returns:
+            Dictionary with conflict summary
+        """
+        return self.queries.get_bom_conflict_summary(active_only, from_date, to_date)
+    
     def render(self, from_date: Optional[date] = None,
-              to_date: Optional[date] = None):
+              to_date: Optional[date] = None,
+              conflict_check_active_only: bool = True):
         """
         Render dashboard metrics section
         
         Args:
             from_date: Filter from date
             to_date: Filter to date
+            conflict_check_active_only: If True, count only active BOMs for conflict
         """
         metrics = self.get_metrics(from_date, to_date)
+        conflict_summary = self.get_conflict_summary(from_date, to_date, conflict_check_active_only)
         
-        # First row - Main metrics
-        col1, col2, col3, col4 = st.columns(4)
+        # First row - Main metrics (5 columns now including conflicts)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             st.metric(
@@ -87,6 +108,17 @@ class OrderDashboard:
                 help="Percentage of completed orders"
             )
         
+        with col5:
+            conflict_count = conflict_summary['total_conflict_orders']
+            delta_color = "inverse" if conflict_count > 0 else "off"
+            st.metric(
+                label="⚠️ BOM Conflicts",
+                value=format_number(conflict_count, 0),
+                delta=f"{conflict_summary['affected_products']} products" if conflict_count > 0 else None,
+                delta_color=delta_color,
+                help="Orders with multiple active BOMs for the same product"
+            )
+        
         # Optional: Show status breakdown in expander
         with st.expander("📊 Status Breakdown", expanded=False):
             col1, col2, col3, col4, col5 = st.columns(5)
@@ -101,16 +133,39 @@ class OrderDashboard:
                 st.metric("✔️ Completed", metrics['completed_count'])
             with col5:
                 st.metric("❌ Cancelled", metrics['cancelled_count'])
+            
+            # Show conflict breakdown if any
+            if conflict_count > 0:
+                st.markdown("---")
+                st.markdown("**⚠️ Conflicts by Status:**")
+                conflict_by_status = conflict_summary['conflict_by_status']
+                
+                cols = st.columns(4)
+                status_labels = [
+                    ("📝 Draft", conflict_by_status['DRAFT']),
+                    ("✅ Confirmed", conflict_by_status['CONFIRMED']),
+                    ("🔄 In Progress", conflict_by_status['IN_PROGRESS']),
+                    ("✔️ Completed", conflict_by_status['COMPLETED'])
+                ]
+                
+                for col, (label, count) in zip(cols, status_labels):
+                    with col:
+                        if count > 0:
+                            st.warning(f"{label}: {count}")
+                        else:
+                            st.caption(f"{label}: {count}")
 
 
 def render_dashboard(from_date: Optional[date] = None,
-                    to_date: Optional[date] = None):
+                    to_date: Optional[date] = None,
+                    conflict_check_active_only: bool = True):
     """
     Convenience function to render order dashboard
     
     Args:
         from_date: Filter from date
         to_date: Filter to date
+        conflict_check_active_only: If True, count only active BOMs for conflict
     """
     dashboard = OrderDashboard()
-    dashboard.render(from_date, to_date)
+    dashboard.render(from_date, to_date, conflict_check_active_only)

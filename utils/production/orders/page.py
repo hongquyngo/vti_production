@@ -3,8 +3,13 @@
 Main UI orchestrator for Orders domain
 Renders the Orders tab with dashboard, filters, list, and actions
 
-Version: 1.1.0
+Version: 1.2.0
 Changes:
+- v1.2.0: Added BOM conflict detection and warning
+          + Conflict warning banner at top
+          + 'Conflicts Only' filter checkbox
+          + 'Issues' column in order table showing BOM conflict count
+          + Toggle for checking active BOMs only vs all BOMs
 - v1.1.0: Enhanced search placeholder with help tooltip showing all searchable fields
 """
 
@@ -41,6 +46,8 @@ def _init_session_state():
         'orders_page': 1,
         'orders_view': 'list',  # 'list' or 'create'
         'orders_selected_id': None,
+        'orders_conflicts_only': False,
+        'orders_conflict_check_active_only': True,  # Default: check active BOMs only
     }
     
     for key, value in defaults.items():
@@ -63,6 +70,7 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
     default_from = (default_to.replace(day=1) - timedelta(days=1)).replace(day=1)
     
     with st.expander("🔍 Filters", expanded=False):
+        # Row 1: Main filters
         col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 2])
         
         with col1:
@@ -108,6 +116,28 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                 key="order_filter_search",
                 help="Search by: Order No, Product Name/Code, Package Size, Legacy Code, BOM Name/Code, Brand, Notes, Creator Name"
             )
+        
+        # Row 2: Conflict filters
+        st.markdown("---")
+        col1, col2, col3 = st.columns([1, 1, 2])
+        
+        with col1:
+            conflicts_only = st.checkbox(
+                "🔴 Conflicts Only",
+                value=st.session_state.get('orders_conflicts_only', False),
+                key="order_filter_conflicts_only",
+                help="Show only orders with BOM conflicts (multiple active BOMs for same product)"
+            )
+            st.session_state['orders_conflicts_only'] = conflicts_only
+        
+        with col2:
+            conflict_check_active_only = st.checkbox(
+                "Check Active BOMs Only",
+                value=st.session_state.get('orders_conflict_check_active_only', True),
+                key="order_filter_conflict_check_active",
+                help="If checked, count only ACTIVE BOMs for conflict detection. If unchecked, count ALL BOMs."
+            )
+            st.session_state['orders_conflict_check_active_only'] = conflict_check_active_only
     
     return {
         'status': status if status != "All" else None,
@@ -115,18 +145,43 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
         'priority': priority if priority != "All" else None,
         'from_date': from_date,
         'to_date': to_date,
-        'search': search if search else None
+        'search': search if search else None,
+        'conflicts_only': conflicts_only,
+        'conflict_check_active_only': conflict_check_active_only
     }
 
 
 # ==================== Order List ====================
 
+def _render_conflict_warning(queries: OrderQueries, filters: Dict[str, Any]):
+    """Render BOM conflict warning banner if there are conflicts"""
+    conflict_summary = queries.get_bom_conflict_summary(
+        active_only=filters.get('conflict_check_active_only', True),
+        from_date=filters.get('from_date'),
+        to_date=filters.get('to_date')
+    )
+    
+    conflict_count = conflict_summary['total_conflict_orders']
+    affected_products = conflict_summary['affected_products']
+    
+    if conflict_count > 0:
+        st.warning(
+            f"⚠️ **Warning:** {conflict_count} order(s) have BOM conflicts "
+            f"({affected_products} product(s) affected). "
+            f"Use '🔴 Conflicts Only' filter to review."
+        )
+
+
 def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render order list with single row selection"""
+    """Render order list with single row selection and conflict indicators"""
     page_size = OrderConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.orders_page
     
-    # Get orders
+    # Get conflict filter options
+    conflicts_only = filters.get('conflicts_only', False)
+    conflict_check_active_only = filters.get('conflict_check_active_only', True)
+    
+    # Get orders with conflict count
     orders = queries.get_orders(
         status=filters['status'],
         order_type=filters['order_type'],
@@ -134,6 +189,8 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         from_date=filters['from_date'],
         to_date=filters['to_date'],
         search=filters['search'],
+        conflicts_only=conflicts_only,
+        conflict_check_active_only=conflict_check_active_only,
         page=page,
         page_size=page_size
     )
@@ -151,12 +208,17 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         priority=filters['priority'],
         from_date=filters['from_date'],
         to_date=filters['to_date'],
-        search=filters['search']
+        search=filters['search'],
+        conflicts_only=conflicts_only,
+        conflict_check_active_only=conflict_check_active_only
     )
     
     # Check for empty data (returns empty DataFrame)
     if orders.empty:
-        st.info("📭 No orders found matching the filters")
+        if conflicts_only:
+            st.success("✅ No orders with BOM conflicts found!")
+        else:
+            st.info("📭 No orders found matching the filters")
         return
     
     # Initialize selected index in session state
@@ -182,11 +244,20 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         lambda x: format_datetime_vn(x, '%d/%m/%Y') if x else ''
     )
     
+    # Issues column - show BOM conflict count if > 1
+    def format_issues(row):
+        conflict_count = row.get('bom_conflict_count', 1)
+        if conflict_count > 1:
+            return f"🔴 {conflict_count}"
+        return "-"
+    
+    display_df['issues'] = display_df.apply(format_issues, axis=1)
+    
     # Create editable dataframe with selection
     edited_df = st.data_editor(
         display_df[[
             'Select', 'order_no', 'product_display', 'progress', 
-            'status_display', 'priority_display', 'scheduled',
+            'status_display', 'priority_display', 'issues', 'scheduled',
             'warehouse_name', 'target_warehouse_name'
         ]].rename(columns={
             'order_no': 'Order No',
@@ -194,18 +265,24 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
             'progress': 'Progress',
             'status_display': 'Status',
             'priority_display': 'Priority',
+            'issues': 'Issues',
             'scheduled': 'Scheduled',
             'warehouse_name': 'Source',
             'target_warehouse_name': 'Target'
         }),
         use_container_width=True,
         hide_index=True,
-        disabled=['Order No', 'Product', 'Progress', 'Status', 'Priority', 'Scheduled', 'Source', 'Target'],
+        disabled=['Order No', 'Product', 'Progress', 'Status', 'Priority', 'Issues', 'Scheduled', 'Source', 'Target'],
         column_config={
             'Select': st.column_config.CheckboxColumn(
                 '✓',
                 help='Select row to perform actions',
                 default=False,
+                width='small'
+            ),
+            'Issues': st.column_config.TextColumn(
+                'Issues',
+                help='🔴 N = Product has N active BOMs (conflict)',
                 width='small'
             )
         },
@@ -234,9 +311,15 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         order_id = selected_order['id']
         order_no = selected_order['order_no']
         status = selected_order['status']
+        bom_conflict_count = selected_order.get('bom_conflict_count', 1)
         
         st.markdown("---")
-        st.markdown(f"**Selected:** `{order_no}` | Status: {create_status_indicator(status)} | {selected_order['product_name']}")
+        
+        # Show selected order info with conflict warning if applicable
+        selected_info = f"**Selected:** `{order_no}` | Status: {create_status_indicator(status)} | {selected_order['product_name']}"
+        if bom_conflict_count > 1:
+            selected_info += f" | ⚠️ **BOM Conflict ({bom_conflict_count} active BOMs)**"
+        st.markdown(selected_info)
         
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         
@@ -415,9 +498,14 @@ def render_orders_tab():
     st.subheader("📋 Production Orders")
     
     # Render components
-    render_dashboard()
+    # Get conflict check option from session state
+    conflict_check_active_only = st.session_state.get('orders_conflict_check_active_only', True)
+    render_dashboard(conflict_check_active_only=conflict_check_active_only)
 
     filters = _render_filter_bar(queries)
+    
+    # Render BOM conflict warning banner
+    _render_conflict_warning(queries, filters)
 
     _render_action_bar(queries, filters)
 

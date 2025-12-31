@@ -3,8 +3,14 @@
 Form components for Orders domain
 Create and Edit order forms
 
-Version: 2.1.0
+Version: 3.0.0
 Changes:
+- v3.0.0: Refactored Create Order flow to Product-first selection
+          + Step 1: Select Product (with BOM conflict blocking)
+          + Step 2: Select BOM (only BOMs for selected product)
+          + Step 3: Order Details
+          + Step 4: Material Availability Check
+          + Block order creation if product has multiple active BOMs
 - v2.1.0: Added alternative materials display in Material Availability Check (Step 3)
           Shows alternatives for PARTIAL/INSUFFICIENT primary materials
 - v2.0.1: Added st.form() to prevent unnecessary reruns in Create form (Step 2)
@@ -41,29 +47,31 @@ class OrderForms:
     # ==================== Create Order Form ====================
     
     def render_create_form(self):
-        """Render create new order form"""
+        """Render create new order form with Product-first selection"""
         st.subheader("➕ Create New Production Order")
         
-        # Step 1: Select BOM (outside form - needs to reload materials)
-        st.markdown("### 1️⃣ Select BOM")
+        # ==================== STEP 1: SELECT PRODUCT ====================
+        st.markdown("### 1️⃣ Select Product")
         
-        bom_list = self.queries.get_active_boms()
+        # Get products with active BOMs
+        products_df = self.queries.get_products_with_active_boms()
         
-        if bom_list.empty:
-            st.error("❌ No active BOMs available. Please create a BOM first.")
+        if products_df.empty:
+            st.error("❌ No products with active BOMs available. Please create a BOM first.")
             return
         
-        # Create BOM options with unified format
-        def format_bom_option(row) -> str:
-            """Format: BOM_NAME | PT_CODE (LEGACY) | PRODUCT_NAME | PKG_SIZE (BRAND) (TYPE)"""
+        # Format product options
+        def format_product_option(row) -> str:
+            """Format: PT_CODE (LEGACY) | PRODUCT_NAME | PKG_SIZE (BRAND)"""
             pt_code = row.get('pt_code', '') or ''
             legacy = row.get('legacy_pt_code', '') or ''
             legacy_display = legacy if legacy else 'NEW'
             name = row.get('product_name', '')
             pkg = row.get('package_size', '') or ''
             brand = row.get('brand_name', '') or ''
+            active_count = row.get('active_bom_count', 0)
             
-            parts = [row['bom_name']]
+            parts = []
             if pt_code:
                 parts.append(f"{pt_code} ({legacy_display})")
             parts.append(name)
@@ -74,11 +82,115 @@ class OrderForms:
                 if size_brand:
                     parts.append(size_brand)
             
-            return f"{' | '.join(parts)} [{row['bom_type']}]"
+            # Add BOM count indicator if multiple
+            result = " | ".join(parts)
+            if active_count > 1:
+                result += f" ⚠️ [{active_count} BOMs]"
+            
+            return result
+        
+        product_options = {
+            format_product_option(row): row['product_id']
+            for _, row in products_df.iterrows()
+        }
+        
+        # Search box for product
+        search_product = st.text_input(
+            "🔍 Search Product",
+            placeholder="Search by code, name, brand...",
+            key="create_order_product_search"
+        )
+        
+        # Filter product options based on search
+        filtered_options = product_options
+        if search_product:
+            search_lower = search_product.lower()
+            filtered_options = {
+                k: v for k, v in product_options.items()
+                if search_lower in k.lower()
+            }
+        
+        if not filtered_options:
+            st.warning("⚠️ No products match your search")
+            return
+        
+        selected_product_label = st.selectbox(
+            "Select Product",
+            options=list(filtered_options.keys()),
+            key="create_order_product"
+        )
+        
+        selected_product_id = filtered_options[selected_product_label]
+        
+        # Get product info and check for conflicts
+        product_row = products_df[products_df['product_id'] == selected_product_id].iloc[0]
+        active_bom_count = product_row['active_bom_count']
+        total_bom_count = product_row['total_bom_count']
+        
+        # Show product info
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.info(f"**PT Code:** {product_row['pt_code'] or 'N/A'}")
+        with col2:
+            st.info(f"**Brand:** {product_row['brand_name'] or 'N/A'}")
+        with col3:
+            st.info(f"**Package:** {product_row['package_size'] or 'N/A'}")
+        
+        # ==================== BOM CONFLICT CHECK (BLOCKING) ====================
+        if active_bom_count > 1:
+            st.error(f"""
+            🚫 **Cannot Create Order - BOM Conflict Detected!**
+            
+            This product has **{active_bom_count} active BOMs** (total: {total_bom_count}).
+            
+            **Action Required:**
+            1. Go to BOM Management
+            2. Review the BOMs for this product
+            3. Set only ONE BOM as ACTIVE
+            4. Return here to create the order
+            
+            ⚠️ Orders cannot be created for products with multiple active BOMs to ensure production consistency.
+            """)
+            
+            # Show list of active BOMs for this product
+            with st.expander("📋 View Active BOMs for this Product"):
+                boms_for_product = self.queries.get_boms_by_product(selected_product_id, active_only=True)
+                if not boms_for_product.empty:
+                    st.dataframe(
+                        boms_for_product[['bom_code', 'bom_name', 'bom_type', 'output_qty', 'uom', 'status']].rename(columns={
+                            'bom_code': 'BOM Code',
+                            'bom_name': 'BOM Name',
+                            'bom_type': 'Type',
+                            'output_qty': 'Output Qty',
+                            'uom': 'UOM',
+                            'status': 'Status'
+                        }),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+            return
+        
+        st.markdown("---")
+        
+        # ==================== STEP 2: SELECT BOM ====================
+        st.markdown("### 2️⃣ Select BOM")
+        
+        # Get BOMs for selected product (active only)
+        boms_for_product = self.queries.get_boms_by_product(selected_product_id, active_only=True)
+        
+        if boms_for_product.empty:
+            st.error("❌ No active BOMs found for this product")
+            return
+        
+        # Since we blocked multiple active BOMs, there should be exactly 1
+        # But we still provide selectbox for future flexibility
+        def format_bom_option(row) -> str:
+            """Format: BOM_CODE | BOM_NAME | TYPE | OUTPUT"""
+            return f"{row['bom_code']} | {row['bom_name']} | {row['bom_type']} | {row['output_qty']} {row['uom']}"
         
         bom_options = {
             format_bom_option(row): row['id']
-            for _, row in bom_list.iterrows()
+            for _, row in boms_for_product.iterrows()
         }
         
         selected_bom_label = st.selectbox(
@@ -97,17 +209,18 @@ class OrderForms:
         # Show BOM info
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.info(f"**Product:** {bom_info['product_name']}")
+            st.success(f"**BOM:** {bom_info['bom_name']}")
         with col2:
-            st.info(f"**Type:** {bom_info['bom_type']}")
+            st.success(f"**Type:** {bom_info['bom_type']}")
         with col3:
-            st.info(f"**Output:** {bom_info['output_qty']} {bom_info['uom']}")
+            st.success(f"**Output:** {bom_info['output_qty']} {bom_info['uom']}")
         
         st.markdown("---")
         
         # Initialize/reset form data when BOM changes
         if st.session_state.get('create_order_bom_id') != selected_bom_id:
             st.session_state['create_order_bom_id'] = selected_bom_id
+            st.session_state['create_order_product_id'] = selected_product_id
             st.session_state['create_order_form_data'] = {
                 'planned_qty': float(bom_info.get('output_qty', 1)),
                 'scheduled_date': get_vietnam_today(),
@@ -133,15 +246,15 @@ class OrderForms:
         warehouse_list = list(warehouse_options.keys())
         
         # Set default warehouses if not set
-        # FIXED: Source = RAW (index 1), Target = FG (index 0)
+        # Source = RAW (index 1), Target = FG (index 0)
         form_data = st.session_state['create_order_form_data']
         if form_data['source_warehouse'] is None:
             form_data['source_warehouse'] = warehouse_list[min(1, len(warehouse_list) - 1)]
         if form_data['target_warehouse'] is None:
             form_data['target_warehouse'] = warehouse_list[0]
         
-        # ========== FORM - Prevents reruns when changing inputs ==========
-        st.markdown("### 2️⃣ Order Details")
+        # ==================== STEP 3: ORDER DETAILS (FORM) ====================
+        st.markdown("### 3️⃣ Order Details")
         st.caption("💡 Fill in order details. **No page reload when changing values!**")
         
         with st.form(key="create_order_form", clear_on_submit=False):
@@ -216,7 +329,6 @@ class OrderForms:
         
         # Handle form submission
         if reset_btn:
-            # FIXED: Source = RAW (index 1), Target = FG (index 0)
             st.session_state['create_order_form_data'] = {
                 'planned_qty': float(bom_info.get('output_qty', 1)),
                 'scheduled_date': get_vietnam_today(),
@@ -262,9 +374,9 @@ class OrderForms:
                 'source': source_warehouse_id,
                 'target': target_warehouse_id
             }
-            st.rerun()  # Rerun to show Step 3
+            st.rerun()  # Rerun to show Step 4
         
-        # Step 3: Show Material Check Results (based on session state, not button click)
+        # ==================== STEP 4: MATERIAL CHECK RESULTS ====================
         if st.session_state.get('create_order_materials_checked'):
             availability = st.session_state.get('create_order_availability', pd.DataFrame())
             alternatives = st.session_state.get('create_order_alternatives', pd.DataFrame())
@@ -272,7 +384,7 @@ class OrderForms:
             warehouse_ids = st.session_state.get('create_order_warehouse_ids', {})
             
             st.markdown("---")
-            st.markdown("### 3️⃣ Material Availability Check")
+            st.markdown("### 4️⃣ Material Availability Check")
             
             if not availability.empty:
                 # Summary metrics - Enhanced with alternatives info
@@ -418,6 +530,7 @@ class OrderForms:
                 if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
                     st.session_state.pop('create_order_form_data', None)
                     st.session_state.pop('create_order_bom_id', None)
+                    st.session_state.pop('create_order_product_id', None)
                     st.session_state.pop('create_order_materials_checked', None)
                     st.session_state.pop('create_order_availability', None)
                     st.session_state.pop('create_order_alternatives', None)
@@ -457,6 +570,7 @@ class OrderForms:
             # Clear all form data
             st.session_state.pop('create_order_form_data', None)
             st.session_state.pop('create_order_bom_id', None)
+            st.session_state.pop('create_order_product_id', None)
             st.session_state.pop('create_order_materials_checked', None)
             st.session_state.pop('create_order_availability', None)
             st.session_state.pop('create_order_alternatives', None)

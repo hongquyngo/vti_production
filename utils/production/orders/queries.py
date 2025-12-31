@@ -3,8 +3,15 @@
 Database queries for Orders domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.3.0
+Version: 1.4.0
 Changes:
+- v1.4.0: Added BOM conflict detection for Product-first selection flow
+          + get_products_with_active_boms() - Products with BOM count
+          + get_boms_by_product() - BOMs for specific product
+          + check_product_bom_conflict() - Check if product has multiple active BOMs
+          + get_orders_with_bom_conflicts() - Orders with BOM conflicts
+          + get_bom_conflict_summary() - Conflict metrics for dashboard
+          + Modified get_orders() to include bom_conflict_count column
 - v1.3.0: Added get_alternative_materials() and check_material_availability_with_alternatives()
           for checking alternative materials availability when primary is PARTIAL/INSUFFICIENT
 - v1.2.0: Expanded search to include package_size, legacy_pt_code, bom_name, 
@@ -69,6 +76,8 @@ class OrderQueries:
                    from_date: Optional[date] = None,
                    to_date: Optional[date] = None,
                    search: Optional[str] = None,
+                   conflicts_only: bool = False,
+                   conflict_check_active_only: bool = True,
                    page: int = 1, 
                    page_size: int = 20) -> Optional[pd.DataFrame]:
         """
@@ -81,13 +90,21 @@ class OrderQueries:
             from_date: Filter orders from this date
             to_date: Filter orders to this date
             search: Search in order_no, product name
+            conflicts_only: If True, only return orders with BOM conflicts
+            conflict_check_active_only: If True, count only active BOMs for conflict
             page: Page number (1-indexed)
             page_size: Number of records per page
             
         Returns:
-            DataFrame with order list
+            DataFrame with order list including bom_conflict_count
         """
-        query = """
+        # Subquery for counting BOMs per product
+        if conflict_check_active_only:
+            bom_count_condition = "AND bh.status = 'ACTIVE'"
+        else:
+            bom_count_condition = ""
+        
+        query = f"""
             SELECT 
                 o.id,
                 o.order_no,
@@ -111,12 +128,20 @@ class OrderQueries:
                 b.bom_type,
                 b.bom_name,
                 b.bom_code,
+                b.status as bom_status,
                 br.brand_name,
                 w1.name as warehouse_name,
                 w2.name as target_warehouse_name,
                 o.created_date,
                 o.created_by,
-                CONCAT(e.first_name, ' ', e.last_name) as created_by_name
+                CONCAT(e.first_name, ' ', e.last_name) as created_by_name,
+                (
+                    SELECT COUNT(*) 
+                    FROM bom_headers bh 
+                    WHERE bh.product_id = o.product_id 
+                    AND bh.delete_flag = 0
+                    {bom_count_condition}
+                ) as bom_conflict_count
             FROM manufacturing_orders o
             JOIN products p ON o.product_id = p.id
             JOIN bom_headers b ON o.bom_header_id = b.id
@@ -168,6 +193,18 @@ class OrderQueries:
             search_pattern = f"%{search}%"
             params.extend([search_pattern] * 10)
         
+        # Filter for orders with BOM conflicts only
+        if conflicts_only:
+            query += f"""
+                AND (
+                    SELECT COUNT(*) 
+                    FROM bom_headers bh 
+                    WHERE bh.product_id = o.product_id 
+                    AND bh.delete_flag = 0
+                    {bom_count_condition}
+                ) > 1
+            """
+        
         query += " ORDER BY o.created_date DESC"
         
         # Pagination
@@ -194,8 +231,16 @@ class OrderQueries:
                         priority: Optional[str] = None,
                         from_date: Optional[date] = None,
                         to_date: Optional[date] = None,
-                        search: Optional[str] = None) -> int:
+                        search: Optional[str] = None,
+                        conflicts_only: bool = False,
+                        conflict_check_active_only: bool = True) -> int:
         """Get total count of orders matching filters"""
+        # Condition for counting BOMs
+        if conflict_check_active_only:
+            bom_count_condition = "AND bh.status = 'ACTIVE'"
+        else:
+            bom_count_condition = ""
+        
         query = """
             SELECT COUNT(*) as total
             FROM manufacturing_orders o
@@ -246,6 +291,18 @@ class OrderQueries:
             """
             search_pattern = f"%{search}%"
             params.extend([search_pattern] * 10)
+        
+        # Filter for orders with BOM conflicts only
+        if conflicts_only:
+            query += f"""
+                AND (
+                    SELECT COUNT(*) 
+                    FROM bom_headers bh 
+                    WHERE bh.product_id = o.product_id 
+                    AND bh.delete_flag = 0
+                    {bom_count_condition}
+                ) > 1
+            """
         
         try:
             result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
@@ -348,6 +405,222 @@ class OrderQueries:
         except Exception as e:
             logger.error(f"Error getting active BOMs: {e}")
             return pd.DataFrame()
+    
+    def get_products_with_active_boms(self) -> pd.DataFrame:
+        """
+        Get products that have at least one active BOM
+        Includes count of active BOMs and total BOMs per product
+        
+        Returns:
+            DataFrame with product info and BOM counts
+        """
+        query = """
+            SELECT 
+                p.id as product_id,
+                p.pt_code,
+                p.name as product_name,
+                p.package_size,
+                p.legacy_pt_code,
+                br.brand_name,
+                COUNT(CASE WHEN b.status = 'ACTIVE' THEN 1 END) as active_bom_count,
+                COUNT(*) as total_bom_count
+            FROM products p
+            JOIN brands br ON p.brand_id = br.id
+            JOIN bom_headers b ON b.product_id = p.id AND b.delete_flag = 0
+            WHERE p.delete_flag = 0
+            GROUP BY p.id, p.pt_code, p.name, p.package_size, p.legacy_pt_code, br.brand_name
+            HAVING COUNT(CASE WHEN b.status = 'ACTIVE' THEN 1 END) >= 1
+            ORDER BY p.name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine)
+        except Exception as e:
+            logger.error(f"Error getting products with active BOMs: {e}")
+            return pd.DataFrame()
+    
+    def get_boms_by_product(self, product_id: int, active_only: bool = True) -> pd.DataFrame:
+        """
+        Get BOMs for a specific product
+        
+        Args:
+            product_id: Product ID
+            active_only: If True, return only active BOMs
+            
+        Returns:
+            DataFrame with BOMs for the product
+        """
+        status_condition = "AND b.status = 'ACTIVE'" if active_only else ""
+        
+        query = f"""
+            SELECT 
+                b.id,
+                b.bom_code,
+                b.bom_name,
+                b.bom_type,
+                b.output_qty,
+                b.uom,
+                b.status,
+                b.product_id,
+                p.name as product_name,
+                p.pt_code,
+                p.package_size,
+                p.legacy_pt_code,
+                br.brand_name,
+                b.created_date
+            FROM bom_headers b
+            JOIN products p ON b.product_id = p.id
+            JOIN brands br ON p.brand_id = br.id
+            WHERE b.product_id = %s 
+                AND b.delete_flag = 0
+                {status_condition}
+            ORDER BY b.status DESC, b.bom_name
+        """
+        
+        try:
+            return pd.read_sql(query, self.engine, params=(product_id,))
+        except Exception as e:
+            logger.error(f"Error getting BOMs for product {product_id}: {e}")
+            return pd.DataFrame()
+    
+    def check_product_bom_conflict(self, product_id: int, 
+                                   active_only: bool = True) -> Dict[str, Any]:
+        """
+        Check if a product has BOM conflict (multiple BOMs)
+        
+        Args:
+            product_id: Product ID to check
+            active_only: If True, count only active BOMs
+            
+        Returns:
+            Dictionary with conflict info:
+                - has_conflict: bool
+                - bom_count: int
+                - message: str
+        """
+        status_condition = "AND status = 'ACTIVE'" if active_only else ""
+        
+        query = f"""
+            SELECT COUNT(*) as bom_count
+            FROM bom_headers
+            WHERE product_id = %s 
+                AND delete_flag = 0
+                {status_condition}
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=(product_id,))
+            bom_count = int(result['bom_count'].iloc[0]) if not result.empty else 0
+            
+            has_conflict = bom_count > 1
+            
+            if has_conflict:
+                conflict_type = "active" if active_only else "total"
+                message = f"⚠️ This product has {bom_count} {conflict_type} BOMs. Please resolve the conflict before creating an order."
+            else:
+                message = ""
+            
+            return {
+                'has_conflict': has_conflict,
+                'bom_count': bom_count,
+                'message': message
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking BOM conflict for product {product_id}: {e}")
+            return {
+                'has_conflict': False,
+                'bom_count': 0,
+                'message': f"Error checking conflict: {str(e)}"
+            }
+    
+    def get_bom_conflict_summary(self, 
+                                 active_only: bool = True,
+                                 from_date: Optional[date] = None,
+                                 to_date: Optional[date] = None) -> Dict[str, Any]:
+        """
+        Get summary of BOM conflicts in orders
+        
+        Args:
+            active_only: If True, count only active BOMs for conflict detection
+            from_date: Filter orders from this date
+            to_date: Filter orders to this date
+            
+        Returns:
+            Dictionary with conflict summary:
+                - total_conflict_orders: int
+                - affected_products: int
+                - conflict_by_status: dict
+        """
+        if active_only:
+            bom_count_condition = "AND bh.status = 'ACTIVE'"
+        else:
+            bom_count_condition = ""
+        
+        # Build date filter
+        date_filter = ""
+        params = []
+        if from_date:
+            date_filter += " AND DATE(o.order_date) >= %s"
+            params.append(from_date)
+        if to_date:
+            date_filter += " AND DATE(o.order_date) <= %s"
+            params.append(to_date)
+        
+        query = f"""
+            SELECT 
+                COUNT(*) as total_conflict_orders,
+                COUNT(DISTINCT o.product_id) as affected_products,
+                SUM(CASE WHEN o.status = 'DRAFT' THEN 1 ELSE 0 END) as draft_conflicts,
+                SUM(CASE WHEN o.status = 'CONFIRMED' THEN 1 ELSE 0 END) as confirmed_conflicts,
+                SUM(CASE WHEN o.status = 'IN_PROGRESS' THEN 1 ELSE 0 END) as in_progress_conflicts,
+                SUM(CASE WHEN o.status = 'COMPLETED' THEN 1 ELSE 0 END) as completed_conflicts
+            FROM manufacturing_orders o
+            WHERE o.delete_flag = 0
+                AND (
+                    SELECT COUNT(*) 
+                    FROM bom_headers bh 
+                    WHERE bh.product_id = o.product_id 
+                    AND bh.delete_flag = 0
+                    {bom_count_condition}
+                ) > 1
+                {date_filter}
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            
+            if result.empty:
+                return self._empty_conflict_summary()
+            
+            row = result.iloc[0]
+            return {
+                'total_conflict_orders': int(row['total_conflict_orders'] or 0),
+                'affected_products': int(row['affected_products'] or 0),
+                'conflict_by_status': {
+                    'DRAFT': int(row['draft_conflicts'] or 0),
+                    'CONFIRMED': int(row['confirmed_conflicts'] or 0),
+                    'IN_PROGRESS': int(row['in_progress_conflicts'] or 0),
+                    'COMPLETED': int(row['completed_conflicts'] or 0)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting BOM conflict summary: {e}")
+            return self._empty_conflict_summary()
+    
+    def _empty_conflict_summary(self) -> Dict[str, Any]:
+        """Return empty conflict summary structure"""
+        return {
+            'total_conflict_orders': 0,
+            'affected_products': 0,
+            'conflict_by_status': {
+                'DRAFT': 0,
+                'CONFIRMED': 0,
+                'IN_PROGRESS': 0,
+                'COMPLETED': 0
+            }
+        }
     
     def get_bom_info(self, bom_id: int) -> Optional[Dict[str, Any]]:
         """Get BOM information by ID"""
