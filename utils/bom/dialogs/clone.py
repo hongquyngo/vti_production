@@ -1,7 +1,11 @@
 # utils/bom/dialogs/clone.py
 """
-Clone BOM Dialog - Create new BOM from existing template
+Clone BOM Dialog - Create new BOM from existing template - VERSION 2.1
 2-step wizard: Review/Edit Header → Review/Edit Materials
+
+Changes in v2.1:
+- Added info banner when selecting product that already has Active BOM
+- Non-blocking informational warning for conflict awareness
 """
 
 import logging
@@ -22,7 +26,9 @@ from utils.bom.common import (
     render_material_type_counter,
     validate_materials_for_bom,
     format_number,
-    create_status_indicator
+    create_status_indicator,
+    # Active BOM conflict detection
+    get_active_boms_for_product
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +38,35 @@ logger = logging.getLogger(__name__)
 def get_cached_products():
     """Get cached product list"""
     return get_products()
+
+
+def _render_active_bom_info_banner(active_boms: list, exclude_bom_code: str = None):
+    """
+    Render info banner when product already has active BOM(s)
+    Non-blocking informational warning
+    
+    Args:
+        active_boms: List of active BOM info dicts
+        exclude_bom_code: BOM code to exclude from display (source BOM for clone)
+    """
+    # Filter out source BOM if specified
+    display_boms = active_boms
+    if exclude_bom_code:
+        display_boms = [b for b in active_boms if b['bom_code'] != exclude_bom_code]
+    
+    if not display_boms:
+        return
+    
+    count = len(display_boms)
+    bom_codes = [bom['bom_code'] for bom in display_boms]
+    bom_codes_str = ", ".join(bom_codes[:3])  # Show max 3 codes
+    if count > 3:
+        bom_codes_str += f" (+{count - 3} more)"
+    
+    st.info(
+        f"ℹ️ **This product already has {count} active BOM(s):** {bom_codes_str}\n\n"
+        f"New BOM will be created as **DRAFT**. You can activate it later."
+    )
 
 
 @st.dialog("🔄 Clone BOM", width="large")
@@ -96,7 +131,17 @@ def _render_step1_clone_header():
     
     clone_data = st.session_state['clone_data']
     header_data = clone_data['header']
+    source_code = clone_data.get('source_code', '')
     products = get_cached_products()
+    
+    # =====================================================
+    # INFO BANNER: Check if selected product has active BOM
+    # =====================================================
+    product_id = header_data.get('product_id')
+    if product_id:
+        active_boms = get_active_boms_for_product(product_id)
+        if active_boms:
+            _render_active_bom_info_banner(active_boms, exclude_bom_code=source_code)
     
     with st.form("clone_bom_header_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
@@ -239,6 +284,16 @@ def _render_step2_clone_materials(manager: BOMManager):
     clone_data = st.session_state['clone_data']
     header_data = clone_data['header']
     materials = clone_data['materials']
+    source_code = clone_data.get('source_code', '')
+    
+    # =====================================================
+    # INFO BANNER: Check if selected product has active BOM
+    # =====================================================
+    product_id = header_data.get('product_id')
+    if product_id:
+        active_boms = get_active_boms_for_product(product_id)
+        if active_boms:
+            _render_active_bom_info_banner(active_boms, exclude_bom_code=source_code)
     
     # Header summary
     with st.expander("📋 New BOM Information", expanded=False):

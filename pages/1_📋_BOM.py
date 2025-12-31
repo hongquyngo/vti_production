@@ -319,30 +319,33 @@ def render_bom_table():
     
     # Show summary warnings
     if boms_with_duplicates > 0:
-        st.warning(f"⚠️ **Warning:** {boms_with_duplicates} BOM(s) have duplicate materials. See 'Warning' column for details.")
+        st.warning(f"⚠️ **Warning:** {boms_with_duplicates} BOM(s) have duplicate materials. See 'Issues' column for details.")
     
     # Format display data
     display_df = boms.copy()
     
-    # Add duplicate warning column
+    # Add duplicate warning flag
     display_df['has_duplicate'] = display_df['id'].apply(lambda x: duplicates_map.get(x, False))
-    display_df['warning_display'] = display_df['has_duplicate'].apply(
-        lambda x: "⚠️ Dup" if x else ""
-    )
     
-    # Add conflict badge column (Phase 2)
-    def format_conflict_badge(row):
-        bom_id = row['id']
-        status = row['status']
-        conflict_count = conflicts_map.get(bom_id, 0)
+    # Add conflict count
+    display_df['conflict_count'] = display_df['id'].apply(lambda x: conflicts_map.get(x, 0))
+    
+    # Combined Issues column (Phase 2 enhancement)
+    def format_issues_display(row):
+        issues = []
         
-        # Only show conflict badge for ACTIVE BOMs
-        if status == 'ACTIVE' and conflict_count > 0:
-            total_active = conflict_count + 1  # Include current BOM
-            return f"🔴 {total_active} Active"
-        return ""
+        # Check conflict (only for ACTIVE BOMs)
+        if row['status'] == 'ACTIVE' and row['conflict_count'] > 0:
+            total_active = row['conflict_count'] + 1  # Include current BOM
+            issues.append(f"🔴 {total_active} Active")
+        
+        # Check duplicate
+        if row['has_duplicate']:
+            issues.append("⚠️ Dup")
+        
+        return " | ".join(issues) if issues else ""
     
-    display_df['conflict_display'] = display_df.apply(format_conflict_badge, axis=1)
+    display_df['issues_display'] = display_df.apply(format_issues_display, axis=1)
     
     # Format columns for display
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
@@ -376,11 +379,11 @@ def render_bom_table():
         lambda x: x.strftime('%d/%m/%Y') if pd.notna(x) else '-'
     )
     
-    # Select columns to display (added conflict_display)
+    # Select columns to display (combined issues column)
     display_columns = [
         'bom_code', 'bom_name', 'bom_type', 'product_display',
         'output_display', 'status_display', 'materials_display', 
-        'usage_display', 'conflict_display', 'warning_display', 'created_display'
+        'usage_display', 'issues_display', 'created_display'
     ]
     
     # Column configuration
@@ -393,8 +396,7 @@ def render_bom_table():
         "status_display": st.column_config.TextColumn("Status", width="small"),
         "materials_display": st.column_config.TextColumn("Mat.", width="small"),
         "usage_display": st.column_config.TextColumn("Usage", width="small"),
-        "conflict_display": st.column_config.TextColumn("Conflict", width="small"),
-        "warning_display": st.column_config.TextColumn("Warn", width="small"),
+        "issues_display": st.column_config.TextColumn("Issues", width="medium"),
         "created_display": st.column_config.TextColumn("Date", width="small"),
     }
     

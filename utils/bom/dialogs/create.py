@@ -1,8 +1,12 @@
 # utils/bom/dialogs/create.py
 """
-Create BOM Dialog with Alternatives Support - OPTIMIZED VERSION v2.1
+Create BOM Dialog with Alternatives Support - OPTIMIZED VERSION v2.2
 2-step wizard with form containers to prevent unnecessary reruns
 Validation: At least 1 RAW_MATERIAL required
+
+Changes in v2.2:
+- Added info banner when selecting product that already has Active BOM
+- Non-blocking informational warning for conflict awareness
 
 Changes in v2.1:
 - Updated format_product_display calls with legacy_code parameter
@@ -29,7 +33,9 @@ from utils.bom.common import (
     # Duplicate validation helpers
     get_all_material_ids_in_bom_list,
     validate_material_not_duplicate,
-    filter_available_materials
+    filter_available_materials,
+    # Active BOM conflict detection
+    get_active_boms_for_product
 )
 
 logger = logging.getLogger(__name__)
@@ -39,6 +45,23 @@ logger = logging.getLogger(__name__)
 def get_cached_products():
     """Get cached product list"""
     return get_products()
+
+
+def _render_active_bom_info_banner(active_boms: list):
+    """
+    Render info banner when product already has active BOM(s)
+    Non-blocking informational warning
+    """
+    count = len(active_boms)
+    bom_codes = [bom['bom_code'] for bom in active_boms]
+    bom_codes_str = ", ".join(bom_codes[:3])  # Show max 3 codes
+    if count > 3:
+        bom_codes_str += f" (+{count - 3} more)"
+    
+    st.info(
+        f"ℹ️ **This product already has {count} active BOM(s):** {bom_codes_str}\n\n"
+        f"New BOM will be created as **DRAFT**. You can activate it later."
+    )
 
 
 @st.dialog("➕ Create New BOM", width="large")
@@ -64,6 +87,15 @@ def _render_step1_header_optimized(state: StateManager):
     
     saved_data = state.get_create_header_data()
     products = get_cached_products()
+    
+    # =====================================================
+    # INFO BANNER: Check if saved product has active BOM
+    # =====================================================
+    saved_product_id = saved_data.get('product_id')
+    if saved_product_id:
+        active_boms = get_active_boms_for_product(saved_product_id)
+        if active_boms:
+            _render_active_bom_info_banner(active_boms)
     
     # Use form container to prevent reruns on every input
     with st.form("create_bom_header_form", clear_on_submit=False):
@@ -195,6 +227,15 @@ def _render_step2_materials_optimized(state: StateManager, manager: BOMManager):
     st.markdown("### Step 2: Add Materials & Alternatives")
     
     header_data = state.get_create_header_data()
+    
+    # =====================================================
+    # INFO BANNER: Check if selected product has active BOM
+    # =====================================================
+    product_id = header_data.get('product_id')
+    if product_id:
+        active_boms = get_active_boms_for_product(product_id)
+        if active_boms:
+            _render_active_bom_info_banner(active_boms)
     
     # Summary section
     with st.expander("📋 BOM Information Summary", expanded=False):
