@@ -585,7 +585,7 @@ class OverviewQueries:
                                  status: Optional[str] = None,
                                  search: Optional[str] = None) -> pd.DataFrame:
         """
-        Get all materials for export with full product display format
+        Get all materials for export with full MO, output product, and input material details
         
         Args:
             from_date: Filter orders from this date
@@ -598,23 +598,62 @@ class OverviewQueries:
         """
         query = """
             SELECT 
+                -- MO Header info
                 mo.order_no,
                 mo.order_date,
+                mo.scheduled_date,
+                mo.completion_date,
                 mo.status as order_status,
+                mo.priority,
+                mo.planned_qty as mo_planned_qty,
+                mo.produced_qty as mo_produced_qty,
+                mo.uom as mo_uom,
+                mo.notes as mo_notes,
                 
-                -- Material product info
-                p.pt_code,
-                p.legacy_pt_code,
-                p.name as material_name,
-                p.package_size,
-                br.brand_name,
+                -- Output Product info
+                op.pt_code as output_pt_code,
+                op.legacy_pt_code as output_legacy_code,
+                op.name as output_product_name,
+                op.package_size as output_package_size,
+                obr.brand_name as output_brand,
+                bh.bom_type,
                 
-                -- Material quantities
+                -- Warehouse info
+                w1.name as source_warehouse,
+                w2.name as target_warehouse,
+                
+                -- MO aggregated metrics
+                CASE 
+                    WHEN mo.planned_qty > 0 
+                    THEN ROUND((mo.produced_qty / mo.planned_qty) * 100, 1)
+                    ELSE 0 
+                END as progress_percentage,
+                
+                COALESCE(rcpt.total_receipts, 0) as total_receipts,
+                COALESCE(rcpt.passed_qty, 0) as passed_qty,
+                COALESCE(rcpt.failed_qty, 0) as failed_qty,
+                COALESCE(rcpt.pending_qty, 0) as pending_qty,
+                CASE 
+                    WHEN COALESCE(rcpt.total_receipt_qty, 0) > 0 
+                    THEN ROUND((COALESCE(rcpt.passed_qty, 0) / rcpt.total_receipt_qty) * 100, 1)
+                    ELSE NULL 
+                END as qc_pass_percentage,
+                
+                DATEDIFF(CURDATE(), mo.scheduled_date) as schedule_variance_days,
+                
+                -- Input Material product info
+                ip.pt_code as input_pt_code,
+                ip.legacy_pt_code as input_legacy_code,
+                ip.name as input_material_name,
+                ip.package_size as input_package_size,
+                ibr.brand_name as input_brand,
+                
+                -- Input Material quantities
                 mom.required_qty,
                 mom.issued_qty,
                 COALESCE(ret.returned_qty, 0) as returned_qty,
                 (mom.issued_qty - COALESCE(ret.returned_qty, 0)) as net_used,
-                mom.uom,
+                mom.uom as material_uom,
                 mom.status as material_status,
                 
                 -- Calculated percentage
@@ -625,9 +664,31 @@ class OverviewQueries:
                 END as issue_percentage
                 
             FROM manufacturing_orders mo
+            
+            -- Output Product & BOM joins
+            JOIN products op ON mo.product_id = op.id
+            JOIN bom_headers bh ON mo.bom_header_id = bh.id
+            JOIN brands obr ON op.brand_id = obr.id
+            JOIN warehouses w1 ON mo.warehouse_id = w1.id
+            JOIN warehouses w2 ON mo.target_warehouse_id = w2.id
+            
+            -- Input Materials
             JOIN manufacturing_order_materials mom ON mom.manufacturing_order_id = mo.id
-            JOIN products p ON mom.material_id = p.id
-            JOIN brands br ON p.brand_id = br.id
+            JOIN products ip ON mom.material_id = ip.id
+            JOIN brands ibr ON ip.brand_id = ibr.id
+            
+            -- Receipt aggregation subquery (for MO metrics)
+            LEFT JOIN (
+                SELECT 
+                    manufacturing_order_id,
+                    COUNT(*) as total_receipts,
+                    SUM(quantity) as total_receipt_qty,
+                    SUM(CASE WHEN quality_status = 'PASSED' THEN quantity ELSE 0 END) as passed_qty,
+                    SUM(CASE WHEN quality_status = 'FAILED' THEN quantity ELSE 0 END) as failed_qty,
+                    SUM(CASE WHEN quality_status = 'PENDING' THEN quantity ELSE 0 END) as pending_qty
+                FROM production_receipts
+                GROUP BY manufacturing_order_id
+            ) rcpt ON rcpt.manufacturing_order_id = mo.id
             
             -- Return aggregation per material
             LEFT JOIN (
@@ -640,9 +701,6 @@ class OverviewQueries:
                 WHERE mr.status = 'CONFIRMED'
                 GROUP BY mid.manufacturing_order_material_id
             ) ret ON ret.manufacturing_order_material_id = mom.id
-            
-            -- Filter by main product (for search)
-            JOIN products mp ON mo.product_id = mp.id
             
             WHERE mo.delete_flag = 0
         """
@@ -665,15 +723,15 @@ class OverviewQueries:
             query += """
                 AND (
                     mo.order_no LIKE %s 
-                    OR mp.name LIKE %s 
-                    OR mp.pt_code LIKE %s
-                    OR mp.legacy_pt_code LIKE %s
+                    OR op.name LIKE %s 
+                    OR op.pt_code LIKE %s
+                    OR op.legacy_pt_code LIKE %s
                 )
             """
             search_pattern = f"%{search}%"
             params.extend([search_pattern] * 4)
         
-        query += " ORDER BY mo.order_no, p.name"
+        query += " ORDER BY mo.order_no, ip.name"
         
         try:
             df = pd.read_sql(query, self.engine, params=tuple(params) if params else None)

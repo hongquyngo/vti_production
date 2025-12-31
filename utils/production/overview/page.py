@@ -24,6 +24,7 @@ from .common import (
     get_health_color, calculate_percentage, get_vietnam_today, get_vietnam_now,
     get_date_presets, get_preset_label, export_to_excel,
     OverviewConstants, HealthStatus, calculate_days_variance, get_variance_display,
+    calculate_health_status,
     # Lifecycle formatters
     format_schedule_display, format_material_stage_display,
     format_production_stage_display, format_qc_stage_display,
@@ -654,32 +655,81 @@ def _export_overview_excel(queries: OverviewQueries, filters: Dict[str, Any]):
             'Net Material Used', 'Remaining Qty'
         ]
         
-        # Prepare material details dataframe - separate columns for easy Excel filtering
+        # Prepare material details dataframe - full MO + Output Product + Input Material
         if not materials_df.empty:
             # Handle legacy code display (show "NEW" if empty)
-            materials_df['legacy_display'] = materials_df['legacy_pt_code'].apply(
+            materials_df['output_legacy_display'] = materials_df['output_legacy_code'].apply(
+                lambda x: x if x and str(x).strip() else 'NEW'
+            )
+            materials_df['input_legacy_display'] = materials_df['input_legacy_code'].apply(
                 lambda x: x if x and str(x).strip() else 'NEW'
             )
             
+            # Calculate health status for each row
+            materials_df['health_status'] = materials_df.apply(
+                lambda row: calculate_health_status(
+                    material_percentage=row.get('issue_percentage', 0) or 0,
+                    schedule_variance_days=row.get('schedule_variance_days', 0) or 0,
+                    quality_percentage=row.get('qc_pass_percentage'),
+                    status=row.get('order_status', '')
+                ).value,
+                axis=1
+            )
+            
             materials_export_df = materials_df[[
-                'order_no', 'order_date', 'order_status',
-                'pt_code', 'legacy_display', 'material_name', 'package_size', 'brand_name',
+                # MO Header
+                'order_no', 'order_date', 'scheduled_date', 'completion_date', 
+                'order_status', 'health_status',
+                # Output Product
+                'output_pt_code', 'output_legacy_display', 'output_product_name', 
+                'output_package_size', 'output_brand', 'bom_type',
+                # MO Quantities & Progress
+                'mo_planned_qty', 'mo_uom', 'mo_produced_qty', 'progress_percentage', 
+                # QC & Receipts
+                'total_receipts', 'passed_qty', 'failed_qty', 'pending_qty', 'qc_pass_percentage',
+                # Warehouses
+                'source_warehouse', 'target_warehouse',
+                # Input Material
+                'input_pt_code', 'input_legacy_display', 'input_material_name',
+                'input_package_size', 'input_brand',
+                # Input Material Quantities
                 'required_qty', 'issued_qty', 'returned_qty', 'net_used',
-                'uom', 'issue_percentage', 'material_status'
+                'material_uom', 'issue_percentage', 'material_status'
             ]].copy()
             
             materials_export_df.columns = [
-                'Order No', 'Order Date', 'Order Status',
-                'PT Code', 'Legacy Code', 'Material Name', 'Package Size', 'Brand',
+                # MO Header
+                'Order No', 'Order Date', 'Scheduled Date', 'Completion Date',
+                'Status', 'Health',
+                # Output Product
+                'Output PT Code', 'Output Legacy Code', 'Output Product Name',
+                'Output Package Size', 'Output Brand', 'BOM Type',
+                # MO Quantities & Progress
+                'Planned Qty', 'UOM', 'Produced Qty', 'Progress %',
+                # QC & Receipts
+                'Receipts', 'QC Passed', 'QC Failed', 'QC Pending', 'QC Pass %',
+                # Warehouses
+                'Source WH', 'Target WH',
+                # Input Material
+                'Input PT Code', 'Input Legacy Code', 'Input Material Name',
+                'Input Package Size', 'Input Brand',
+                # Input Material Quantities
                 'Required', 'Issued', 'Returned', 'Net Used',
-                'UOM', 'Issue %', 'Material Status'
+                'Mat UOM', 'Issue %', 'Material Status'
             ]
         else:
             materials_export_df = pd.DataFrame(columns=[
-                'Order No', 'Order Date', 'Order Status',
-                'PT Code', 'Legacy Code', 'Material Name', 'Package Size', 'Brand',
+                'Order No', 'Order Date', 'Scheduled Date', 'Completion Date',
+                'Status', 'Health',
+                'Output PT Code', 'Output Legacy Code', 'Output Product Name',
+                'Output Package Size', 'Output Brand', 'BOM Type',
+                'Planned Qty', 'UOM', 'Produced Qty', 'Progress %',
+                'Receipts', 'QC Passed', 'QC Failed', 'QC Pending', 'QC Pass %',
+                'Source WH', 'Target WH',
+                'Input PT Code', 'Input Legacy Code', 'Input Material Name',
+                'Input Package Size', 'Input Brand',
                 'Required', 'Issued', 'Returned', 'Net Used',
-                'UOM', 'Issue %', 'Material Status'
+                'Mat UOM', 'Issue %', 'Material Status'
             ])
         
         # Create metadata dataframe
@@ -782,14 +832,14 @@ def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, An
         st.info("📭 No material data found matching the filters")
         return
     
-    # Create full product display format
+    # Create full product display format for input material
     materials_df['material_display'] = materials_df.apply(
         lambda r: format_product_display({
-            'pt_code': r['pt_code'],
-            'legacy_pt_code': r['legacy_pt_code'],
-            'product_name': r['material_name'],
-            'package_size': r['package_size'],
-            'brand_name': r['brand_name']
+            'pt_code': r['input_pt_code'],
+            'legacy_pt_code': r['input_legacy_code'],
+            'product_name': r['input_material_name'],
+            'package_size': r['input_package_size'],
+            'brand_name': r['input_brand']
         }), axis=1
     )
     
@@ -820,7 +870,7 @@ def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, An
     display_df = materials_df[[
         'order_no', 'order_status', 'material_display',
         'required_qty', 'issued_qty', 'returned_qty', 'net_used',
-        'uom', 'issue_percentage', 'material_status'
+        'material_uom', 'issue_percentage', 'material_status'
     ]].copy()
     
     # Add issue progress for visual
@@ -834,7 +884,7 @@ def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, An
         display_df[[
             'order_no', 'order_status', 'material_display',
             'required_qty', 'issued_qty', 'returned_qty', 'net_used',
-            'uom', 'issue_pct', 'status_display'
+            'material_uom', 'issue_pct', 'status_display'
         ]].rename(columns={
             'order_no': 'Order No',
             'order_status': 'Order Status',
@@ -843,7 +893,7 @@ def _render_material_details_tab(queries: OverviewQueries, filters: Dict[str, An
             'issued_qty': 'Issued',
             'returned_qty': 'Returned',
             'net_used': 'Net Used',
-            'uom': 'UOM',
+            'material_uom': 'UOM',
             'issue_pct': 'Issue %',
             'status_display': 'Status'
         }),
