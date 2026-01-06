@@ -55,63 +55,59 @@ def _init_session_state():
 # ==================== Filter Bar ====================
 
 def _render_filter_bar() -> Dict[str, Any]:
-    """Render filter bar and return filter values"""
-    
-    # Get preset dates
+    """Render filter bar and return selected filters"""
     presets = get_date_presets()
-    current_preset = st.session_state.get('overview_date_preset', OverviewConstants.DATE_PRESET_THIS_MONTH)
+    today = get_vietnam_today()
     
-    col1, col2, col3, col4, col5 = st.columns([1.5, 1.2, 1.2, 1.2, 1.5])
+    col1, col2, col3, col4, col5 = st.columns([1.5, 1, 1, 1, 1.5])
     
     with col1:
-        preset_options = list(presets.keys())
-        preset_labels = [get_preset_label(p) for p in preset_options]
+        # Include Custom option (not in presets dict)
+        preset_options = [
+            OverviewConstants.DATE_PRESET_THIS_MONTH,
+            OverviewConstants.DATE_PRESET_THIS_WEEK,
+            OverviewConstants.DATE_PRESET_CUSTOM,
+        ]
         
-        selected_idx = preset_options.index(current_preset) if current_preset in preset_options else 1
-        selected_label = st.selectbox(
+        date_preset = st.selectbox(
             "📅 Date Range",
-            options=preset_labels,
-            index=selected_idx,
+            options=preset_options,
+            format_func=get_preset_label,
+            index=preset_options.index(st.session_state.overview_date_preset) 
+                  if st.session_state.overview_date_preset in preset_options else 0,
             key="filter_date_preset"
         )
-        selected_preset = preset_options[preset_labels.index(selected_label)]
-        
-        if selected_preset != current_preset:
-            st.session_state.overview_date_preset = selected_preset
-            st.session_state.overview_page = 1
-    
-    # Get dates from preset
-    from_date, to_date = presets.get(selected_preset, (None, None))
+        st.session_state.overview_date_preset = date_preset
     
     with col2:
-        if selected_preset == OverviewConstants.DATE_PRESET_CUSTOM:
+        if date_preset == OverviewConstants.DATE_PRESET_CUSTOM:
             from_date = st.date_input(
                 "From",
-                value=from_date or get_vietnam_today() - timedelta(days=30),
+                value=today.replace(day=1),
                 key="filter_from_date"
             )
         else:
-            st.text_input("From", value=format_date(from_date), disabled=True, key="filter_from_disabled")
+            from_date = presets[date_preset][0]
+            st.text_input("From", value=format_date(from_date), disabled=True)
     
     with col3:
-        if selected_preset == OverviewConstants.DATE_PRESET_CUSTOM:
+        if date_preset == OverviewConstants.DATE_PRESET_CUSTOM:
             to_date = st.date_input(
                 "To",
-                value=to_date or get_vietnam_today(),
+                value=today,
                 key="filter_to_date"
             )
         else:
-            st.text_input("To", value=format_date(to_date), disabled=True, key="filter_to_disabled")
+            to_date = presets[date_preset][1]
+            st.text_input("To", value=format_date(to_date), disabled=True)
     
     with col4:
         status_options = ['All', 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']
-        selected_status = st.selectbox(
+        status = st.selectbox(
             "📋 Status",
             options=status_options,
-            index=0,
             key="filter_status"
         )
-        status_filter = None if selected_status == 'All' else selected_status
     
     with col5:
         search = st.text_input(
@@ -123,7 +119,7 @@ def _render_filter_bar() -> Dict[str, Any]:
     return {
         'from_date': from_date,
         'to_date': to_date,
-        'status': status_filter,
+        'status': status if status != 'All' else None,
         'search': search.strip() if search else None,
     }
 
@@ -136,7 +132,7 @@ def _render_analytics_section(df: pd.DataFrame):
         st.info("📊 Charts require plotly. Install with: pip install plotly")
         return
     
-    with st.expander("📈 Analytics Charts", expanded=True):
+    with st.expander("📈 Analytics Charts", expanded=False):
         col1, col2 = st.columns(2)
         
         with col1:
