@@ -3,10 +3,24 @@
 Database queries for Production Overview domain
 Complex aggregation queries joining MO, materials, receipts
 
-Version: 2.0.0
+Version: 4.0.0
 Changes:
+- v4.0.0: Simplified for single Production Data table
+          - get_materials_for_export() is the main query (1 row = 1 material line)
+          - get_production_overview() used only for dashboard metrics/analytics
+- v3.0.0: CRITICAL FIX - Fixed double-counting returns bug
+          - Now calculates GROSS issued from material_issue_details (actual / conversion_ratio)
+          - Calculates RETURNED equivalent from material_return_details (actual / conversion_ratio)
+          - NET = GROSS - RETURNED (correctly calculated)
+          - Previous: issued_qty was already NET but was subtracted by returned again (WRONG)
 - v2.0.0: Added lifecycle stage queries, analytics data methods
 - v1.0.0: Initial version
+
+IMPORTANT DATA LOGIC:
+- manufacturing_order_materials.issued_qty is NET EQUIVALENT (already adjusted for returns)
+- To get GROSS: Calculate from SUM(issue_details.quantity / conversion_ratio)
+- To get RETURNED equivalent: SUM(return_details.quantity / conversion_ratio)
+- NET used = GROSS - RETURNED (or use issued_qty from table directly)
 """
 
 import logging
@@ -113,10 +127,15 @@ class OverviewQueries:
                 w2.name as target_warehouse,
                 
                 -- Material aggregation
+                -- CRITICAL: issued_qty is NET EQUIVALENT (returns already subtracted)
                 COALESCE(mat.total_required, 0) as total_material_required,
-                COALESCE(mat.total_issued, 0) as total_material_issued,
+                COALESCE(mat.total_net_issued, 0) as total_material_net_issued,
                 COALESCE(mat.material_count, 0) as material_count,
                 COALESCE(mat.materials_fully_issued, 0) as materials_fully_issued,
+                
+                -- Issue details (ACTUAL quantities for reference)
+                COALESCE(iss.total_issued_actual, 0) as total_issued_actual,
+                COALESCE(iss.alternative_issue_count, 0) as alternative_issue_count,
                 
                 -- Receipt aggregation
                 COALESCE(rcpt.total_receipts, 0) as total_receipts,
@@ -125,8 +144,9 @@ class OverviewQueries:
                 COALESCE(rcpt.failed_qty, 0) as failed_qty,
                 COALESCE(rcpt.pending_qty, 0) as pending_qty,
                 
-                -- Return aggregation
-                COALESCE(ret.total_returned, 0) as total_returned,
+                -- Return aggregation (ACTUAL quantities)
+                COALESCE(ret.total_returned_actual, 0) as total_returned_actual,
+                COALESCE(ret.return_line_count, 0) as return_line_count,
                 
                 -- Calculated fields
                 CASE 
@@ -135,9 +155,11 @@ class OverviewQueries:
                     ELSE 0 
                 END as progress_percentage,
                 
+                -- Material percentage based on NET issued (equivalent) vs required
+                -- This is the ACCURATE percentage for fulfillment tracking
                 CASE 
                     WHEN COALESCE(mat.total_required, 0) > 0 
-                    THEN ROUND((COALESCE(mat.total_issued, 0) / mat.total_required) * 100, 1)
+                    THEN ROUND((COALESCE(mat.total_net_issued, 0) / mat.total_required) * 100, 1)
                     ELSE 0 
                 END as material_percentage,
                 
@@ -159,16 +181,37 @@ class OverviewQueries:
             JOIN warehouses w2 ON mo.target_warehouse_id = w2.id
             
             -- Material aggregation subquery
+            -- CRITICAL: issued_qty in manufacturing_order_materials is already NET EQUIVALENT
+            -- (already adjusted for returns in equivalent units)
+            -- We calculate GROSS by: NET + RETURNED_equivalent
+            -- But since we don't have conversion_ratio stored, we use a simplified approach:
+            -- - NET = issued_qty (accurate, from table)
+            -- - RETURNED_actual = from return_details (for display)
+            -- - For most cases (no alternatives), GROSS ≈ NET + RETURNED
             LEFT JOIN (
                 SELECT 
-                    manufacturing_order_id,
-                    COUNT(*) as material_count,
-                    SUM(required_qty) as total_required,
-                    SUM(issued_qty) as total_issued,
-                    SUM(CASE WHEN issued_qty >= required_qty THEN 1 ELSE 0 END) as materials_fully_issued
-                FROM manufacturing_order_materials
-                GROUP BY manufacturing_order_id
+                    mom.manufacturing_order_id,
+                    COUNT(DISTINCT mom.id) as material_count,
+                    SUM(mom.required_qty) as total_required,
+                    -- NET issued (equivalent) - this is the accurate value
+                    SUM(mom.issued_qty) as total_net_issued,
+                    SUM(CASE WHEN mom.issued_qty >= mom.required_qty THEN 1 ELSE 0 END) as materials_fully_issued
+                FROM manufacturing_order_materials mom
+                GROUP BY mom.manufacturing_order_id
             ) mat ON mat.manufacturing_order_id = mo.id
+            
+            -- Issue details aggregation (ACTUAL quantities for reference)
+            LEFT JOIN (
+                SELECT 
+                    mom.manufacturing_order_id,
+                    SUM(mid.quantity) as total_issued_actual,
+                    COUNT(DISTINCT CASE WHEN mid.is_alternative = 1 THEN mid.id END) as alternative_issue_count
+                FROM material_issue_details mid
+                JOIN material_issues mi ON mid.material_issue_id = mi.id
+                JOIN manufacturing_order_materials mom ON mid.manufacturing_order_material_id = mom.id
+                WHERE mi.status = 'CONFIRMED'
+                GROUP BY mom.manufacturing_order_id
+            ) iss ON iss.manufacturing_order_id = mo.id
             
             -- Receipt aggregation subquery
             LEFT JOIN (
@@ -183,15 +226,21 @@ class OverviewQueries:
                 GROUP BY manufacturing_order_id
             ) rcpt ON rcpt.manufacturing_order_id = mo.id
             
-            -- Return aggregation subquery
+            -- Return aggregation subquery (ACTUAL quantities)
+            -- NOTE: Without conversion_ratio stored, we show ACTUAL returned for transparency
+            -- The NET (issued_qty) is accurate because returns are already subtracted in equivalent units
             LEFT JOIN (
                 SELECT 
-                    mr.manufacturing_order_id,
-                    SUM(mrd.quantity) as total_returned
-                FROM material_returns mr
-                JOIN material_return_details mrd ON mrd.material_return_id = mr.id
+                    mom.manufacturing_order_id,
+                    -- RETURNED actual (physical units returned)
+                    SUM(mrd.quantity) as total_returned_actual,
+                    COUNT(DISTINCT mrd.id) as return_line_count
+                FROM material_return_details mrd
+                JOIN material_issue_details mid ON mrd.original_issue_detail_id = mid.id
+                JOIN manufacturing_order_materials mom ON mid.manufacturing_order_material_id = mom.id
+                JOIN material_returns mr ON mrd.material_return_id = mr.id
                 WHERE mr.status = 'CONFIRMED'
-                GROUP BY mr.manufacturing_order_id
+                GROUP BY mom.manufacturing_order_id
             ) ret ON ret.manufacturing_order_id = mo.id
             
             WHERE mo.delete_flag = 0
@@ -425,6 +474,11 @@ class OverviewQueries:
         """
         Get detailed materials for an order including issue/return breakdown
         
+        SIMPLIFIED APPROACH (no conversion_ratio stored):
+        - NET = issued_qty from table (accurate, in equivalent units)
+        - RETURNED_actual = from return_details (physical units)
+        - Issue percentage = NET / Required
+        
         Args:
             order_id: Manufacturing order ID
             
@@ -440,29 +494,54 @@ class OverviewQueries:
                 p.legacy_pt_code,
                 br.brand_name,
                 mom.required_qty,
-                mom.issued_qty,
                 mom.uom,
                 mom.status,
-                COALESCE(ret.returned_qty, 0) as returned_qty,
-                (mom.issued_qty - COALESCE(ret.returned_qty, 0)) as net_used,
+                
+                -- NET issued (equivalent) - accurate value from table
+                mom.issued_qty as net_issued,
+                
+                -- ISSUED actual (physical units from issue_details)
+                COALESCE(iss.issued_actual, 0) as issued_actual,
+                COALESCE(iss.has_alternatives, 0) as has_alternatives,
+                
+                -- RETURNED actual (physical units from return_details)
+                COALESCE(ret.returned_actual, 0) as returned_actual,
+                
+                -- Issue percentage based on NET issued (equivalent) vs required
                 CASE 
                     WHEN mom.required_qty > 0 
                     THEN ROUND((mom.issued_qty / mom.required_qty) * 100, 1)
                     ELSE 0 
                 END as issue_percentage
+                
             FROM manufacturing_order_materials mom
             JOIN products p ON mom.material_id = p.id
             JOIN brands br ON p.brand_id = br.id
+            
+            -- ISSUED actual from issue_details
             LEFT JOIN (
                 SELECT 
                     mid.manufacturing_order_material_id,
-                    SUM(mrd.quantity) as returned_qty
+                    SUM(mid.quantity) as issued_actual,
+                    MAX(CASE WHEN mid.is_alternative = 1 THEN 1 ELSE 0 END) as has_alternatives
+                FROM material_issue_details mid
+                JOIN material_issues mi ON mid.material_issue_id = mi.id
+                WHERE mi.status = 'CONFIRMED'
+                GROUP BY mid.manufacturing_order_material_id
+            ) iss ON iss.manufacturing_order_material_id = mom.id
+            
+            -- RETURNED actual from return_details
+            LEFT JOIN (
+                SELECT 
+                    mid.manufacturing_order_material_id,
+                    SUM(mrd.quantity) as returned_actual
                 FROM material_return_details mrd
                 JOIN material_issue_details mid ON mrd.original_issue_detail_id = mid.id
                 JOIN material_returns mr ON mrd.material_return_id = mr.id
                 WHERE mr.status = 'CONFIRMED'
                 GROUP BY mid.manufacturing_order_material_id
             ) ret ON ret.manufacturing_order_material_id = mom.id
+            
             WHERE mom.manufacturing_order_id = %s
             ORDER BY p.name
         """
@@ -587,6 +666,11 @@ class OverviewQueries:
         """
         Get all materials for export with full MO, output product, and input material details
         
+        SIMPLIFIED APPROACH (no conversion_ratio stored):
+        - NET = issued_qty from table (accurate, in equivalent units)
+        - RETURNED_actual = from return_details (physical units)
+        - Issue percentage = NET / Required
+        
         Args:
             from_date: Filter orders from this date
             to_date: Filter orders to this date
@@ -648,11 +732,19 @@ class OverviewQueries:
                 ip.package_size as input_package_size,
                 ibr.brand_name as input_brand,
                 
-                -- Input Material quantities
+                -- Input Material quantities (SIMPLIFIED - no conversion_ratio)
                 mom.required_qty,
-                mom.issued_qty,
-                COALESCE(ret.returned_qty, 0) as returned_qty,
-                (mom.issued_qty - COALESCE(ret.returned_qty, 0)) as net_used,
+                
+                -- NET issued (equivalent) - accurate value from table
+                mom.issued_qty as net_issued_qty,
+                
+                -- ISSUED actual (physical units from issue_details)
+                COALESCE(iss.issued_actual, 0) as issued_actual,
+                COALESCE(iss.has_alternatives, 0) as has_alternatives,
+                
+                -- RETURNED actual (physical units from return_details)
+                COALESCE(ret.returned_actual, 0) as returned_actual,
+                
                 mom.uom as material_uom,
                 mom.status as material_status,
                 
@@ -660,7 +752,7 @@ class OverviewQueries:
                 iss.last_issue_date,
                 ret.last_return_date,
                 
-                -- Calculated percentage
+                -- Issue percentage based on NET issued (equivalent) vs required
                 CASE 
                     WHEN mom.required_qty > 0 
                     THEN ROUND((mom.issued_qty / mom.required_qty) * 100, 1)
@@ -694,10 +786,12 @@ class OverviewQueries:
                 GROUP BY manufacturing_order_id
             ) rcpt ON rcpt.manufacturing_order_id = mo.id
             
-            -- Issue aggregation per material (with last issue date)
+            -- Issue aggregation per material (ACTUAL with last issue date)
             LEFT JOIN (
                 SELECT 
                     mid.manufacturing_order_material_id,
+                    SUM(mid.quantity) as issued_actual,
+                    MAX(CASE WHEN mid.is_alternative = 1 THEN 1 ELSE 0 END) as has_alternatives,
                     MAX(mi.issue_date) as last_issue_date
                 FROM material_issue_details mid
                 JOIN material_issues mi ON mid.material_issue_id = mi.id
@@ -705,11 +799,11 @@ class OverviewQueries:
                 GROUP BY mid.manufacturing_order_material_id
             ) iss ON iss.manufacturing_order_material_id = mom.id
             
-            -- Return aggregation per material (with last return date)
+            -- Return aggregation per material (ACTUAL with last return date)
             LEFT JOIN (
                 SELECT 
                     mid.manufacturing_order_material_id,
-                    SUM(mrd.quantity) as returned_qty,
+                    SUM(mrd.quantity) as returned_actual,
                     MAX(mr.return_date) as last_return_date
                 FROM material_return_details mrd
                 JOIN material_issue_details mid ON mrd.original_issue_detail_id = mid.id

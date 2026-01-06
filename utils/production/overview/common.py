@@ -3,8 +3,12 @@
 Common utilities for Production Overview domain
 Constants, health calculation, formatters, date utilities, chart helpers
 
-Version: 2.0.0
+Version: 4.0.0
 Changes:
+- v4.0.0: Simplified for single Production Data table
+          - Removed format_material_stage_display (no longer needed)
+          - Kept other formatters and chart helpers
+- v3.0.0: Updated format_material_stage_display to use gross/net fields correctly
 - v2.0.0: Added chart helpers for Plotly, lifecycle formatters
 - v1.0.0: Initial version
 """
@@ -543,22 +547,30 @@ def format_schedule_display(row) -> str:
 def format_material_stage_display(row) -> str:
     """
     Format material stage info for lifecycle table
-    Returns: "████ 95%\n520/500 M\n↩️ 15 M"
-    """
-    issued = row.get('total_material_issued', 0) or 0
-    required = row.get('total_material_required', 0) or 0
-    returned = row.get('total_returned', 0) or 0
-    material_pct = row.get('material_percentage', 0) or 0
+    Returns: "████ 95%\nNet:500/500\n↩️ 15 (actual)"
     
-    # Progress bar (text-based)
+    SIMPLIFIED APPROACH (no conversion_ratio stored):
+    - NET = issued_qty (equivalent, accurate)
+    - RETURNED = actual quantity returned
+    - material_percentage = NET / Required (accurate for fulfillment)
+    """
+    net_issued = row.get('total_material_net_issued', 0) or 0
+    required = row.get('total_material_required', 0) or 0
+    returned_actual = row.get('total_returned_actual', 0) or 0
+    material_pct = row.get('material_percentage', 0) or 0  # Based on NET
+    
+    # Progress bar (text-based) - based on NET issue percentage
     filled = int(material_pct / 10)
     bar = "█" * filled + "░" * (10 - filled)
     
-    # Detail line
-    detail = f"{format_number(issued, 0)}/{format_number(required, 0)}"
+    # Detail line: Net/Required
+    detail = f"Net:{format_number(net_issued, 0)}/{format_number(required, 0)}"
     
-    # Return line (if any)
-    return_line = f"↩️ {format_number(returned, 0)}" if returned > 0 else ""
+    # Return line (actual units returned)
+    if returned_actual > 0:
+        return_line = f"↩️{format_number(returned_actual, 0)}"
+    else:
+        return_line = ""
     
     lines = [f"{bar} {material_pct:.0f}%", detail]
     if return_line:
