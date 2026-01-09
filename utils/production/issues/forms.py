@@ -151,19 +151,29 @@ class IssueForms:
                 # Alternatives
                 alternatives = row.get('alternative_details', [])
                 if alternatives:
-                    # Use safe_pending for remaining calculation
-                    remaining = safe_pending - default_quantities[material_id]
+                    # remaining_primary is in PRIMARY units
+                    remaining_primary = safe_pending - default_quantities[material_id]
                     for alt in alternatives:
                         # Use alternative_id (unique bom_material_alternatives.id) instead of alternative_material_id
                         alt_key = f"{material_id}_{alt['alternative_id']}"
                         if 'saved_alt_quantities' in st.session_state:
                             default_alt_quantities[alt_key] = max(0.0, st.session_state['saved_alt_quantities'].get(alt_key, 0))
                         else:
-                            if remaining > 0:
+                            if remaining_primary > 0:
                                 alt_available = float(alt['available'])
-                                alt_suggest = min(remaining, alt_available)
+                                conversion_ratio = float(alt.get('conversion_ratio', 1.0))
+                                
+                                # Convert remaining (primary units) to alternative units
+                                alt_need = remaining_primary * conversion_ratio
+                                
+                                # Suggest min of need vs available (both in alternative units)
+                                alt_suggest = min(alt_need, alt_available)
                                 default_alt_quantities[alt_key] = alt_suggest
-                                remaining -= alt_suggest
+                                
+                                # Convert back to primary units to update remaining
+                                if conversion_ratio > 0:
+                                    equivalent_primary = alt_suggest / conversion_ratio
+                                    remaining_primary -= equivalent_primary
                             else:
                                 default_alt_quantities[alt_key] = 0
             
