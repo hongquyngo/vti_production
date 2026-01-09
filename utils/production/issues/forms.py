@@ -248,6 +248,10 @@ class IssueForms:
         """
         material_id = row['material_id']
         material_name = row['material_name']
+        pt_code = row.get('pt_code', '')
+        legacy_pt_code = row.get('legacy_pt_code', '')
+        package_size = row.get('package_size', '')
+        brand_name = row.get('brand_name', '')
         pending_qty = float(row['pending_qty'])
         available_qty = float(row['available_qty'])
         uom = row['uom']
@@ -261,10 +265,12 @@ class IssueForms:
         safe_pending = max(0.0, pending_qty)
         over_issued = pending_qty < 0
         
-        # Material header with status
+        # Build material info string: Name | Code (Legacy) | Size (Brand)
+        # Header shows name, details shown below
         status_emoji = "✅" if status == 'SUFFICIENT' else "⚠️" if status == 'PARTIAL' else "❌"
+        
         if over_issued:
-            st.markdown(f"**⚠️ {material_name}** — Over-issued by: {format_number(abs(pending_qty), 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
+            st.markdown(f"**{status_emoji} {material_name}** — Over-issued by: {format_number(abs(pending_qty), 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
             st.caption("ℹ️ This material has been over-issued. No additional issue needed.")
         else:
             # Calculate shortage for display
@@ -277,7 +283,17 @@ class IssueForms:
         col1, col2, col3 = st.columns([3, 2, 1])
         
         with col1:
-            st.write(f"Primary Material")
+            # Primary material with full info: Code (Legacy) | Size (Brand)
+            code_display = f"{pt_code} ({legacy_pt_code or 'NEW'})" if pt_code else ""
+            size_brand = f"{package_size}" if package_size else ""
+            if brand_name:
+                size_brand += f" ({brand_name})" if size_brand else f"({brand_name})"
+            
+            primary_info = "Primary Material"
+            if code_display or size_brand:
+                detail_parts = [p for p in [code_display, size_brand] if p]
+                primary_info += f"\n`{' | '.join(detail_parts)}`" if detail_parts else ""
+            st.markdown(primary_info)
         
         with col2:
             max_primary = max(0.0, available_qty)
@@ -316,6 +332,10 @@ class IssueForms:
                     alt_unique_id = alt.get('alternative_id')
                     alt_key = f"{material_id}_{alt_unique_id}"
                     alt_name = alt.get('name', 'Unknown')
+                    alt_pt_code = alt.get('pt_code', '')
+                    alt_legacy_code = alt.get('legacy_pt_code', '')
+                    alt_package_size = alt.get('package_size', '')
+                    alt_brand_name = alt.get('brand_name', '')
                     alt_available = float(alt.get('available', 0))
                     alt_priority = alt.get('priority', 1)
                     
@@ -329,13 +349,32 @@ class IssueForms:
                     acol1, acol2, acol3 = st.columns([3, 2, 1])
                     
                     with acol1:
-                        # Display: name (priority) | Ratio: X.Xx | Need: Y.YYYY | Stock: Z.ZZZZ
+                        # Build alternative info: Name | Code (Legacy) | Size (Brand)
+                        alt_code_display = f"{alt_pt_code} ({alt_legacy_code or 'NEW'})" if alt_pt_code else ""
+                        alt_size_brand = f"{alt_package_size}" if alt_package_size else ""
+                        if alt_brand_name:
+                            alt_size_brand += f" ({alt_brand_name})" if alt_size_brand else f"({alt_brand_name})"
+                        
+                        # Display name with priority
+                        st.markdown(f"↳ **{alt_name}** (P{alt_priority})")
+                        
+                        # Build detail line: Code | Size | Ratio | Need | Stock
+                        detail_parts = []
+                        if alt_code_display:
+                            detail_parts.append(alt_code_display)
+                        if alt_size_brand:
+                            detail_parts.append(alt_size_brand)
+                        
                         ratio_display = f"{conversion_ratio:.2f}".rstrip('0').rstrip('.')
                         need_display = f"{alt_need:,.4f}".rstrip('0').rstrip('.')
                         stock_display = f"{alt_available:,.4f}".rstrip('0').rstrip('.')
                         
-                        st.write(f"    ↳ {alt_name[:25]}... (P{alt_priority})")
-                        st.caption(f"      📐 Ratio: {ratio_display}x | Need: {need_display} | Stock: {stock_display}")
+                        info_line = " | ".join(detail_parts) if detail_parts else ""
+                        calc_line = f"📐 Ratio: {ratio_display}x | Need: {need_display} | Stock: {stock_display}"
+                        
+                        if info_line:
+                            st.caption(f"`{info_line}`")
+                        st.caption(calc_line)
                     
                     with acol2:
                         max_alt = max(0.0, alt_available)
