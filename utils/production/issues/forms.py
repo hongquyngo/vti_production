@@ -348,13 +348,17 @@ class IssueForms:
                     alt_brand_name = alt.get('brand_name', '')
                     alt_available = float(alt.get('available', 0))
                     alt_priority = alt.get('priority', 1)
+                    alt_uom = alt.get('uom', uom)
                     
                     # Get conversion ratio (alt_bom_qty / primary_bom_qty)
                     conversion_ratio = float(alt.get('conversion_ratio', 1.0))
                     
-                    # Calculate alternative need (in alternative units)
-                    # shortage_primary is in primary units, convert to alt units
-                    alt_need = shortage_primary * conversion_ratio if shortage_primary > 0 else 0
+                    # Calculate alternative quantities (all in alternative units)
+                    # 1. Total Need: if using 100% this alternative (no primary)
+                    alt_total_need = safe_pending * conversion_ratio
+                    # 2. Shortage Need: to cover remaining after primary
+                    alt_shortage_need = shortage_primary * conversion_ratio if shortage_primary > 0 else 0
+                    # 3. Stock: available quantity
                     
                     acol1, acol2, acol3 = st.columns([3, 2, 1])
                     
@@ -368,23 +372,36 @@ class IssueForms:
                         # Display name with priority
                         st.markdown(f"↳ **{alt_name}** (P{alt_priority})")
                         
-                        # Build detail line: Code | Size | Ratio | Need | Stock
+                        # Line 1: Code | Size
                         detail_parts = []
                         if alt_code_display:
                             detail_parts.append(alt_code_display)
                         if alt_size_brand:
                             detail_parts.append(alt_size_brand)
                         
-                        ratio_display = f"{conversion_ratio:.2f}".rstrip('0').rstrip('.')
-                        need_display = f"{alt_need:,.4f}".rstrip('0').rstrip('.')
+                        if detail_parts:
+                            st.caption(f"`{' | '.join(detail_parts)}`")
+                        
+                        # Line 2: Ratio
+                        ratio_display = f"{conversion_ratio:.4f}".rstrip('0').rstrip('.')
+                        st.caption(f"📐 Ratio: **{ratio_display}x**")
+                        
+                        # Line 3: Total Need | Shortage Need | Stock with status
+                        total_display = f"{alt_total_need:,.4f}".rstrip('0').rstrip('.')
+                        shortage_display = f"{alt_shortage_need:,.4f}".rstrip('0').rstrip('.')
                         stock_display = f"{alt_available:,.4f}".rstrip('0').rstrip('.')
                         
-                        info_line = " | ".join(detail_parts) if detail_parts else ""
-                        calc_line = f"📐 Ratio: {ratio_display}x | Need: {need_display} | Stock: {stock_display}"
+                        # Stock status indicator
+                        if alt_available >= alt_shortage_need and alt_shortage_need > 0:
+                            stock_status = "✅"
+                        elif alt_available > 0 and alt_shortage_need > 0:
+                            stock_status = "⚠️"
+                        elif alt_shortage_need == 0:
+                            stock_status = "—"
+                        else:
+                            stock_status = "❌"
                         
-                        if info_line:
-                            st.caption(f"`{info_line}`")
-                        st.caption(calc_line)
+                        st.caption(f"📦 Total: {total_display} | Shortage: {shortage_display} | Stock: {stock_display} {stock_status}")
                     
                     with acol2:
                         max_alt = max(0.0, alt_available)
