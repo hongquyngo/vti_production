@@ -267,7 +267,12 @@ class IssueForms:
             st.markdown(f"**⚠️ {material_name}** — Over-issued by: {format_number(abs(pending_qty), 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
             st.caption("ℹ️ This material has been over-issued. No additional issue needed.")
         else:
-            st.markdown(f"**{status_emoji} {material_name}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
+            # Calculate shortage for display
+            shortage = max(0, safe_pending - available_qty)
+            if shortage > 0:
+                st.markdown(f"**{status_emoji} {material_name}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom} | **Shortage: {format_number(shortage, 4)} {uom}**")
+            else:
+                st.markdown(f"**{status_emoji} {material_name}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
         
         col1, col2, col3 = st.columns([3, 2, 1])
         
@@ -302,6 +307,9 @@ class IssueForms:
         # Alternatives
         alternatives = row.get('alternative_details', [])
         if alternatives and isinstance(alternatives, list) and len(alternatives) > 0:
+            # Calculate shortage for alternatives suggestion
+            shortage_primary = max(0, safe_pending - available_qty)
+            
             with st.container():
                 for alt in alternatives:
                     # Use alternative_id (unique bom_material_alternatives.id) to avoid duplicate keys
@@ -311,12 +319,23 @@ class IssueForms:
                     alt_available = float(alt.get('available', 0))
                     alt_priority = alt.get('priority', 1)
                     
+                    # Get conversion ratio (alt_bom_qty / primary_bom_qty)
+                    conversion_ratio = float(alt.get('conversion_ratio', 1.0))
+                    
+                    # Calculate alternative need (in alternative units)
+                    # shortage_primary is in primary units, convert to alt units
+                    alt_need = shortage_primary * conversion_ratio if shortage_primary > 0 else 0
+                    
                     acol1, acol2, acol3 = st.columns([3, 2, 1])
                     
                     with acol1:
-                        # Hiển thị tên alternative kèm stock info
-                        stock_display = f"Stock: {alt_available:,.4f}".rstrip('0').rstrip('.')
-                        st.write(f"    ↳ {alt_name[:30]}... (P{alt_priority}) | {stock_display}")
+                        # Display: name (priority) | Ratio: X.Xx | Need: Y.YYYY | Stock: Z.ZZZZ
+                        ratio_display = f"{conversion_ratio:.2f}".rstrip('0').rstrip('.')
+                        need_display = f"{alt_need:,.4f}".rstrip('0').rstrip('.')
+                        stock_display = f"{alt_available:,.4f}".rstrip('0').rstrip('.')
+                        
+                        st.write(f"    ↳ {alt_name[:25]}... (P{alt_priority})")
+                        st.caption(f"      📐 Ratio: {ratio_display}x | Need: {need_display} | Stock: {stock_display}")
                     
                     with acol2:
                         max_alt = max(0.0, alt_available)
@@ -346,15 +365,32 @@ class IssueForms:
                             st.write("—")
         
         # Calculate total and add warnings
-        total_qty = primary_qty + sum(alt_qtys.values())
+        # Calculate equivalent total (primary + alternatives converted to primary units)
+        alt_equivalent = 0.0
+        if alternatives and isinstance(alternatives, list):
+            for alt in alternatives:
+                alt_unique_id = alt.get('alternative_id')
+                alt_key = f"{material_id}_{alt_unique_id}"
+                alt_qty = alt_qtys.get(alt_key, 0)
+                conversion_ratio = float(alt.get('conversion_ratio', 1.0))
+                if conversion_ratio > 0:
+                    alt_equivalent += alt_qty / conversion_ratio
+        
+        total_equivalent = primary_qty + alt_equivalent
         
         # Summary for this material (use safe_pending for comparison)
-        if total_qty > 0:
-            if total_qty >= safe_pending:
-                st.caption(f"  📊 Total: {format_number(total_qty, 4)} {uom} ✅")
+        if total_equivalent > 0 or primary_qty > 0:
+            if total_equivalent >= safe_pending:
+                if alt_equivalent > 0:
+                    st.caption(f"  📊 Total Equiv: {format_number(total_equivalent, 4)} {uom} ✅ (Primary: {format_number(primary_qty, 4)} + Alt Equiv: {format_number(alt_equivalent, 4)})")
+                else:
+                    st.caption(f"  📊 Total: {format_number(total_equivalent, 4)} {uom} ✅")
             else:
-                st.caption(f"  📊 Total: {format_number(total_qty, 4)} {uom} ⚠️ (< required)")
-                warnings.append(f"{material_name}: Total {format_number(total_qty, 4)} < required {format_number(safe_pending, 4)}")
+                if alt_equivalent > 0:
+                    st.caption(f"  📊 Total Equiv: {format_number(total_equivalent, 4)} {uom} ⚠️ (Primary: {format_number(primary_qty, 4)} + Alt Equiv: {format_number(alt_equivalent, 4)}) — < required")
+                else:
+                    st.caption(f"  📊 Total: {format_number(total_equivalent, 4)} {uom} ⚠️ (< required)")
+                warnings.append(f"{material_name}: Total equiv {format_number(total_equivalent, 4)} < required {format_number(safe_pending, 4)}")
         else:
             if safe_pending > 0:
                 warnings.append(f"{material_name}: No quantity entered")

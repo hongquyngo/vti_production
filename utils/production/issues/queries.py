@@ -387,7 +387,8 @@ class IssueQueries:
                 mom.status as material_status,
                 COALESCE(SUM(ih.remain), 0) as available_qty,
                 mo.warehouse_id,
-                bd.id as bom_detail_id
+                bd.id as bom_detail_id,
+                bd.quantity as bom_qty
             FROM manufacturing_order_materials mom
             JOIN manufacturing_orders mo ON mom.manufacturing_order_id = mo.id
             JOIN products p ON mom.material_id = p.id
@@ -402,7 +403,7 @@ class IssueQueries:
             WHERE mom.manufacturing_order_id = %s
             GROUP BY mom.id, mom.material_id, p.name, p.pt_code, p.legacy_pt_code, 
                      p.package_size, br.brand_name, mom.required_qty, mom.issued_qty, 
-                     mom.uom, mom.status, mo.warehouse_id, bd.id
+                     mom.uom, mom.status, mo.warehouse_id, bd.id, bd.quantity
             ORDER BY p.name
         """
         
@@ -440,8 +441,9 @@ class IssueQueries:
                 
                 # Get alternatives if bom_detail_id exists
                 if pd.notna(row['bom_detail_id']):
+                    primary_bom_qty = float(row['bom_qty']) if pd.notna(row.get('bom_qty')) else 1.0
                     alternatives = self._get_material_alternatives(
-                        int(row['bom_detail_id']), warehouse_id
+                        int(row['bom_detail_id']), warehouse_id, primary_bom_qty
                     )
                     materials.iloc[idx, materials.columns.get_loc('has_alternatives')] = len(alternatives) > 0
                     materials.iloc[idx, materials.columns.get_loc('alternative_total_qty')] = sum(
@@ -460,8 +462,19 @@ class IssueQueries:
             return pd.DataFrame()
     
     def _get_material_alternatives(self, bom_detail_id: int, 
-                                   warehouse_id: int) -> List[Dict[str, Any]]:
-        """Get alternative materials with availability"""
+                                   warehouse_id: int,
+                                   primary_bom_qty: float = 1.0) -> List[Dict[str, Any]]:
+        """
+        Get alternative materials with availability and conversion ratio
+        
+        Args:
+            bom_detail_id: BOM detail ID for primary material
+            warehouse_id: Warehouse to check stock
+            primary_bom_qty: BOM quantity of primary material (for ratio calculation)
+        
+        Returns:
+            List of alternatives with conversion_ratio added
+        """
         query = """
             SELECT 
                 alt.id as alternative_id,
@@ -493,7 +506,20 @@ class IssueQueries:
         
         try:
             result = pd.read_sql(query, self.engine, params=(warehouse_id, bom_detail_id))
-            return result.to_dict('records')
+            alternatives = result.to_dict('records')
+            
+            # Calculate conversion_ratio for each alternative
+            # conversion_ratio = alt_bom_qty / primary_bom_qty
+            # Example: primary needs 1.0, alternative needs 1.2 → ratio = 1.2
+            # To cover 0.2049 shortage in primary units, need 0.2049 * 1.2 = 0.2459 alt units
+            for alt in alternatives:
+                alt_bom_qty = float(alt.get('quantity', 1.0))
+                if primary_bom_qty > 0:
+                    alt['conversion_ratio'] = alt_bom_qty / primary_bom_qty
+                else:
+                    alt['conversion_ratio'] = 1.0
+            
+            return alternatives
         except Exception as e:
             logger.error(f"Error getting alternatives for {bom_detail_id}: {e}")
             return []
