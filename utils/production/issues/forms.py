@@ -22,7 +22,7 @@ import pandas as pd
 from .queries import IssueQueries
 from .manager import IssueManager
 from .common import (
-    format_number, create_status_indicator, get_vietnam_today,
+    format_number, create_status_indicator, get_vietnam_today,format_product_display,
     IssueValidator, get_user_audit_info, IssueConstants
 )
 
@@ -82,10 +82,18 @@ class IssueForms:
             st.error("❌ Order not found")
             return
         
-        # Order info
+        # Order info - Use consistent product format
+        product_display = format_product_display(
+            pt_code=order.get('pt_code'),
+            legacy_pt_code=order.get('legacy_pt_code'),
+            product_name=order.get('product_name'),
+            package_size=order.get('package_size'),
+            brand_name=order.get('brand_name')
+        )
+        
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.info(f"**Product:** {order['product_name']}")
+            st.info(f"**Product:** {product_display}")
         with col2:
             st.info(f"**Qty:** {format_number(order['planned_qty'], 2)} {order['uom']}")
         with col3:
@@ -319,20 +327,27 @@ class IssueForms:
         safe_pending = max(0.0, pending_qty)
         over_issued = pending_qty < 0
         
-        # Build material info string: Name | Code (Legacy) | Size (Brand)
-        # Header shows name, details shown below
+        # ===== FIX: Build material display with consistent format =====
+        material_display = format_product_display(
+            pt_code=pt_code,
+            legacy_pt_code=legacy_pt_code,
+            product_name=material_name,
+            package_size=package_size,
+            brand_name=brand_name
+        )
+        
         status_emoji = "✅" if status == 'SUFFICIENT' else "⚠️" if status == 'PARTIAL' else "❌"
         
         if over_issued:
-            st.markdown(f"**{status_emoji} {material_name}** — Over-issued by: {format_number(abs(pending_qty), 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
+            st.markdown(f"**{status_emoji} {material_display}** — Over-issued by: {format_number(abs(pending_qty), 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
             st.caption("ℹ️ This material has been over-issued. No additional issue needed.")
         else:
             # Calculate shortage for display
             shortage = max(0, safe_pending - available_qty)
             if shortage > 0:
-                st.markdown(f"**{status_emoji} {material_name}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom} | **Shortage: {format_number(shortage, 4)} {uom}**")
+                st.markdown(f"**{status_emoji} {material_display}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom} | **Shortage: {format_number(shortage, 4)} {uom}**")
             else:
-                st.markdown(f"**{status_emoji} {material_name}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
+                st.markdown(f"**{status_emoji} {material_display}** — Need: {format_number(pending_qty, 4)} {uom} | Stock: {format_number(available_qty, 4)} {uom}")
         
         col1, col2, col3 = st.columns([3, 2, 1])
         
@@ -407,24 +422,17 @@ class IssueForms:
                     acol1, acol2, acol3 = st.columns([3, 2, 1])
                     
                     with acol1:
-                        # Build alternative info: Name | Code (Legacy) | Size (Brand)
-                        alt_code_display = f"{alt_pt_code} ({alt_legacy_code or 'NEW'})" if alt_pt_code else ""
-                        alt_size_brand = f"{alt_package_size}" if alt_package_size else ""
-                        if alt_brand_name:
-                            alt_size_brand += f" ({alt_brand_name})" if alt_size_brand else f"({alt_brand_name})"
+                        # ===== FIX: Use consistent format for alternative display =====
+                        alt_display = format_product_display(
+                            pt_code=alt_pt_code,
+                            legacy_pt_code=alt_legacy_code,
+                            product_name=alt_name,
+                            package_size=alt_package_size,
+                            brand_name=alt_brand_name
+                        )
                         
-                        # Display name with priority
-                        st.markdown(f"↳ **{alt_name}** (P{alt_priority})")
-                        
-                        # Line 1: Code | Size
-                        detail_parts = []
-                        if alt_code_display:
-                            detail_parts.append(alt_code_display)
-                        if alt_size_brand:
-                            detail_parts.append(alt_size_brand)
-                        
-                        if detail_parts:
-                            st.caption(f"`{' | '.join(detail_parts)}`")
+                        # Display with priority
+                        st.markdown(f"↳ **{alt_display}** (P{alt_priority})")
                         
                         # Line 2: Ratio
                         ratio_display = f"{conversion_ratio:.4f}".rstrip('0').rstrip('.')
@@ -516,6 +524,15 @@ class IssueForms:
         # ===== SAFETY: Visual confirmation with order details =====
         st.warning("⚠️ **Confirm Issue Materials**")
         
+        # ===== FIX: Use consistent product format =====
+        product_display = format_product_display(
+            pt_code=order.get('pt_code'),
+            legacy_pt_code=order.get('legacy_pt_code'),
+            product_name=order.get('product_name'),
+            package_size=order.get('package_size'),
+            brand_name=order.get('brand_name')
+        )
+        
         # Show order info PROMINENTLY at top
         st.markdown(f"""
         ### 📋 Order Details - **PLEASE VERIFY**
@@ -523,7 +540,7 @@ class IssueForms:
         | Field | Value |
         |-------|-------|
         | **Order No** | `{order['order_no']}` |
-        | **Product** | {order['product_name']} |
+        | **Product** | {product_display} |
         | **Warehouse** | {order['warehouse_name']} |
         """)
         
@@ -532,35 +549,64 @@ class IssueForms:
         quantities = st.session_state.get('issue_quantities', {})
         alt_quantities = st.session_state.get('alternative_quantities', {})
         
-        # Get material names
+        # Get material data and build formatted displays
         availability = self.queries.get_material_availability(order['id'])
-        material_names = {row['material_id']: row['material_name'] for _, row in availability.iterrows()}
-        material_uoms = {row['material_id']: row['uom'] for _, row in availability.iterrows()}
         
-        # Build alternative names lookup
-        alt_names = {}
+        # ===== FIX: Build consistent formatted displays for materials =====
+        material_displays = {}
+        material_uoms = {}
+        
+        for _, row in availability.iterrows():
+            mat_id = row['material_id']
+            # Use format_product_display for consistency
+            material_displays[mat_id] = format_product_display(
+                pt_code=row.get('pt_code'),
+                legacy_pt_code=row.get('legacy_pt_code'),
+                product_name=row.get('material_name'),
+                package_size=row.get('package_size'),
+                brand_name=row.get('brand_name')
+            )
+            material_uoms[mat_id] = row.get('uom', '')
+        
+        # ===== FIX: Build consistent formatted displays for alternatives =====
+        alt_displays = {}
+        alt_uoms = {}
+        
         for _, row in availability.iterrows():
             alts = row.get('alternative_details', [])
             if alts:
                 for alt in alts:
                     # Use alternative_id to match the key format used in form
                     alt_key = f"{row['material_id']}_{alt['alternative_id']}"
-                    alt_names[alt_key] = alt.get('name', 'Unknown')
+                    
+                    # Format alternative display consistently
+                    alt_displays[alt_key] = format_product_display(
+                        pt_code=alt.get('pt_code'),
+                        legacy_pt_code=alt.get('legacy_pt_code'),
+                        product_name=alt.get('name'),
+                        package_size=alt.get('package_size'),
+                        brand_name=alt.get('brand_name')
+                    )
+                    alt_uoms[alt_key] = alt.get('uom', '')
         
         st.markdown("**Materials to issue:**")
         
         has_any = False
+        
+        # ===== FIX: Display materials with consistent format =====
         for mat_id, qty in quantities.items():
             if qty > 0:
-                mat_name = material_names.get(mat_id, f"Material {mat_id}")
+                mat_display = material_displays.get(mat_id, f"Material {mat_id}")
                 uom = material_uoms.get(mat_id, '')
-                st.write(f"• 📦 {mat_name}: **{format_number(qty, 4)}** {uom}")
+                st.write(f"• 📦 {mat_display}: **{format_number(qty, 4)}** {uom}")
                 has_any = True
         
+        # ===== FIX: Use formatted displays for alternatives =====
         for alt_key, qty in alt_quantities.items():
             if qty > 0:
-                alt_name = alt_names.get(alt_key, alt_key)
-                st.write(f"  ↳ 🔄 {alt_name}: **{format_number(qty, 4)}**")
+                alt_display = alt_displays.get(alt_key, alt_key)
+                alt_uom = alt_uoms.get(alt_key, '')
+                st.write(f"  ↳ 🔄 {alt_display}: **{format_number(qty, 4)}** {alt_uom}")
                 has_any = True
         
         if not has_any:
