@@ -322,12 +322,17 @@ class IssueForms:
             )
         
         with col3:
-            if primary_qty > available_qty:
-                st.error("❌")
-                errors.append(f"{material_name}: qty {format_number(primary_qty, 4)} > stock {format_number(available_qty, 4)}")
-            elif primary_qty > 0:
-                st.success("✅")
+            # Use epsilon tolerance for floating point comparison
+            EPSILON = 1e-6
+            
+            if primary_qty > EPSILON:
+                if primary_qty > available_qty + EPSILON:
+                    st.error("❌")
+                    errors.append(f"{material_name}: qty {format_number(primary_qty, 4)} > stock {format_number(available_qty, 4)}")
+                else:
+                    st.success("✅")
             else:
+                # Quantity is effectively zero
                 st.write("—")
         
         # Alternatives
@@ -422,12 +427,18 @@ class IssueForms:
                         alt_qtys[alt_key] = alt_qty
                     
                     with acol3:
-                        if alt_qty > alt_available:
-                            st.error("❌")
-                            errors.append(f"Alt {alt_name}: qty {format_number(alt_qty, 4)} > stock {format_number(alt_available, 4)}")
-                        elif alt_qty > 0:
-                            st.success("✅")
+                        # Use epsilon tolerance to avoid false positives from floating point precision
+                        EPSILON = 1e-6
+                        
+                        # Only validate if quantity is meaningful (> epsilon)
+                        if alt_qty > EPSILON:
+                            if alt_qty > alt_available + EPSILON:
+                                st.error("❌")
+                                errors.append(f"Alt {alt_name}: qty {format_number(alt_qty, 4)} > stock {format_number(alt_available, 4)}")
+                            else:
+                                st.success("✅")
                         else:
+                            # Quantity is effectively zero - no validation needed
                             st.write("—")
         
         # Calculate total and add warnings
