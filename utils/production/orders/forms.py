@@ -3,8 +3,14 @@
 Form components for Orders domain
 Create and Edit order forms
 
-Version: 3.0.0
+Version: 4.0.0
 Changes:
+- v4.0.0: Applied Fragment pattern to minimize reruns
+          + Fragment 1: Product Selection (isolated rerun)
+          + Fragment 2: BOM Selection (isolated rerun)
+          + Fragment 3: Order Details Form (isolated rerun)
+          + Fragment 4: Material Availability Check (isolated rerun)
+          + Dashboard and other sections NOT affected by form interactions
 - v3.0.0: Refactored Create Order flow to Product-first selection
           + Step 1: Select Product (with BOM conflict blocking)
           + Step 2: Select BOM (only BOMs for selected product)
@@ -31,7 +37,8 @@ from .queries import OrderQueries
 from .manager import OrderManager
 from .common import (
     format_number, create_status_indicator, get_vietnam_today,
-    OrderValidator, show_message, format_material_display, format_product_display
+    OrderValidator, show_message, format_material_display, format_product_display,
+    calculate_percentage
 )
 
 logger = logging.getLogger(__name__)
@@ -44,13 +51,44 @@ class OrderForms:
         self.queries = OrderQueries()
         self.manager = OrderManager()
     
-    # ==================== Create Order Form ====================
+    # ==================== Create Order Form - FRAGMENTED ====================
     
     def render_create_form(self):
-        """Render create new order form with Product-first selection"""
+        """
+        Render create new order form with Product-first selection
+        Uses fragments to minimize reruns and improve UX
+        """
         st.subheader("➕ Create New Production Order")
         
-        # ==================== STEP 1: SELECT PRODUCT ====================
+        # Initialize session state for create form
+        if 'create_form_product_id' not in st.session_state:
+            st.session_state.create_form_product_id = None
+        if 'create_form_bom_id' not in st.session_state:
+            st.session_state.create_form_bom_id = None
+        
+        # Fragment 1: Product Selection
+        self._fragment_product_selection()
+        
+        # Only show next steps if product is selected
+        if st.session_state.create_form_product_id:
+            st.markdown("---")
+            
+            # Fragment 2: BOM Selection
+            self._fragment_bom_selection()
+            
+            # Only show order details if BOM is selected
+            if st.session_state.create_form_bom_id:
+                st.markdown("---")
+                
+                # Fragment 3: Order Details Form
+                self._fragment_order_details()
+    
+    @st.fragment
+    def _fragment_product_selection(self):
+        """
+        Fragment 1: Product Selection
+        Isolated rerun when searching/selecting product
+        """
         st.markdown("### 1️⃣ Select Product")
         
         # Get products with active BOMs
@@ -98,7 +136,7 @@ class OrderForms:
         search_product = st.text_input(
             "🔍 Search Product",
             placeholder="Search by code, name, brand...",
-            key="create_order_product_search"
+            key="fragment_product_search"
         )
         
         # Filter product options based on search
@@ -114,13 +152,30 @@ class OrderForms:
             st.warning("⚠️ No products match your search")
             return
         
+        # Get current selection index
+        current_product_id = st.session_state.create_form_product_id
+        current_index = 0
+        if current_product_id:
+            # Find index of current selection
+            for idx, (label, pid) in enumerate(filtered_options.items()):
+                if pid == current_product_id:
+                    current_index = idx
+                    break
+        
         selected_product_label = st.selectbox(
             "Select Product",
             options=list(filtered_options.keys()),
-            key="create_order_product"
+            index=current_index,
+            key="fragment_product_select"
         )
         
         selected_product_id = filtered_options[selected_product_label]
+        
+        # Update session state only if changed
+        if st.session_state.create_form_product_id != selected_product_id:
+            st.session_state.create_form_product_id = selected_product_id
+            st.session_state.create_form_bom_id = None  # Reset BOM selection
+            st.rerun()
         
         # Get product info and check for conflicts
         product_row = products_df[products_df['product_id'] == selected_product_id].iloc[0]
@@ -136,7 +191,7 @@ class OrderForms:
         with col3:
             st.info(f"**Package:** {product_row['package_size'] or 'N/A'}")
         
-        # ==================== BOM CONFLICT CHECK (BLOCKING) ====================
+        # BOM CONFLICT CHECK (BLOCKING)
         if active_bom_count > 1:
             st.error(f"""
             🚫 **Cannot Create Order - BOM Conflict Detected!**
@@ -168,22 +223,38 @@ class OrderForms:
                         use_container_width=True,
                         hide_index=True
                     )
-            return
-        
-        st.markdown("---")
-        
-        # ==================== STEP 2: SELECT BOM ====================
+            
+            # Clear BOM selection if conflict exists
+            st.session_state.create_form_bom_id = None
+    
+    @st.fragment
+    def _fragment_bom_selection(self):
+        """
+        Fragment 2: BOM Selection
+        Isolated rerun when selecting BOM
+        """
         st.markdown("### 2️⃣ Select BOM")
         
+        product_id = st.session_state.create_form_product_id
+        
+        if not product_id:
+            st.warning("⚠️ Please select a product first")
+            return
+        
+        # Check for conflicts first
+        product_df = self.queries.get_products_with_active_boms()
+        product_row = product_df[product_df['product_id'] == product_id].iloc[0]
+        if product_row['active_bom_count'] > 1:
+            return  # Don't show BOM selection if conflict exists
+        
         # Get BOMs for selected product (active only)
-        boms_for_product = self.queries.get_boms_by_product(selected_product_id, active_only=True)
+        boms_for_product = self.queries.get_boms_by_product(product_id, active_only=True)
         
         if boms_for_product.empty:
             st.error("❌ No active BOMs found for this product")
             return
         
         # Since we blocked multiple active BOMs, there should be exactly 1
-        # But we still provide selectbox for future flexibility
         def format_bom_option(row) -> str:
             """Format: BOM_CODE | BOM_NAME | TYPE | OUTPUT"""
             return f"{row['bom_code']} | {row['bom_name']} | {row['bom_type']} | {row['output_qty']} {row['uom']}"
@@ -193,48 +264,60 @@ class OrderForms:
             for _, row in boms_for_product.iterrows()
         }
         
+        # Get current selection index
+        current_bom_id = st.session_state.create_form_bom_id
+        current_index = 0
+        if current_bom_id:
+            for idx, (label, bid) in enumerate(bom_options.items()):
+                if bid == current_bom_id:
+                    current_index = idx
+                    break
+        
         selected_bom_label = st.selectbox(
             "Select BOM",
             options=list(bom_options.keys()),
-            key="create_order_bom"
+            index=current_index,
+            key="fragment_bom_select"
         )
         
         selected_bom_id = bom_options[selected_bom_label]
-        bom_info = self.queries.get_bom_info(selected_bom_id)
         
-        if not bom_info:
-            st.error("❌ BOM details not found")
-            return
+        # Update session state only if changed
+        if st.session_state.create_form_bom_id != selected_bom_id:
+            st.session_state.create_form_bom_id = selected_bom_id
+            st.rerun()
         
-        # Show BOM info
+        # Show BOM details
+        bom_row = boms_for_product[boms_for_product['id'] == selected_bom_id].iloc[0]
+        
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.success(f"**BOM:** {bom_info['bom_name']}")
+            st.info(f"**Type:** {bom_row['bom_type']}")
         with col2:
-            st.success(f"**Type:** {bom_info['bom_type']}")
+            st.info(f"**Output:** {bom_row['output_qty']} {bom_row['uom']}")
         with col3:
-            st.success(f"**Output:** {bom_info['output_qty']} {bom_info['uom']}")
+            st.info(f"**Status:** {bom_row['status']}")
+    
+    @st.fragment
+    def _fragment_order_details(self):
+        """
+        Fragment 3: Order Details Form
+        Isolated rerun - only reruns when form is submitted
+        """
+        st.markdown("### 3️⃣ Order Details")
         
-        st.markdown("---")
+        bom_id = st.session_state.create_form_bom_id
+        product_id = st.session_state.create_form_product_id
         
-        # Initialize/reset form data when BOM changes
-        if st.session_state.get('create_order_bom_id') != selected_bom_id:
-            st.session_state['create_order_bom_id'] = selected_bom_id
-            st.session_state['create_order_product_id'] = selected_product_id
-            st.session_state['create_order_form_data'] = {
-                'planned_qty': float(bom_info.get('output_qty', 1)),
-                'scheduled_date': get_vietnam_today(),
-                'priority': 'NORMAL',
-                'source_warehouse': None,
-                'target_warehouse': None,
-                'notes': ''
-            }
-            # Clear material check state when BOM changes
-            st.session_state.pop('create_order_materials_checked', None)
-            st.session_state.pop('create_order_availability', None)
-            st.session_state.pop('create_order_alternatives', None)
-            st.session_state.pop('create_order_availability_summary', None)
-            st.session_state.pop('create_order_warehouse_ids', None)
+        if not bom_id or not product_id:
+            st.warning("⚠️ Please select product and BOM first")
+            return
+        
+        # Get BOM info
+        bom_info = self.queries.get_bom_info(bom_id)
+        if not bom_info:
+            st.error("❌ BOM not found")
+            return
         
         # Get warehouses
         warehouses = self.queries.get_warehouses()
@@ -245,35 +328,49 @@ class OrderForms:
         warehouse_options = {row['name']: row['id'] for _, row in warehouses.iterrows()}
         warehouse_list = list(warehouse_options.keys())
         
-        # Set default warehouses if not set
-        # Source = RAW (index 1), Target = FG (index 0)
-        form_data = st.session_state['create_order_form_data']
-        if form_data['source_warehouse'] is None:
-            form_data['source_warehouse'] = warehouse_list[min(1, len(warehouse_list) - 1)]
-        if form_data['target_warehouse'] is None:
-            form_data['target_warehouse'] = warehouse_list[0]
+        # Find default warehouses
+        raw_wh_idx = 0
+        fg_wh_idx = 0
+        for idx, name in enumerate(warehouse_list):
+            if 'RAW' in name.upper() or 'NGUYÊN' in name.upper():
+                raw_wh_idx = idx
+            if 'FG' in name.upper() or 'THÀNH' in name.upper():
+                fg_wh_idx = idx
         
-        # ==================== STEP 3: ORDER DETAILS (FORM) ====================
-        st.markdown("### 3️⃣ Order Details")
+        # Initialize form data if needed
+        if 'create_order_form_data' not in st.session_state:
+            st.session_state.create_order_form_data = {
+                'planned_qty': float(bom_info['output_qty']),
+                'scheduled_date': get_vietnam_today(),
+                'priority': 'NORMAL',
+                'source_warehouse': warehouse_list[raw_wh_idx],
+                'target_warehouse': warehouse_list[fg_wh_idx],
+                'notes': ''
+            }
+        
+        form_data = st.session_state.create_order_form_data
+        
         st.caption("💡 Fill in order details. **No page reload when changing values!**")
         
-        with st.form(key="create_order_form", clear_on_submit=False):
+        # ========== FORM - Prevents reruns when changing inputs ==========
+        with st.form(key="create_order_details_form", clear_on_submit=False):
             col1, col2 = st.columns(2)
             
             with col1:
                 planned_qty = st.number_input(
-                    "Planned Quantity *",
+                    "Planned Quantity",
                     min_value=0.01,
                     value=float(form_data['planned_qty']),
-                    step=1.0,
+                    step=float(bom_info['output_qty']),
                     format="%.2f",
-                    key="form_create_order_qty"
+                    key="form_create_qty",
+                    help=f"BOM output: {bom_info['output_qty']} {bom_info['uom']}"
                 )
                 
                 scheduled_date = st.date_input(
-                    "Scheduled Date *",
+                    "Scheduled Date",
                     value=form_data['scheduled_date'],
-                    key="form_create_order_date"
+                    key="form_create_date"
                 )
                 
                 priority_options = ["LOW", "NORMAL", "HIGH", "URGENT"]
@@ -282,72 +379,54 @@ class OrderForms:
                     "Priority",
                     options=priority_options,
                     index=priority_idx,
-                    key="form_create_order_priority"
+                    key="form_create_priority"
                 )
             
             with col2:
-                source_idx = warehouse_list.index(form_data['source_warehouse']) if form_data['source_warehouse'] in warehouse_list else 0
+                source_idx = warehouse_list.index(form_data['source_warehouse']) if form_data['source_warehouse'] in warehouse_list else raw_wh_idx
                 source_warehouse = st.selectbox(
-                    "Source Warehouse *",
+                    "Source Warehouse (Materials)",
                     options=warehouse_list,
                     index=source_idx,
-                    key="form_create_order_source_wh"
+                    key="form_create_source_wh",
+                    help="Warehouse to issue materials from"
                 )
                 
-                target_idx = warehouse_list.index(form_data['target_warehouse']) if form_data['target_warehouse'] in warehouse_list else 0
+                target_idx = warehouse_list.index(form_data['target_warehouse']) if form_data['target_warehouse'] in warehouse_list else fg_wh_idx
                 target_warehouse = st.selectbox(
-                    "Target Warehouse *",
+                    "Target Warehouse (Finished Goods)",
                     options=warehouse_list,
                     index=target_idx,
-                    key="form_create_order_target_wh"
+                    key="form_create_target_wh",
+                    help="Warehouse to receive finished products"
                 )
                 
                 notes = st.text_area(
-                    "Notes",
+                    "Notes (Optional)",
                     value=form_data['notes'],
                     height=100,
-                    key="form_create_order_notes"
+                    key="form_create_notes"
                 )
             
             st.markdown("---")
             
-            # Form submit buttons
-            col1, col2 = st.columns(2)
+            # Material Availability Check Button (inside form)
+            col1, col2 = st.columns([1, 3])
             
             with col1:
                 check_materials_btn = st.form_submit_button(
-                    "📋 Check Materials & Create",
-                    type="primary",
-                    use_container_width=True
+                    "🔍 Check Materials",
+                    use_container_width=True,
+                    help="Check material availability before creating order"
                 )
             
             with col2:
-                reset_btn = st.form_submit_button(
-                    "🔄 Reset Form",
-                    use_container_width=True
-                )
+                st.caption("💡 Click to check if materials are available for this order")
         
-        # Handle form submission
-        if reset_btn:
-            st.session_state['create_order_form_data'] = {
-                'planned_qty': float(bom_info.get('output_qty', 1)),
-                'scheduled_date': get_vietnam_today(),
-                'priority': 'NORMAL',
-                'source_warehouse': warehouse_list[min(1, len(warehouse_list) - 1)],
-                'target_warehouse': warehouse_list[0],
-                'notes': ''
-            }
-            # Clear material check state
-            st.session_state.pop('create_order_materials_checked', None)
-            st.session_state.pop('create_order_availability', None)
-            st.session_state.pop('create_order_alternatives', None)
-            st.session_state.pop('create_order_availability_summary', None)
-            st.session_state.pop('create_order_warehouse_ids', None)
-            st.rerun()
-        
+        # Handle material check button
         if check_materials_btn:
-            # Save form data to session state
-            st.session_state['create_order_form_data'] = {
+            # Update form data
+            st.session_state.create_order_form_data = {
                 'planned_qty': planned_qty,
                 'scheduled_date': scheduled_date,
                 'priority': priority,
@@ -356,238 +435,194 @@ class OrderForms:
                 'notes': notes
             }
             
-            source_warehouse_id = warehouse_options[source_warehouse]
-            target_warehouse_id = warehouse_options[target_warehouse]
-            
-            # Check material availability WITH ALTERNATIVES
-            with st.spinner("Checking material availability..."):
-                result = self.queries.check_material_availability_with_alternatives(
-                    selected_bom_id, planned_qty, source_warehouse_id
-                )
-            
-            # Store results in session state
-            st.session_state['create_order_materials_checked'] = True
-            st.session_state['create_order_availability'] = result['primary']
-            st.session_state['create_order_alternatives'] = result['alternatives']
-            st.session_state['create_order_availability_summary'] = result['summary']
-            st.session_state['create_order_warehouse_ids'] = {
-                'source': source_warehouse_id,
-                'target': target_warehouse_id
-            }
-            st.rerun()  # Rerun to show Step 4
-        
-        # ==================== STEP 4: MATERIAL CHECK RESULTS ====================
-        if st.session_state.get('create_order_materials_checked'):
-            availability = st.session_state.get('create_order_availability', pd.DataFrame())
-            alternatives = st.session_state.get('create_order_alternatives', pd.DataFrame())
-            summary = st.session_state.get('create_order_availability_summary', {})
-            warehouse_ids = st.session_state.get('create_order_warehouse_ids', {})
-            
+            # Show material check
             st.markdown("---")
-            st.markdown("### 4️⃣ Material Availability Check")
+            self._fragment_material_check(
+                bom_id=bom_id,
+                quantity=planned_qty,
+                warehouse_id=warehouse_options[source_warehouse]
+            )
+    
+    @st.fragment
+    def _fragment_material_check(self, bom_id: int, quantity: float, warehouse_id: int):
+        """
+        Fragment 4: Material Availability Check
+        Isolated rerun when checking materials
+        """
+        st.markdown("### 4️⃣ Material Availability Check")
+        
+        with st.spinner("Checking material availability..."):
+            result = self.queries.check_material_availability_with_alternatives(
+                bom_id, quantity, warehouse_id
+            )
+        
+        primary_df = result['primary']
+        alternatives_df = result['alternatives']
+        summary = result['summary']
+        
+        if primary_df.empty:
+            st.warning("⚠️ No materials found for this BOM")
+            return
+        
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Materials", summary['total'])
+        
+        with col2:
+            delta_color = "normal" if summary['sufficient'] == summary['total'] else "inverse"
+            st.metric(
+                "✅ Sufficient",
+                summary['sufficient'],
+                delta=f"{calculate_percentage(summary['sufficient'], summary['total'])}%",
+                delta_color=delta_color
+            )
+        
+        with col3:
+            if summary['partial'] > 0:
+                st.metric("⚠️ Partial", summary['partial'], delta_color="off")
+            else:
+                st.metric("⚠️ Partial", summary['partial'])
+        
+        with col4:
+            if summary['insufficient'] > 0:
+                st.metric("❌ Insufficient", summary['insufficient'], delta_color="inverse")
+            else:
+                st.metric("❌ Insufficient", summary['insufficient'])
+        
+        # Primary materials table
+        st.markdown("**Primary Materials:**")
+        
+        display_df = primary_df.copy()
+        display_df['material_info'] = display_df.apply(format_material_display, axis=1)
+        display_df['required'] = display_df['required_qty'].apply(lambda x: format_number(x, 4))
+        display_df['available'] = display_df['available_qty'].apply(lambda x: format_number(x, 4))
+        display_df['status_display'] = display_df['availability_status'].apply(create_status_indicator)
+        
+        st.dataframe(
+            display_df[['material_info', 'required', 'available', 'status_display', 'uom']].rename(columns={
+                'material_info': 'Material',
+                'required': 'Required',
+                'available': 'Available',
+                'status_display': 'Status',
+                'uom': 'UOM'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Show alternatives if any
+        if not alternatives_df.empty and summary['has_alternatives'] > 0:
+            st.markdown("---")
+            st.markdown("**Alternative Materials Available:**")
+            st.info(f"ℹ️ Found alternatives for **{summary['has_alternatives']}** material(s) with partial/insufficient stock")
             
-            if not availability.empty:
-                # Summary metrics - Enhanced with alternatives info
-                total = summary.get('total', len(availability))
-                sufficient = summary.get('sufficient', 0)
-                partial = summary.get('partial', 0)
-                insufficient = summary.get('insufficient', 0)
-                has_sufficient_alt = summary.get('has_sufficient_alternatives', 0)
-                
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total Materials", total)
-                with col2:
-                    st.metric("✅ Sufficient", sufficient)
-                with col3:
-                    # Show partial/insufficient with alternatives info
-                    needs_attention = partial + insufficient
-                    if needs_attention > 0 and has_sufficient_alt > 0:
-                        st.metric("⚠️ Partial", partial, 
-                                 delta=f"{has_sufficient_alt} có alt ✓", 
-                                 delta_color="off")
-                    else:
-                        st.metric("⚠️ Partial", partial)
-                with col4:
-                    st.metric("❌ Insufficient", insufficient)
-                
-                # ==================== PRIMARY MATERIALS ====================
-                with st.expander("📋 View Material Details (Primary)", expanded=insufficient > 0 or partial > 0):
-                    display_df = availability.copy()
-                    display_df['material_info'] = display_df.apply(format_material_display, axis=1)
-                    display_df['required'] = display_df['required_qty'].apply(lambda x: format_number(x, 4))
-                    display_df['available'] = display_df['available_qty'].apply(lambda x: format_number(x, 4))
-                    display_df['status'] = display_df['availability_status'].apply(create_status_indicator)
-                    display_df['type'] = '🔵 Primary'
+            with st.expander("📦 View Alternative Materials", expanded=True):
+                # Group by bom_detail_id to show alternatives per primary material
+                for bom_detail_id in alternatives_df['bom_detail_id'].unique():
+                    alt_for_material = alternatives_df[alternatives_df['bom_detail_id'] == bom_detail_id]
+                    
+                    # Get primary material name
+                    primary_material = primary_df[primary_df['bom_detail_id'] == bom_detail_id].iloc[0]
+                    st.markdown(f"**For:** {format_material_display(primary_material)}")
+                    
+                    # Show alternatives
+                    alt_display = alt_for_material.copy()
+                    alt_display['alt_info'] = alt_display.apply(format_material_display, axis=1)
+                    alt_display['required'] = alt_display['required_qty'].apply(lambda x: format_number(x, 4))
+                    alt_display['available'] = alt_display['available_qty'].apply(lambda x: format_number(x, 4))
+                    alt_display['status_display'] = alt_display['availability_status'].apply(create_status_indicator)
                     
                     st.dataframe(
-                        display_df[['type', 'material_info', 'required', 'available', 'status', 'uom']].rename(columns={
-                            'type': 'Type',
-                            'material_info': 'Material',
+                        alt_display[['alt_priority', 'alt_info', 'required', 'available', 'status_display', 'uom']].rename(columns={
+                            'alt_priority': 'Priority',
+                            'alt_info': 'Alternative Material',
                             'required': 'Required',
                             'available': 'Available',
-                            'status': 'Status',
+                            'status_display': 'Status',
                             'uom': 'UOM'
                         }),
                         use_container_width=True,
                         hide_index=True
                     )
-                
-                # ==================== ALTERNATIVE MATERIALS ====================
-                if not alternatives.empty:
-                    with st.expander("🔄 Alternative Materials", expanded=True):
-                        num_alts = len(alternatives)
-                        num_primary_with_alts = alternatives['bom_detail_id'].nunique()
-                        st.info(f"💡 **{num_alts}** alternative material(s) found for **{num_primary_with_alts}** item(s) with insufficient/partial stock")
-                        
-                        # Group alternatives by primary material
-                        for bom_detail_id in alternatives['bom_detail_id'].unique():
-                            # Get primary material info
-                            primary_row = availability[availability['bom_detail_id'] == bom_detail_id]
-                            if not primary_row.empty:
-                                primary_info = primary_row.iloc[0]
-                                primary_name = format_material_display(primary_info)
-                                primary_status = primary_info['availability_status']
-                                
-                                st.markdown(f"**Primary:** {primary_name} — {create_status_indicator(primary_status)}")
-                                
-                                # Get alternatives for this primary
-                                alt_rows = alternatives[alternatives['bom_detail_id'] == bom_detail_id].copy()
-                                
-                                if not alt_rows.empty:
-                                    alt_rows['material_info'] = alt_rows.apply(format_material_display, axis=1)
-                                    alt_rows['required'] = alt_rows['required_qty'].apply(lambda x: format_number(x, 4))
-                                    alt_rows['available'] = alt_rows['available_qty'].apply(lambda x: format_number(x, 4))
-                                    alt_rows['status'] = alt_rows['availability_status'].apply(create_status_indicator)
-                                    alt_rows['priority_display'] = alt_rows['alt_priority'].apply(lambda x: f"Alt #{x}")
-                                    # Show scrap rate instead of conversion rate
-                                    alt_rows['scrap'] = alt_rows['alt_scrap_rate'].apply(
-                                        lambda x: f"+{x:.1f}%" if x and x > 0 else "0%"
-                                    )
-                                    
-                                    st.dataframe(
-                                        alt_rows[['priority_display', 'material_info', 'required', 'available', 'status', 'scrap', 'uom']].rename(columns={
-                                            'priority_display': 'Priority',
-                                            'material_info': 'Alternative Material',
-                                            'required': 'Required',
-                                            'available': 'Available',
-                                            'status': 'Status',
-                                            'scrap': 'Scrap%',
-                                            'uom': 'UOM'
-                                        }),
-                                        use_container_width=True,
-                                        hide_index=True
-                                    )
-                                
-                                st.markdown("---")
-                
-                # Warning messages with alternatives context
-                if insufficient > 0:
-                    if has_sufficient_alt > 0:
-                        st.warning(
-                            f"⚠️ **{insufficient} material(s)** have insufficient stock, "
-                            f"but **{has_sufficient_alt}** have sufficient alternatives available. "
-                            "You can proceed with alternatives or wait for procurement."
-                        )
-                    else:
-                        st.warning(
-                            f"⚠️ **{insufficient} material(s)** have insufficient stock. "
-                            "You can still create the order, but materials need to be procured before production."
-                        )
-                elif partial > 0:
-                    if has_sufficient_alt > 0:
-                        st.info(
-                            f"ℹ️ **{partial} material(s)** have partial stock. "
-                            f"**{has_sufficient_alt}** have sufficient alternatives available."
-                        )
-                    else:
-                        st.info(
-                            f"ℹ️ **{partial} material(s)** have partial stock. "
-                            "Consider checking alternative materials or procurement."
-                        )
-            
-            st.markdown("---")
-            
-            # Confirm creation buttons (NOW they persist across reruns!)
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("✅ Create Order", type="primary", use_container_width=True, 
-                            key="btn_confirm_create_order"):
-                    # Get form data from session state
-                    form_data = st.session_state.get('create_order_form_data', {})
-                    self._handle_create_order(
-                        bom_info=bom_info,
-                        planned_qty=form_data.get('planned_qty', 1.0),
-                        scheduled_date=form_data.get('scheduled_date', get_vietnam_today()),
-                        priority=form_data.get('priority', 'NORMAL'),
-                        source_warehouse_id=warehouse_ids.get('source'),
-                        target_warehouse_id=warehouse_ids.get('target'),
-                        notes=form_data.get('notes', '')
-                    )
-            
-            with col2:
-                if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
-                    st.session_state.pop('create_order_form_data', None)
-                    st.session_state.pop('create_order_bom_id', None)
-                    st.session_state.pop('create_order_product_id', None)
-                    st.session_state.pop('create_order_materials_checked', None)
-                    st.session_state.pop('create_order_availability', None)
-                    st.session_state.pop('create_order_alternatives', None)
-                    st.session_state.pop('create_order_availability_summary', None)
-                    st.session_state.pop('create_order_warehouse_ids', None)
-                    st.rerun()
-    
-    def _handle_create_order(self, bom_info: Dict, planned_qty: float,
-                            scheduled_date, priority: str,
-                            source_warehouse_id: int, target_warehouse_id: int,
-                            notes: str):
-        """Handle create order button click"""
-        order_data = {
-            'bom_header_id': bom_info['id'],
-            'product_id': bom_info.get('product_id'),
-            'planned_qty': planned_qty,
-            'uom': bom_info.get('uom', 'EA'),
-            'warehouse_id': source_warehouse_id,
-            'target_warehouse_id': target_warehouse_id,
-            'scheduled_date': scheduled_date,
-            'priority': priority,
-            'notes': notes,
-            'created_by': st.session_state.get('user_id', 1)
-        }
+                    st.markdown("---")
         
-        # Validate
-        is_valid, error_msg = OrderValidator.validate_create_order(order_data)
+        # Create Order button
+        st.markdown("---")
         
-        if not is_valid:
-            st.error(f"❌ Validation Error: {error_msg}")
+        # Check if can proceed
+        can_proceed = summary['sufficient'] + summary['partial'] > 0
+        
+        if not can_proceed:
+            st.error("❌ Cannot create order: All materials are insufficient!")
+            st.info("💡 Please check inventory or use alternative materials")
             return
         
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("✅ Create Order", type="primary", use_container_width=True,
+                        key="btn_create_order_final"):
+                self._handle_create_order()
+        
+        with col2:
+            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
+                # Clear session state
+                st.session_state.create_form_product_id = None
+                st.session_state.create_form_bom_id = None
+                st.session_state.pop('create_order_form_data', None)
+                st.session_state.orders_view = 'list'
+                st.rerun()
+    
+    def _handle_create_order(self):
+        """Handle create order button click"""
         try:
-            with st.spinner("Creating order..."):
-                order_no = self.manager.create_order(order_data)
+            # Get form data
+            bom_id = st.session_state.create_form_bom_id
+            product_id = st.session_state.create_form_product_id
+            form_data = st.session_state.create_order_form_data
             
-            # Clear all form data
+            # Get warehouse IDs
+            warehouses = self.queries.get_warehouses()
+            warehouse_options = {row['name']: row['id'] for _, row in warehouses.iterrows()}
+            
+            # Get BOM info for UOM
+            bom_info = self.queries.get_bom_info(bom_id)
+            
+            # Build order data
+            order_data = {
+                'bom_header_id': bom_id,
+                'product_id': product_id,
+                'planned_qty': form_data['planned_qty'],
+                'uom': bom_info['uom'],
+                'warehouse_id': warehouse_options[form_data['source_warehouse']],
+                'target_warehouse_id': warehouse_options[form_data['target_warehouse']],
+                'scheduled_date': form_data['scheduled_date'],
+                'priority': form_data['priority'],
+                'notes': form_data['notes'],
+                'created_by': st.session_state.get('user_id', 1)
+            }
+            
+            # Create order
+            order_no = self.manager.create_order(order_data)
+            
+            # Clear session state
+            st.session_state.create_form_product_id = None
+            st.session_state.create_form_bom_id = None
             st.session_state.pop('create_order_form_data', None)
-            st.session_state.pop('create_order_bom_id', None)
-            st.session_state.pop('create_order_product_id', None)
-            st.session_state.pop('create_order_materials_checked', None)
-            st.session_state.pop('create_order_availability', None)
-            st.session_state.pop('create_order_alternatives', None)
-            st.session_state.pop('create_order_availability_summary', None)
-            st.session_state.pop('create_order_warehouse_ids', None)
             
-            # Set success state and go back to list
-            st.session_state['order_created_success'] = order_no
-            st.session_state['orders_view'] = 'list'
+            # Set success flag
+            st.session_state.order_created_success = order_no
+            st.session_state.orders_view = 'list'
+            
+            time.sleep(0.5)
             st.rerun()
             
         except Exception as e:
             st.error(f"❌ Error creating order: {str(e)}")
             logger.error(f"Order creation failed: {e}", exc_info=True)
-    
-    # ==================== Edit Order Form ====================
-    
+        
     def render_edit_form(self, order: Dict[str, Any]):
         """
         Render edit order form
