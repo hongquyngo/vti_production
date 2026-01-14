@@ -56,9 +56,22 @@ class IssueForms:
             for _, row in orders.iterrows()
         }
         
+        # ===== FIX: Maintain selectbox selection across reruns =====
+        # Get stored order_id from session state
+        stored_order_id = st.session_state.get('issue_order_id')
+        
+        # Find index of stored order in current options
+        default_index = 0
+        if stored_order_id:
+            for idx, (label, oid) in enumerate(order_options.items()):
+                if oid == stored_order_id:
+                    default_index = idx
+                    break
+        
         selected_label = st.selectbox(
             "Select Production Order",
             options=list(order_options.keys()),
+            index=default_index,  # ✅ CRITICAL: Maintain selection
             key="issue_order_select"
         )
         
@@ -82,6 +95,31 @@ class IssueForms:
         
         # Check if in confirmation mode
         if st.session_state.get('confirm_issue', False):
+            # ===== SAFETY CHECK: Validate order consistency =====
+            stored_order_id = st.session_state.get('issue_order_id')
+            stored_order_no = st.session_state.get('issue_order_no')
+            
+            if stored_order_id and stored_order_id != order_id:
+                # ❌ CRITICAL: Order mismatch detected!
+                st.error(f"""
+                🚨 **CRITICAL ERROR: Order Mismatch Detected!**
+                
+                **You selected:** `{stored_order_no or 'Unknown'}`  
+                **System now shows:** `{order['order_no']}`
+                
+                This is a safety check to prevent issuing materials to the wrong order.
+                
+                **Action:** Click "Go Back" below and select your order again.
+                """)
+                
+                col1, col2, col3 = st.columns([1, 1, 2])
+                with col1:
+                    if st.button("↩️ Go Back", type="primary", use_container_width=True):
+                        # Clear confirmation state
+                        st.session_state['confirm_issue'] = False
+                        st.rerun()
+                return
+            
             self._render_confirmation_dialog(order)
             return
         
@@ -97,6 +135,8 @@ class IssueForms:
         # Initialize/reset form data when order changes
         if st.session_state.get('issue_order_id') != order_id:
             st.session_state['issue_order_id'] = order_id
+            st.session_state['issue_order_no'] = order['order_no']  # ✅ Store for validation
+            
             # Clear saved quantities when order changes
             st.session_state.pop('saved_quantities', None)
             st.session_state.pop('saved_alt_quantities', None)
@@ -104,6 +144,7 @@ class IssueForms:
             # Initialize form data structure for consistency
             st.session_state['issue_form_data'] = {
                 'order_id': order_id,
+                'order_no': order['order_no'],  # ✅ Store for validation
                 'initialized': True
             }
         
@@ -245,6 +286,9 @@ class IssueForms:
             st.session_state['confirm_issue'] = True
             st.session_state['issue_quantities'] = form_quantities
             st.session_state['alternative_quantities'] = form_alt_quantities
+            # ===== ENSURE order info is retained =====
+            st.session_state['issue_order_id'] = order_id
+            st.session_state['issue_order_no'] = order['order_no']
             st.rerun()
     
     def _render_material_row_form(self, row: pd.Series, 
@@ -322,17 +366,12 @@ class IssueForms:
             )
         
         with col3:
-            # Use epsilon tolerance for floating point comparison
-            EPSILON = 1e-6
-            
-            if primary_qty > EPSILON:
-                if primary_qty > available_qty + EPSILON:
-                    st.error("❌")
-                    errors.append(f"{material_name}: qty {format_number(primary_qty, 4)} > stock {format_number(available_qty, 4)}")
-                else:
-                    st.success("✅")
+            if primary_qty > available_qty:
+                st.error("❌")
+                errors.append(f"{material_name}: qty {format_number(primary_qty, 4)} > stock {format_number(available_qty, 4)}")
+            elif primary_qty > 0:
+                st.success("✅")
             else:
-                # Quantity is effectively zero
                 st.write("—")
         
         # Alternatives
@@ -427,18 +466,12 @@ class IssueForms:
                         alt_qtys[alt_key] = alt_qty
                     
                     with acol3:
-                        # Use epsilon tolerance to avoid false positives from floating point precision
-                        EPSILON = 1e-6
-                        
-                        # Only validate if quantity is meaningful (> epsilon)
-                        if alt_qty > EPSILON:
-                            if alt_qty > alt_available + EPSILON:
-                                st.error("❌")
-                                errors.append(f"Alt {alt_name}: qty {format_number(alt_qty, 4)} > stock {format_number(alt_available, 4)}")
-                            else:
-                                st.success("✅")
+                        if alt_qty > alt_available:
+                            st.error("❌")
+                            errors.append(f"Alt {alt_name}: qty {format_number(alt_qty, 4)} > stock {format_number(alt_available, 4)}")
+                        elif alt_qty > 0:
+                            st.success("✅")
                         else:
-                            # Quantity is effectively zero - no validation needed
                             st.write("—")
         
         # Calculate total and add warnings
@@ -479,8 +512,22 @@ class IssueForms:
     def _render_confirmation_dialog(self, order: Dict):
         """Render confirmation dialog after form submission"""
         st.markdown("---")
+        
+        # ===== SAFETY: Visual confirmation with order details =====
         st.warning("⚠️ **Confirm Issue Materials**")
-        st.info(f"Order: **{order['order_no']}** - {order['product_name']}")
+        
+        # Show order info PROMINENTLY at top
+        st.markdown(f"""
+        ### 📋 Order Details - **PLEASE VERIFY**
+        
+        | Field | Value |
+        |-------|-------|
+        | **Order No** | `{order['order_no']}` |
+        | **Product** | {order['product_name']} |
+        | **Warehouse** | {order['warehouse_name']} |
+        """)
+        
+        st.markdown("---")
         
         quantities = st.session_state.get('issue_quantities', {})
         alt_quantities = st.session_state.get('alternative_quantities', {})
@@ -572,8 +619,27 @@ class IssueForms:
             elif received_by == "-- Select --":
                 st.error("❌ Please select production staff")
             else:
+                # ===== FINAL SAFETY CHECK before execution =====
+                stored_order_id = st.session_state.get('issue_order_id')
+                
+                if stored_order_id != order['id']:
+                    st.error(f"""
+                    🚨 **CRITICAL: Order ID mismatch detected before execution!**
+                    
+                    **Expected:** {stored_order_id}  
+                    **Got:** {order['id']}
+                    
+                    **Operation CANCELLED for safety.**
+                    
+                    Please go back and select order again.
+                    """)
+                    st.session_state['confirm_issue'] = False
+                    if st.button("↩️ Go Back", type="primary"):
+                        st.rerun()
+                    return
+                
                 self._execute_issue(
-                    order['id'],
+                    stored_order_id,  # ✅ Use validated stored order_id
                     emp_options[issued_by],
                     emp_options[received_by],
                     notes
