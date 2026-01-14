@@ -3,8 +3,11 @@
 Common utilities for Production Overview domain
 Constants, health calculation, formatters, date utilities, chart helpers
 
-Version: 4.0.0
+Version: 5.0.0
 Changes:
+- v5.0.0: Updated for new issue detail structure (1 row = 1 issue detail)
+          - Removed unused formatters for old aggregated view
+          - Kept health calculation, product display, and chart helpers
 - v4.0.0: Simplified for single Production Data table
           - Removed format_material_stage_display (no longer needed)
           - Kept other formatters and chart helpers

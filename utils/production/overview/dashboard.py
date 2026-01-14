@@ -3,7 +3,7 @@
 Dashboard components for Production Overview domain
 KPI metrics display strip
 
-Version: 1.0.0
+Version: 5.0.0 (no functional changes, version bump for consistency)
 """
 
 import logging

@@ -3,8 +3,14 @@
 Database queries for Production Overview domain
 Complex aggregation queries joining MO, materials, receipts
 
-Version: 4.0.0
+Version: 5.0.0
 Changes:
+- v5.0.0: MAJOR CHANGE - Show actual issued materials (1 row = 1 issue detail)
+          - get_materials_for_export() now returns 1 row per material_issue_detail
+          - Shows PRIMARY and ALTERNATIVE materials separately
+          - Actual material PT code, name, UOM (not just primary)
+          - Material Type column (PRIMARY/ALTERNATIVE)
+          - Full traceability with primary material reference
 - v4.0.0: Simplified for single Production Data table
           - get_materials_for_export() is the main query (1 row = 1 material line)
           - get_production_overview() used only for dashboard metrics/analytics
@@ -16,11 +22,12 @@ Changes:
 - v2.0.0: Added lifecycle stage queries, analytics data methods
 - v1.0.0: Initial version
 
-IMPORTANT DATA LOGIC:
-- manufacturing_order_materials.issued_qty is NET EQUIVALENT (already adjusted for returns)
-- To get GROSS: Calculate from SUM(issue_details.quantity / conversion_ratio)
-- To get RETURNED equivalent: SUM(return_details.quantity / conversion_ratio)
-- NET used = GROSS - RETURNED (or use issued_qty from table directly)
+IMPORTANT DATA LOGIC (v5.0.0):
+- Each row represents ONE ACTUAL MATERIAL ISSUE (from material_issue_details)
+- For PRIMARY materials: is_alternative = 0, shows primary material info
+- For ALTERNATIVE materials: is_alternative = 1, shows alternative material info AND primary reference
+- Quantities are ACTUAL physical units issued (not converted/equivalent)
+- Returns are tracked per issue_detail_id
 """
 
 import logging
@@ -664,12 +671,15 @@ class OverviewQueries:
                                  status: Optional[str] = None,
                                  search: Optional[str] = None) -> pd.DataFrame:
         """
-        Get all materials for export with full MO, output product, and input material details
+        Get all ACTUAL materials issued for export (1 row = 1 issue detail)
+        Shows PRIMARY and ALTERNATIVE materials separately with full traceability
         
-        SIMPLIFIED APPROACH (no conversion_ratio stored):
-        - NET = issued_qty from table (accurate, in equivalent units)
-        - RETURNED_actual = from return_details (physical units)
-        - Issue percentage = NET / Required
+        NEW APPROACH (v5.0.0):
+        - 1 row = 1 material_issue_detail (actual material issued)
+        - Shows actual material PT code, name, UOM
+        - Material Type: PRIMARY or ALTERNATIVE
+        - For alternatives: shows original primary material
+        - Actual quantities in physical units issued
         
         Args:
             from_date: Filter orders from this date
@@ -678,11 +688,12 @@ class OverviewQueries:
             search: Search in order_no, product name, pt_code
             
         Returns:
-            DataFrame with material details for all matching orders
+            DataFrame with actual issued material details (1 row per issue detail)
         """
         query = """
             SELECT 
                 -- MO Header info
+                mo.id as mo_id,
                 mo.order_no,
                 mo.order_date,
                 mo.scheduled_date,
@@ -725,38 +736,54 @@ class OverviewQueries:
                 
                 DATEDIFF(CURDATE(), mo.scheduled_date) as schedule_variance_days,
                 
-                -- Input Material product info
-                ip.pt_code as input_pt_code,
-                ip.legacy_pt_code as input_legacy_code,
-                ip.name as input_material_name,
-                ip.package_size as input_package_size,
-                ibr.brand_name as input_brand,
-                
-                -- Input Material quantities (SIMPLIFIED - no conversion_ratio)
-                mom.required_qty,
-                
-                -- NET issued (equivalent) - accurate value from table
-                mom.issued_qty as net_issued_qty,
-                
-                -- ISSUED actual (physical units from issue_details)
-                COALESCE(iss.issued_actual, 0) as issued_actual,
-                COALESCE(iss.has_alternatives, 0) as has_alternatives,
-                
-                -- RETURNED actual (physical units from return_details)
-                COALESCE(ret.returned_actual, 0) as returned_actual,
-                
-                mom.uom as material_uom,
+                -- Primary Material (Original requirement from MOM)
+                prim_p.pt_code as primary_pt_code,
+                prim_p.legacy_pt_code as primary_legacy_code,
+                prim_p.name as primary_material_name,
+                prim_p.package_size as primary_package_size,
+                prim_br.brand_name as primary_brand,
+                mom.required_qty as primary_required_qty,
+                mom.uom as primary_uom,
                 mom.status as material_status,
                 
-                -- Issue/Return dates
-                iss.last_issue_date,
+                -- Material Issue Detail info
+                mid.id as issue_detail_id,
+                mi.issue_no,
+                mi.issue_date,
+                mid.batch_no,
+                mid.expired_date,
+                
+                -- Material Type flag
+                mid.is_alternative,
+                CASE 
+                    WHEN mid.is_alternative = 1 THEN 'ALTERNATIVE'
+                    ELSE 'PRIMARY'
+                END as material_type,
+                
+                -- ACTUAL Material issued (could be primary or alternative)
+                act_p.id as actual_material_id,
+                act_p.pt_code as actual_pt_code,
+                act_p.legacy_pt_code as actual_legacy_code,
+                act_p.name as actual_material_name,
+                act_p.package_size as actual_package_size,
+                act_br.brand_name as actual_brand,
+                
+                -- Actual issued quantities (physical units)
+                mid.quantity as issued_qty,
+                mid.uom as issued_uom,
+                
+                -- Return info for this issue detail
+                COALESCE(ret.returned_qty, 0) as returned_qty,
                 ret.last_return_date,
                 
-                -- Issue percentage based on NET issued (equivalent) vs required
+                -- Net quantity (issued - returned)
+                mid.quantity - COALESCE(ret.returned_qty, 0) as net_qty,
+                
+                -- Issue percentage (for primary materials only, based on this specific issue)
                 CASE 
-                    WHEN mom.required_qty > 0 
-                    THEN ROUND((mom.issued_qty / mom.required_qty) * 100, 1)
-                    ELSE 0 
+                    WHEN mid.is_alternative = 0 AND mom.required_qty > 0 
+                    THEN ROUND((mid.quantity / mom.required_qty) * 100, 1)
+                    ELSE NULL
                 END as issue_percentage
                 
             FROM manufacturing_orders mo
@@ -767,11 +794,6 @@ class OverviewQueries:
             JOIN brands obr ON op.brand_id = obr.id
             JOIN warehouses w1 ON mo.warehouse_id = w1.id
             JOIN warehouses w2 ON mo.target_warehouse_id = w2.id
-            
-            -- Input Materials
-            JOIN manufacturing_order_materials mom ON mom.manufacturing_order_id = mo.id
-            JOIN products ip ON mom.material_id = ip.id
-            JOIN brands ibr ON ip.brand_id = ibr.id
             
             -- Receipt aggregation subquery (for MO metrics)
             LEFT JOIN (
@@ -786,33 +808,35 @@ class OverviewQueries:
                 GROUP BY manufacturing_order_id
             ) rcpt ON rcpt.manufacturing_order_id = mo.id
             
-            -- Issue aggregation per material (ACTUAL with last issue date)
-            LEFT JOIN (
-                SELECT 
-                    mid.manufacturing_order_material_id,
-                    SUM(mid.quantity) as issued_actual,
-                    MAX(CASE WHEN mid.is_alternative = 1 THEN 1 ELSE 0 END) as has_alternatives,
-                    MAX(mi.issue_date) as last_issue_date
-                FROM material_issue_details mid
-                JOIN material_issues mi ON mid.material_issue_id = mi.id
-                WHERE mi.status = 'CONFIRMED'
-                GROUP BY mid.manufacturing_order_material_id
-            ) iss ON iss.manufacturing_order_material_id = mom.id
+            -- Material Issue Details (MAIN DATA SOURCE - 1 row per issue)
+            JOIN material_issues mi ON mi.manufacturing_order_id = mo.id
+            JOIN material_issue_details mid ON mid.material_issue_id = mi.id
             
-            -- Return aggregation per material (ACTUAL with last return date)
+            -- Manufacturing Order Materials (for primary material info & requirements)
+            JOIN manufacturing_order_materials mom ON mid.manufacturing_order_material_id = mom.id
+            
+            -- Primary Material info (from MOM)
+            JOIN products prim_p ON mom.material_id = prim_p.id
+            JOIN brands prim_br ON prim_p.brand_id = prim_br.id
+            
+            -- ACTUAL Material issued (could be primary or alternative)
+            JOIN products act_p ON mid.material_id = act_p.id
+            JOIN brands act_br ON act_p.brand_id = act_br.id
+            
+            -- Return aggregation per issue detail
             LEFT JOIN (
                 SELECT 
-                    mid.manufacturing_order_material_id,
-                    SUM(mrd.quantity) as returned_actual,
+                    mrd.original_issue_detail_id,
+                    SUM(mrd.quantity) as returned_qty,
                     MAX(mr.return_date) as last_return_date
                 FROM material_return_details mrd
-                JOIN material_issue_details mid ON mrd.original_issue_detail_id = mid.id
                 JOIN material_returns mr ON mrd.material_return_id = mr.id
                 WHERE mr.status = 'CONFIRMED'
-                GROUP BY mid.manufacturing_order_material_id
-            ) ret ON ret.manufacturing_order_material_id = mom.id
+                GROUP BY mrd.original_issue_detail_id
+            ) ret ON ret.original_issue_detail_id = mid.id
             
             WHERE mo.delete_flag = 0
+              AND mi.status = 'CONFIRMED'
         """
         
         params = []
@@ -841,7 +865,7 @@ class OverviewQueries:
             search_pattern = f"%{search}%"
             params.extend([search_pattern] * 4)
         
-        query += " ORDER BY mo.order_no, ip.name"
+        query += " ORDER BY mo.order_no, prim_p.name, mid.is_alternative, act_p.name"
         
         try:
             df = pd.read_sql(query, self.engine, params=tuple(params) if params else None)

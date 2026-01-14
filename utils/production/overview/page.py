@@ -1,10 +1,16 @@
 # utils/production/overview/page.py
 """
 Main UI orchestrator for Production Lifecycle Overview domain
-Renders overview tab with single Production Data table (combined MO + Materials)
+Renders overview tab with detailed Production Data table (1 row = 1 issue detail)
 
-Version: 4.0.0
+Version: 5.0.0
 Changes:
+- v5.0.0: MAJOR CHANGE - Show actual issued materials (1 row = 1 issue detail)
+          - Each row is a material_issue_detail (PRIMARY or ALTERNATIVE)
+          - Shows actual material PT code, name, UOM
+          - Material Type column (PRIMARY/ALTERNATIVE)
+          - Primary Material reference for alternatives
+          - Full traceability of actual materials used
 - v4.0.0: SIMPLIFIED - Removed Lifecycle Data tab, combined into single Production Data table
           - 1 row = 1 material line (full details)
           - Excel export: 2 sheets (Export Info + Production Data)
@@ -193,7 +199,7 @@ def _render_action_bar(queries: OverviewQueries, filters: Dict[str, Any]):
 def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, Any]):
     """Export Production Data to Excel (2 sheets: Export Info + Production Data)"""
     with st.spinner("Exporting..."):
-        # Get production data (1 row = 1 material line)
+        # Get production data (1 row = 1 issue detail)
         df = queries.get_materials_for_export(
             from_date=filters['from_date'],
             to_date=filters['to_date'],
@@ -209,7 +215,10 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
         df['output_legacy_display'] = df['output_legacy_code'].apply(
             lambda x: x if x and str(x).strip() else 'NEW'
         )
-        df['input_legacy_display'] = df['input_legacy_code'].apply(
+        df['primary_legacy_display'] = df['primary_legacy_code'].apply(
+            lambda x: x if x and str(x).strip() else 'NEW'
+        )
+        df['actual_legacy_display'] = df['actual_legacy_code'].apply(
             lambda x: x if x and str(x).strip() else 'NEW'
         )
         
@@ -223,9 +232,6 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             ).value,
             axis=1
         )
-        
-        # Format has_alternatives as Yes/No
-        df['alt_display'] = df['has_alternatives'].apply(lambda x: 'Yes' if x else 'No')
         
         # Prepare export dataframe with all columns
         export_df = df[[
@@ -241,13 +247,19 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             'total_receipts', 'passed_qty', 'failed_qty', 'pending_qty', 'qc_pass_percentage',
             # Warehouses
             'source_warehouse', 'target_warehouse',
-            # Input Material
-            'input_pt_code', 'input_legacy_display', 'input_material_name',
-            'input_package_size', 'input_brand',
-            # Input Material Quantities
-            'required_qty', 'issued_actual', 'returned_actual', 'net_issued_qty',
-            'material_uom', 'issue_percentage', 'last_issue_date', 'last_return_date',
-            'material_status', 'alt_display'
+            # Issue Detail Info
+            'issue_detail_id', 'issue_no', 'issue_date', 'batch_no', 'expired_date',
+            # Material Type
+            'material_type',
+            # Primary Material (Requirement)
+            'primary_pt_code', 'primary_legacy_display', 'primary_material_name',
+            'primary_package_size', 'primary_brand', 'primary_required_qty', 'primary_uom',
+            # Actual Material (Issued)
+            'actual_pt_code', 'actual_legacy_display', 'actual_material_name',
+            'actual_package_size', 'actual_brand',
+            # Quantities
+            'issued_qty', 'returned_qty', 'net_qty', 'issued_uom',
+            'last_return_date', 'material_status', 'issue_percentage'
         ]].copy()
         
         export_df.columns = [
@@ -263,13 +275,19 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             'Receipts', 'QC Passed', 'QC Failed', 'QC Pending', 'QC Pass %',
             # Warehouses
             'Source WH', 'Target WH',
-            # Input Material
-            'Input PT Code', 'Input Legacy Code', 'Input Material Name',
-            'Input Package Size', 'Input Brand',
-            # Input Material Quantities
-            'Required (Equiv)', 'Issued (Actual)', 'Returned (Actual)', 'Net Issued (Equiv)',
-            'Mat UOM', 'Issue %', 'Issue Date', 'Return Date',
-            'Material Status', 'Has Alternatives'
+            # Issue Detail Info
+            'Issue Detail ID', 'Issue No', 'Issue Date', 'Batch No', 'Expired Date',
+            # Material Type
+            'Material Type',
+            # Primary Material (Requirement)
+            'Primary PT Code', 'Primary Legacy Code', 'Primary Material Name',
+            'Primary Package Size', 'Primary Brand', 'Required Qty', 'Required UOM',
+            # Actual Material (Issued)
+            'Actual PT Code', 'Actual Legacy Code', 'Actual Material Name',
+            'Actual Package Size', 'Actual Brand',
+            # Quantities
+            'Issued Qty', 'Returned Qty', 'Net Qty', 'Issued UOM',
+            'Return Date', 'Material Status', 'Issue %'
         ]
         
         # Create metadata dataframe
@@ -299,20 +317,23 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
         
         # Calculate summary metrics
         total_orders = df['order_no'].nunique()
-        total_material_lines = len(df)
-        total_required = df['required_qty'].sum()
-        total_net_issued = df['net_issued_qty'].sum()
-        total_returned = df['returned_actual'].sum()
-        avg_issue_pct = (total_net_issued / total_required * 100) if total_required > 0 else 0
+        total_issue_lines = len(df)
+        primary_count = len(df[df['material_type'] == 'PRIMARY'])
+        alt_count = len(df[df['material_type'] == 'ALTERNATIVE'])
+        total_issued = df['issued_qty'].sum()
+        total_returned = df['returned_qty'].sum()
+        total_net = df['net_qty'].sum()
         
         # Status breakdown (by unique orders)
         orders_df = df.drop_duplicates(subset=['order_no'])
         
         metadata = [
-            ['Report Name', 'Production Data Overview'],
+            ['Report Name', 'Production Data Overview - Actual Materials Issued'],
             ['Export Date', now.strftime('%Y-%m-%d')],
             ['Export Time', now.strftime('%H:%M:%S')],
             ['Exported By', current_user],
+            ['', ''],
+            ['Data Structure', '1 row = 1 material issue detail (PRIMARY or ALTERNATIVE)'],
             ['', ''],
             ['Filter Conditions', ''],
             ['Date Preset', date_preset_label],
@@ -323,12 +344,12 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             ['', ''],
             ['Data Summary', ''],
             ['Total Orders', total_orders],
-            ['Total Material Lines', total_material_lines],
-            ['Total Required (Equiv)', format_number(total_required, 2)],
-            ['Total Net Issued (Equiv)', format_number(total_net_issued, 2)],
-            ['Total Returned (Actual)', format_number(total_returned, 2)],
-            ['Avg Issue %', f"{avg_issue_pct:.1f}%"],
-            ['Lines with Alternatives', len(df[df['has_alternatives'] == 1])],
+            ['Total Issue Lines', total_issue_lines],
+            ['Primary Material Issues', primary_count],
+            ['Alternative Material Issues', alt_count],
+            ['Total Issued (Physical)', format_number(total_issued, 2)],
+            ['Total Returned (Physical)', format_number(total_returned, 2)],
+            ['Total Net (Physical)', format_number(total_net, 2)],
             ['', ''],
             ['Order Status Breakdown', ''],
             ['Draft', len(orders_df[orders_df['order_status'] == 'DRAFT'])],
@@ -344,12 +365,15 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             ['Not Started', len(orders_df[orders_df['health_status'] == 'NOT_STARTED'])],
             ['', ''],
             ['Column Definitions', ''],
-            ['Required (Equiv)', 'Required quantity in primary material equivalent units'],
-            ['Issued (Actual)', 'Total physical units issued (primary + alternative)'],
-            ['Returned (Actual)', 'Total physical units returned'],
-            ['Net Issued (Equiv)', 'Net issued in equivalent units = issued_qty from table (accurate)'],
-            ['Issue %', 'Net Issued / Required × 100'],
-            ['Has Alternatives', 'Yes if alternative materials were used'],
+            ['Material Type', 'PRIMARY = primary material issued, ALTERNATIVE = alternative material used'],
+            ['Primary PT Code', 'Original required material (from BOM)'],
+            ['Actual PT Code', 'Actual material issued (could be primary or alternative)'],
+            ['Required Qty', 'Required quantity in primary material UOM'],
+            ['Issued Qty', 'Physical quantity issued of ACTUAL material'],
+            ['Returned Qty', 'Physical quantity returned of ACTUAL material'],
+            ['Net Qty', 'Net quantity = Issued - Returned (physical units)'],
+            ['Issued UOM', 'UOM of ACTUAL material issued'],
+            ['Issue %', 'For PRIMARY materials: Issued / Required × 100; NULL for alternatives'],
         ]
         
         metadata_df = pd.DataFrame(metadata, columns=['Field', 'Value'])
@@ -362,7 +386,7 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
         
         # Filename with timestamp
         timestamp = now.strftime('%Y%m%d_%H%M%S')
-        filename = f"Production_Data_{timestamp}.xlsx"
+        filename = f"Production_Data_Detailed_{timestamp}.xlsx"
         
         st.download_button(
             label="💾 Download Excel",
@@ -394,7 +418,7 @@ def _render_production_data_table(queries: OverviewQueries, filters: Dict[str, A
 def _render_production_data_table_with_data(queries: OverviewQueries, filters: Dict[str, Any], df: Optional[pd.DataFrame]):
     """
     Render Production Data table with pre-fetched data
-    1 row = 1 material line
+    1 row = 1 material issue detail (PRIMARY or ALTERNATIVE)
     """
     
     if df is None or df.empty:
@@ -413,8 +437,29 @@ def _render_production_data_table_with_data(queries: OverviewQueries, filters: D
             axis=1
         )
     
-    # Create display columns
-    # Output product display: PT_CODE (LEGACY or NEW) | NAME | PKG_SIZE (BRAND)
+    # Create display columns for PRIMARY MATERIAL (requirements)
+    df['primary_display'] = df.apply(
+        lambda r: format_product_display({
+            'pt_code': r['primary_pt_code'],
+            'legacy_pt_code': r['primary_legacy_code'],
+            'product_name': r['primary_material_name'],
+            'package_size': r['primary_package_size'],
+            'brand_name': r['primary_brand']
+        }), axis=1
+    )
+    
+    # Create display columns for ACTUAL MATERIAL (issued)
+    df['actual_display'] = df.apply(
+        lambda r: format_product_display({
+            'pt_code': r['actual_pt_code'],
+            'legacy_pt_code': r['actual_legacy_code'],
+            'product_name': r['actual_material_name'],
+            'package_size': r['actual_package_size'],
+            'brand_name': r['actual_brand']
+        }), axis=1
+    )
+    
+    # Create display columns for OUTPUT PRODUCT
     df['output_display'] = df.apply(
         lambda r: format_product_display({
             'pt_code': r['output_pt_code'],
@@ -425,19 +470,8 @@ def _render_production_data_table_with_data(queries: OverviewQueries, filters: D
         }), axis=1
     )
     
-    # Input material display
-    df['material_display'] = df.apply(
-        lambda r: format_product_display({
-            'pt_code': r['input_pt_code'],
-            'legacy_pt_code': r['input_legacy_code'],
-            'product_name': r['input_material_name'],
-            'package_size': r['input_package_size'],
-            'brand_name': r['input_brand']
-        }), axis=1
-    )
-    
     # Format dates
-    df['issue_date_display'] = df['last_issue_date'].apply(
+    df['issue_date_display'] = df['issue_date'].apply(
         lambda x: format_datetime_vn(x, '%d/%m/%Y') if pd.notna(x) else '-'
     )
     df['return_date_display'] = df['last_return_date'].apply(
@@ -447,9 +481,13 @@ def _render_production_data_table_with_data(queries: OverviewQueries, filters: D
     # Status and health indicators
     df['status_display'] = df['order_status'].apply(create_status_indicator)
     df['health_display'] = df['health_status'].apply(get_health_indicator)
-    df['alt_flag'] = df['has_alternatives'].apply(lambda x: '⚠️' if x else '')
     
-    # Issue percentage for progress bar
+    # Material type indicator
+    df['type_indicator'] = df['material_type'].apply(
+        lambda x: '🔷 PRIMARY' if x == 'PRIMARY' else '🔶 ALT'
+    )
+    
+    # Issue percentage for progress bar (only for primary)
     df['issue_pct'] = df['issue_percentage'].fillna(0)
     
     # Summary metrics
@@ -461,58 +499,62 @@ def _render_production_data_table_with_data(queries: OverviewQueries, filters: D
         st.metric("📋 Orders", format_number(total_orders, 0))
     
     with col2:
-        total_lines = len(df)
-        st.metric("📦 Material Lines", format_number(total_lines, 0))
+        total_issues = len(df)
+        st.metric("📦 Issue Lines", format_number(total_issues, 0))
     
     with col3:
-        total_required = df['required_qty'].sum()
-        st.metric("📝 Total Required", format_number(total_required, 0))
+        primary_count = len(df[df['material_type'] == 'PRIMARY'])
+        st.metric("🔷 Primary", format_number(primary_count, 0))
     
     with col4:
-        total_net_issued = df['net_issued_qty'].sum()
-        avg_issue_pct = (total_net_issued / total_required * 100) if total_required > 0 else 0
-        st.metric("📊 Avg Issue %", f"{avg_issue_pct:.1f}%")
+        alt_count = len(df[df['material_type'] == 'ALTERNATIVE'])
+        st.metric("🔶 Alternative", format_number(alt_count, 0))
     
     with col5:
-        total_returned = df['returned_actual'].sum()
-        st.metric("↩️ Total Returned", format_number(total_returned, 0))
+        total_issued = df['issued_qty'].sum()
+        st.metric("📊 Total Issued", format_number(total_issued, 2))
     
     with col6:
-        alt_count = df['has_alternatives'].sum()
-        st.metric("⚠️ With Alternatives", format_number(alt_count, 0))
+        total_returned = df['returned_qty'].sum()
+        st.metric("↩️ Total Returned", format_number(total_returned, 2))
     
     st.markdown("---")
     
     # Main data table
-    st.markdown("### 📋 Production Data")
-    st.caption("1 row = 1 material requirement per manufacturing order")
+    st.markdown("### 📋 Production Data - Actual Materials Issued")
+    st.caption("1 row = 1 material issue detail (PRIMARY or ALTERNATIVE)")
     
     # Prepare display dataframe
     display_df = df[[
-        'order_no', 'order_status', 'health_display', 'output_display',
+        'order_no', 'status_display', 'health_display', 'output_display',
         'mo_planned_qty', 'mo_produced_qty', 'progress_percentage',
-        'material_display', 'required_qty', 'issued_actual', 'returned_actual', 
-        'net_issued_qty', 'issue_pct', 'material_uom', 'material_status', 'alt_flag'
+        'type_indicator', 'primary_display', 'primary_required_qty', 'primary_uom',
+        'actual_display', 'issued_qty', 'returned_qty', 'net_qty', 'issued_uom',
+        'batch_no', 'issue_date_display', 'return_date_display', 'material_status'
     ]].copy()
     
     st.dataframe(
         display_df.rename(columns={
             'order_no': 'Order',
-            'order_status': 'Status',
+            'status_display': 'Status',
             'health_display': 'Health',
             'output_display': 'Output Product',
             'mo_planned_qty': 'Planned',
             'mo_produced_qty': 'Produced',
             'progress_percentage': 'Prod %',
-            'material_display': 'Input Material',
-            'required_qty': 'Required',
-            'issued_actual': 'Issued (Act)',
-            'returned_actual': 'Returned',
-            'net_issued_qty': 'Net Issued',
-            'issue_pct': 'Issue %',
-            'material_uom': 'UOM',
-            'material_status': 'Mat Status',
-            'alt_flag': 'Alt'
+            'type_indicator': 'Type',
+            'primary_display': 'Primary Material (Requirement)',
+            'primary_required_qty': 'Required',
+            'primary_uom': 'Req UOM',
+            'actual_display': 'Actual Material (Issued)',
+            'issued_qty': 'Issued',
+            'returned_qty': 'Returned',
+            'net_qty': 'Net',
+            'issued_uom': 'UOM',
+            'batch_no': 'Batch',
+            'issue_date_display': 'Issue Date',
+            'return_date_display': 'Return Date',
+            'material_status': 'Mat Status'
         }),
         use_container_width=True,
         hide_index=True,
@@ -524,21 +566,25 @@ def _render_production_data_table_with_data(queries: OverviewQueries, filters: D
             'Planned': st.column_config.NumberColumn('Planned', format='%.0f'),
             'Produced': st.column_config.NumberColumn('Produced', format='%.0f'),
             'Prod %': st.column_config.ProgressColumn('Prod %', format='%.0f%%', min_value=0, max_value=100),
-            'Input Material': st.column_config.TextColumn('Input Material', width='medium'),
+            'Type': st.column_config.TextColumn('Type', width='small'),
+            'Primary Material (Requirement)': st.column_config.TextColumn('Primary Material', width='medium'),
             'Required': st.column_config.NumberColumn('Required', format='%.2f'),
-            'Issued (Act)': st.column_config.NumberColumn('Issued (Act)', format='%.2f'),
+            'Req UOM': st.column_config.TextColumn('Req UOM', width='small'),
+            'Actual Material (Issued)': st.column_config.TextColumn('Actual Material', width='medium'),
+            'Issued': st.column_config.NumberColumn('Issued', format='%.2f'),
             'Returned': st.column_config.NumberColumn('Returned', format='%.2f'),
-            'Net Issued': st.column_config.NumberColumn('Net Issued', format='%.2f'),
-            'Issue %': st.column_config.ProgressColumn('Issue %', format='%.0f%%', min_value=0, max_value=100),
+            'Net': st.column_config.NumberColumn('Net', format='%.2f'),
             'UOM': st.column_config.TextColumn('UOM', width='small'),
+            'Batch': st.column_config.TextColumn('Batch', width='small'),
+            'Issue Date': st.column_config.TextColumn('Issue Date', width='small'),
+            'Return Date': st.column_config.TextColumn('Return Date', width='small'),
             'Mat Status': st.column_config.TextColumn('Mat Status', width='small'),
-            'Alt': st.column_config.TextColumn('Alt', width='small'),
         },
         height=600
     )
     
     # Record count
-    st.caption(f"Showing {len(display_df)} material lines from {total_orders} orders")
+    st.caption(f"Showing {len(display_df)} issue lines from {total_orders} orders ({primary_count} primary, {alt_count} alternative)")
     
     # Return df for analytics
     return df
@@ -588,15 +634,35 @@ def render_overview_tab():
             axis=1
         )
         
-        # For analytics, we need order-level data
-        orders_df = df.drop_duplicates(subset=['order_no']).copy()
+        # For analytics, we need order-level data (aggregate from issue details)
+        # Group by order to get unique MOs
+        orders_df = df.groupby('mo_id').agg({
+            'order_no': 'first',
+            'order_status': 'first',
+            'output_product_name': 'first',
+            'mo_planned_qty': 'first',
+            'mo_produced_qty': 'first',
+            'progress_percentage': 'first',
+            'qc_pass_percentage': 'first',
+            'schedule_variance_days': 'first',
+            'health_status': 'first'
+        }).reset_index()
+        
         # Map columns to match what analytics functions expect
         orders_df['product_name'] = orders_df['output_product_name']
         orders_df['planned_qty'] = orders_df['mo_planned_qty']
         orders_df['produced_qty'] = orders_df['mo_produced_qty']
         orders_df['quality_percentage'] = orders_df['qc_pass_percentage']
-        orders_df['material_percentage'] = orders_df['issue_percentage']
         orders_df['status'] = orders_df['order_status']
+        
+        # Calculate aggregate material_percentage per order (avg of primary issues only)
+        primary_df = df[df['material_type'] == 'PRIMARY'].copy()
+        if not primary_df.empty:
+            material_pct_by_order = primary_df.groupby('mo_id')['issue_percentage'].mean().reset_index()
+            material_pct_by_order.columns = ['mo_id', 'material_percentage']
+            orders_df = orders_df.merge(material_pct_by_order, on='mo_id', how='left')
+        else:
+            orders_df['material_percentage'] = 0
         
         _render_analytics_section(orders_df)
         
