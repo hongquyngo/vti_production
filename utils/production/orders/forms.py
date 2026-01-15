@@ -3,8 +3,12 @@
 Form components for Orders domain
 Create and Edit order forms with comprehensive validation
 
-Version: 5.0.0
+Version: 5.1.0
 Changes:
+- v5.1.0: Fixed validation results not showing after clicking Validate button
+          + Merged validation results rendering INTO _fragment_order_details
+          + Removed separate _render_validation_results fragment
+          + Now only fragment reruns when validating (not full page)
 - v5.0.0: Integrated comprehensive validation module
           + Create form now shows all validation warnings before submission
           + Edit form validates and shows warnings
@@ -76,13 +80,8 @@ class OrderForms:
             if st.session_state.create_form_bom_id:
                 st.markdown("---")
                 
-                # Fragment 3: Order Details Form
+                # Fragment 3: Order Details Form + Validation Results (all in one fragment)
                 self._fragment_order_details()
-                
-                # Show validation results if available (outside fragment to avoid nesting)
-                if st.session_state.get('create_validation_results'):
-                    st.markdown("---")
-                    self._render_validation_results()
     
     @st.fragment
     def _fragment_product_selection(self):
@@ -288,7 +287,16 @@ class OrderForms:
     @st.fragment
     def _fragment_order_details(self):
         """
-        Fragment 3: Order Details Form with Validation
+        Fragment 3: Order Details Form + Validation Results
+        
+        This fragment includes:
+        - Order details form (qty, date, priority, warehouses)
+        - Validate button
+        - Validation results (blocks, warnings, material check)
+        - Create/Cancel buttons
+        
+        All in one fragment so only this section reruns when validating,
+        not the entire page (dashboard, filters, product/BOM selection stay stable)
         """
         st.markdown("### 3️⃣ Order Details")
         
@@ -433,12 +441,17 @@ class OrderForms:
             results = self.manager.validate_create(order_data)
             st.session_state.create_validation_results = results
             st.session_state.create_order_data = order_data
+            # Fragment will rerun itself - no need for st.rerun()
         
-    @st.fragment
-    def _render_validation_results(self):
+        # === VALIDATION RESULTS - RENDERED INSIDE FRAGMENT ===
+        if st.session_state.get('create_validation_results'):
+            st.markdown("---")
+            self._render_validation_results_inline()
+        
+    def _render_validation_results_inline(self):
         """
-        Fragment 4: Validation Results
-        Isolated rerun when acknowledging warnings
+        Render validation results inline (called from within _fragment_order_details)
+        NOT a separate fragment - rendered inside the order details fragment
         """
         results = st.session_state.create_validation_results
         order_data = st.session_state.get('create_order_data', {})
