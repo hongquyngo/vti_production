@@ -1,9 +1,19 @@
 # pages/4_📊_BOM_Variance.py
 """
-BOM Variance Analysis - VERSION 1.4 (Usage Mode Support)
+BOM Variance Analysis - VERSION 1.5 (Restructured Layout)
 
 Dashboard for analyzing actual material consumption vs BOM theoretical values.
 Identifies variances and suggests adjustments to improve BOM accuracy.
+
+Changes in v1.5:
+- NEW LAYOUT: Option B - Single Page Restructured
+- Compact 4-card summary metrics (BOMs, Materials, Issues, Avg Variance)
+- Donut chart for variance overview (replaces histogram + 4 numbers)
+- Combined By Type section (BOM Type + Material Type side by side)
+- Progress bars for issue percentages
+- Top Issues table at full width (kept all columns as requested)
+- Mixed Usage collapsed by default
+- Cleaner visual hierarchy, less scrolling
 
 Changes in v1.4:
 - Support for Usage Mode (PRIMARY_ONLY, ALTERNATIVE_ONLY, MIXED)
@@ -915,7 +925,7 @@ def render_filters_section(full_data: pd.DataFrame):
 @st.fragment
 def render_filtered_results(full_data: pd.DataFrame):
     """
-    Render filtered results - uses @st.fragment for partial updates
+    Render filtered results - Option B: Single Page Restructured Layout
     """
     # Apply filters
     filtered_data = apply_filters(full_data)
@@ -935,83 +945,254 @@ def render_filtered_results(full_data: pd.DataFrame):
     metrics = calculate_metrics(filtered_data)
     distribution = calculate_distribution(filtered_data)
     
-    # Summary Metrics Row
-    render_summary_metrics(metrics)
+    # ==================== Section 1: Summary Metrics (Compact 4 cards) ====================
+    render_summary_metrics_compact(metrics)
     
     st.markdown("---")
     
-    # Two column layout
+    # ==================== Section 2: Two-column (Donut Chart | By Type) ====================
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        # Variance Distribution
-        render_variance_distribution(distribution)
-        
-        st.markdown("---")
-        
-        # Variance by BOM Type
-        render_bom_type_summary(filtered_data)
+        render_variance_donut_chart(distribution)
     
     with col2:
-        # Top Variances Table
-        render_top_variances_table(filtered_data)
+        render_by_type_combined(filtered_data)
     
-    # Mixed Usage Summary (if any)
+    st.markdown("---")
+    
+    # ==================== Section 3: Top Issues Table (Full Width) ====================
+    render_top_variances_table(filtered_data, limit=10)
+    
+    # ==================== Section 4: Mixed Usage (Collapsed) ====================
     render_mixed_usage_summary(filtered_data)
 
 
-def render_summary_metrics(metrics: Dict[str, Any]):
-    """Render summary metrics cards"""
+def render_summary_metrics_compact(metrics: Dict[str, Any]):
+    """Render compact summary metrics - 4 essential cards"""
     
-    st.subheader("📈 Summary Metrics")
+    col1, col2, col3, col4 = st.columns(4)
     
-    col1, col2, col3, col4, col5 = st.columns(5)
+    total_boms = metrics.get('total_boms_analyzed', 0)
+    total_materials = metrics.get('total_materials_analyzed', 0)
+    materials_with_variance = metrics.get('materials_with_variance', 0)
+    avg_variance = metrics.get('avg_variance_pct', 0)
+    max_variance = metrics.get('max_variance_pct', 0)
+    
+    # Calculate percentage of issues
+    issue_pct = (materials_with_variance / total_materials * 100) if total_materials > 0 else 0
     
     with col1:
         st.metric(
-            "BOMs Analyzed",
-            metrics.get('total_boms_analyzed', 0),
-            help="Number of BOMs in filtered data"
+            "📦 BOMs",
+            total_boms,
+            help="Number of BOMs analyzed in selected period"
         )
     
     with col2:
         st.metric(
-            "Materials Analyzed",
-            metrics.get('total_materials_analyzed', 0),
-            help="Total material-BOM combinations in filtered data"
+            "🧪 Materials",
+            total_materials,
+            help="Total material-BOM combinations analyzed"
         )
     
     with col3:
-        boms_with_variance = metrics.get('boms_with_variance', 0)
-        total_boms = metrics.get('total_boms_analyzed', 0)
-        pct = (boms_with_variance / total_boms * 100) if total_boms > 0 else 0
-        
         st.metric(
-            "⚠️ High Variance",
-            boms_with_variance,
-            delta=f"{pct:.1f}%" if pct > 0 else None,
+            "⚠️ Issues",
+            materials_with_variance,
+            delta=f"{issue_pct:.0f}% of total",
             delta_color="inverse",
-            help="BOMs with at least one material above variance threshold"
+            help="Materials with variance above threshold - need review"
         )
     
     with col4:
         st.metric(
-            "⚠️ Materials to Review",
-            metrics.get('materials_with_variance', 0),
-            help="Materials with variance above threshold"
-        )
-    
-    with col5:
-        avg_variance = metrics.get('avg_variance_pct', 0)
-        max_variance = metrics.get('max_variance_pct', 0)
-        
-        st.metric(
-            "Avg. Variance",
+            "📈 Avg Variance",
             f"{avg_variance:.1f}%",
-            delta=f"Max: {max_variance:.1f}%",
+            delta=f"Max: {max_variance:.0f}%",
             delta_color="off",
-            help="Average absolute variance across filtered materials"
+            help="Average absolute variance | Maximum variance"
         )
+
+
+def render_variance_donut_chart(distribution: Dict[str, Any]):
+    """Render variance overview with donut chart"""
+    
+    st.subheader("📊 Variance Overview")
+    
+    categories = distribution.get('categories', {})
+    
+    if not categories or all(v == 0 for v in categories.values()):
+        st.info("ℹ️ No variance data available.")
+        return
+    
+    on_target = categories.get('on_target', 0)
+    under_used = categories.get('under_used', 0)
+    over_used = categories.get('over_used', 0)
+    high_variance = categories.get('high_variance', 0)
+    
+    total = on_target + under_used + over_used
+    on_target_pct = (on_target / total * 100) if total > 0 else 0
+    
+    try:
+        import plotly.graph_objects as go
+        
+        # Donut chart
+        labels = ['On Target', 'Under-used', 'Over-used']
+        values = [on_target, under_used, over_used]
+        colors = ['#2ecc71', '#3498db', '#e67e22']  # Green, Blue, Orange
+        
+        fig = go.Figure(data=[go.Pie(
+            labels=labels,
+            values=values,
+            hole=0.6,
+            marker_colors=colors,
+            textinfo='value',
+            textfont_size=14,
+            hovertemplate="<b>%{label}</b><br>%{value} materials<br>%{percent}<extra></extra>"
+        )])
+        
+        # Add center text
+        fig.add_annotation(
+            text=f"<b>{on_target_pct:.0f}%</b><br>On Track",
+            x=0.5, y=0.5,
+            font_size=16,
+            showarrow=False
+        )
+        
+        fig.update_layout(
+            showlegend=False,
+            height=250,
+            margin=dict(l=20, r=20, t=10, b=10)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+    except ImportError:
+        # Fallback without Plotly
+        st.markdown(f"""
+        <div style="text-align: center; padding: 20px;">
+            <h1 style="font-size: 48px; margin: 0;">{on_target_pct:.0f}%</h1>
+            <p style="color: #666;">On Track</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Legend with colored indicators
+    leg_col1, leg_col2 = st.columns(2)
+    
+    with leg_col1:
+        st.markdown(f"🟢 **On Target:** {on_target}")
+        st.markdown(f"🔵 **Under-used:** {under_used}")
+    
+    with leg_col2:
+        st.markdown(f"🟠 **Over-used:** {over_used}")
+        st.markdown(f"🔴 **High Variance:** {high_variance}")
+    
+    # Statistics expander
+    stats = distribution.get('stats', {})
+    if stats:
+        with st.expander("📊 Statistics", expanded=False):
+            stat_col1, stat_col2 = st.columns(2)
+            with stat_col1:
+                st.caption(f"Mean: {stats.get('mean', 0):.2f}%")
+                st.caption(f"Median: {stats.get('median', 0):.2f}%")
+            with stat_col2:
+                st.caption(f"Std Dev: {stats.get('std', 0):.2f}%")
+                st.caption(f"Range: {stats.get('min', 0):.1f}% to {stats.get('max', 0):.1f}%")
+
+
+def render_by_type_combined(filtered_data: pd.DataFrame):
+    """Render BOM Type and Material Type summaries combined"""
+    
+    st.subheader("📋 Breakdown by Type")
+    
+    if filtered_data.empty:
+        st.info("ℹ️ No data available.")
+        return
+    
+    # Check if new columns exist
+    has_new_columns = 'mo_count_pure' in filtered_data.columns
+    
+    # ==================== BOM Type Section ====================
+    st.markdown("**By BOM Type**")
+    
+    bom_summary = filtered_data.groupby('bom_type').agg({
+        'bom_header_id': 'nunique',
+        'material_id': 'count',
+        'variance_pct': 'mean',
+        'has_high_variance': 'sum'
+    }).reset_index()
+    
+    bom_summary.columns = ['Type', 'BOMs', 'Materials', 'Avg Var', 'Issues']
+    
+    # Create compact display
+    for _, row in bom_summary.iterrows():
+        bom_type = row['Type']
+        boms = int(row['BOMs'])
+        materials = int(row['Materials'])
+        avg_var = row['Avg Var'] if pd.notna(row['Avg Var']) else 0
+        issues = int(row['Issues'])
+        
+        # Progress bar for issues
+        issue_pct = (issues / materials * 100) if materials > 0 else 0
+        
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            st.markdown(f"**{bom_type}** ({boms} BOMs)")
+        with col2:
+            if pd.notna(row['Avg Var']):
+                var_color = "🟢" if abs(avg_var) <= 5 else ("🟠" if abs(avg_var) <= 10 else "🔴")
+                st.markdown(f"{var_color} {avg_var:+.1f}%")
+            else:
+                st.markdown("⚪ N/A")
+        with col3:
+            st.markdown(f"⚠️ {issues}")
+        
+        # Mini progress bar
+        st.progress(min(issue_pct / 100, 1.0), text=None)
+    
+    st.markdown("---")
+    
+    # ==================== Material Type Section ====================
+    st.markdown("**By Material Type**")
+    
+    mat_summary = filtered_data.groupby('material_type').agg({
+        'material_id': 'count',
+        'variance_pct': 'mean',
+        'has_high_variance': 'sum'
+    }).reset_index()
+    
+    mat_summary.columns = ['Type', 'Count', 'Avg Var', 'Issues']
+    
+    for _, row in mat_summary.iterrows():
+        mat_type = row['Type']
+        count = int(row['Count'])
+        avg_var = row['Avg Var'] if pd.notna(row['Avg Var']) else 0
+        issues = int(row['Issues'])
+        
+        issue_pct = (issues / count * 100) if count > 0 else 0
+        
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            # Emoji based on type
+            emoji = "🧪" if mat_type == "RAW_MATERIAL" else ("📦" if mat_type == "PACKAGING" else "🔧")
+            st.markdown(f"{emoji} **{mat_type}** ({count})")
+        with col2:
+            if pd.notna(row['Avg Var']):
+                var_color = "🟢" if abs(avg_var) <= 5 else ("🟠" if abs(avg_var) <= 10 else "🔴")
+                st.markdown(f"{var_color} {avg_var:+.1f}%")
+            else:
+                st.markdown("⚪ N/A")
+        with col3:
+            st.markdown(f"⚠️ {issues}")
+        
+        st.progress(min(issue_pct / 100, 1.0), text=None)
+
+
+# Keep old function for backward compatibility but mark as deprecated
+def render_summary_metrics(metrics: Dict[str, Any]):
+    """[DEPRECATED] Use render_summary_metrics_compact instead"""
+    render_summary_metrics_compact(metrics)
 
 
 def render_variance_distribution(distribution: Dict[str, Any]):
@@ -1455,7 +1636,7 @@ def render_footer():
     
     with col1:
         st.caption(
-            f"📊 BOM Variance Analysis v1.4 | "
+            f"📊 BOM Variance Analysis v1.5 | "
             f"Period: {config.date_from} to {config.date_to} | "
             f"Threshold: {config.variance_threshold}%"
         )
