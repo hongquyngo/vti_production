@@ -1,9 +1,18 @@
 # pages/4_📊_BOM_Variance.py
 """
-BOM Variance Analysis - VERSION 1.3 (Simplified Filters)
+BOM Variance Analysis - VERSION 1.4 (Usage Mode Support)
 
 Dashboard for analyzing actual material consumption vs BOM theoretical values.
 Identifies variances and suggests adjustments to improve BOM accuracy.
+
+Changes in v1.4:
+- Support for Usage Mode (PRIMARY_ONLY, ALTERNATIVE_ONLY, MIXED)
+- Variance calculated from PURE MOs only (not mixed)
+- New columns: mo_count_pure, mo_count_mixed, has_mixed_usage
+- Display "Xp+Ym" format for MO counts (X pure + Y mixed)
+- Added Mixed Usage Summary section
+- Show material source indicator (Pri/Alt)
+- Backward compatible with v2.0 queries
 
 Changes in v1.3:
 - Added "Apply Filters" button to trigger data refresh after filter selection
@@ -453,17 +462,23 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             'total_materials_analyzed': 0,
             'boms_with_variance': 0,
             'materials_with_variance': 0,
+            'materials_with_mixed': 0,
             'avg_variance_pct': 0,
             'max_variance_pct': 0
         }
     
     high_variance = df[df['has_high_variance'] == True]
     
+    # Check if new columns exist
+    has_mixed_col = 'has_mixed_usage' in df.columns
+    materials_with_mixed = len(df[df['has_mixed_usage'] == True]) if has_mixed_col else 0
+    
     return {
         'total_boms_analyzed': df['bom_header_id'].nunique(),
         'total_materials_analyzed': len(df),
         'boms_with_variance': high_variance['bom_header_id'].nunique(),
         'materials_with_variance': len(high_variance),
+        'materials_with_mixed': materials_with_mixed,
         'avg_variance_pct': float(df['variance_pct'].abs().mean()) if not df['variance_pct'].isna().all() else 0,
         'max_variance_pct': float(df['variance_pct'].abs().max()) if not df['variance_pct'].isna().all() else 0
     }
@@ -940,6 +955,9 @@ def render_filtered_results(full_data: pd.DataFrame):
     with col2:
         # Top Variances Table
         render_top_variances_table(filtered_data)
+    
+    # Mixed Usage Summary (if any)
+    render_mixed_usage_summary(filtered_data)
 
 
 def render_summary_metrics(metrics: Dict[str, Any]):
@@ -1100,15 +1118,30 @@ def render_bom_type_summary(filtered_data: pd.DataFrame):
         st.info("ℹ️ No BOM type data available.")
         return
     
-    # Group by BOM type
-    summary = filtered_data.groupby('bom_type').agg({
-        'bom_header_id': 'nunique',
-        'material_id': 'count',
-        'variance_pct': 'mean',
-        'has_high_variance': 'sum'
-    }).reset_index()
+    # Check if new columns exist
+    has_new_columns = 'mo_count_pure' in filtered_data.columns
     
-    summary.columns = ['BOM Type', 'BOMs', 'Materials', 'Avg Variance', 'High Var.']
+    # Group by BOM type
+    if has_new_columns:
+        summary = filtered_data.groupby('bom_type').agg({
+            'bom_header_id': 'nunique',
+            'material_id': 'count',
+            'variance_pct': 'mean',
+            'has_high_variance': 'sum',
+            'mo_count_pure': 'sum',
+            'mo_count_mixed': 'sum'
+        }).reset_index()
+        
+        summary.columns = ['BOM Type', 'BOMs', 'Materials', 'Avg Variance', 'High Var.', 'Pure MOs', 'Mixed MOs']
+    else:
+        summary = filtered_data.groupby('bom_type').agg({
+            'bom_header_id': 'nunique',
+            'material_id': 'count',
+            'variance_pct': 'mean',
+            'has_high_variance': 'sum'
+        }).reset_index()
+        
+        summary.columns = ['BOM Type', 'BOMs', 'Materials', 'Avg Variance', 'High Var.']
     
     # Format display
     summary['Avg Variance'] = summary['Avg Variance'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
@@ -1118,11 +1151,81 @@ def render_bom_type_summary(filtered_data: pd.DataFrame):
         axis=1
     )
     
-    st.dataframe(
-        summary[['BOM Type', 'BOMs', 'Materials', 'Avg Variance', 'High Var.', '% High Var.']],
-        use_container_width=True,
-        hide_index=True
-    )
+    if has_new_columns:
+        st.dataframe(
+            summary[['BOM Type', 'BOMs', 'Materials', 'Avg Variance', 'High Var.', '% High Var.', 'Pure MOs', 'Mixed MOs']],
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.dataframe(
+            summary[['BOM Type', 'BOMs', 'Materials', 'Avg Variance', 'High Var.', '% High Var.']],
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+def render_mixed_usage_summary(filtered_data: pd.DataFrame):
+    """Render summary of materials with mixed usage (primary + alternative in same MO)"""
+    
+    # Check if new columns exist
+    if 'mo_count_mixed' not in filtered_data.columns:
+        return
+    
+    # Filter to items with mixed usage
+    mixed_data = filtered_data[filtered_data['mo_count_mixed'] > 0].copy()
+    
+    if mixed_data.empty:
+        return
+    
+    with st.expander(f"🔀 Mixed Usage Summary ({len(mixed_data)} materials)", expanded=False):
+        st.caption("""
+        ⚠️ **Mixed Usage:** These materials had MOs where both primary and alternative were used together.
+        Variance is calculated from **pure MOs only** (where only one material type was used).
+        Mixed MO data is shown for reference but not used in variance calculation.
+        """)
+        
+        # Summary table
+        display_df = mixed_data[[
+            'bom_code', 'material_code', 'material_name', 'is_alternative',
+            'mo_count_pure', 'mo_count_mixed', 'actual_avg_per_unit', 'avg_per_unit_mixed',
+            'theoretical_qty_with_scrap', 'variance_pct'
+        ]].copy()
+        
+        # Format
+        display_df['mat_source'] = display_df['is_alternative'].apply(
+            lambda x: '🔄 Alt' if x == 1 else '📦 Pri'
+        )
+        display_df['pure_avg'] = display_df['actual_avg_per_unit'].apply(
+            lambda x: f"{x:.4f}" if x > 0 else "N/A"
+        )
+        display_df['mixed_avg'] = display_df['avg_per_unit_mixed'].apply(
+            lambda x: f"{x:.4f}" if x > 0 else "N/A"
+        )
+        display_df['theory'] = display_df['theoretical_qty_with_scrap'].apply(lambda x: f"{x:.4f}")
+        display_df['variance_display'] = display_df['variance_pct'].apply(
+            lambda x: f"{x:+.1f}%" if pd.notna(x) else "N/A (no pure MOs)"
+        )
+        
+        st.dataframe(
+            display_df[[
+                'bom_code', 'material_code', 'mat_source', 
+                'mo_count_pure', 'mo_count_mixed',
+                'theory', 'pure_avg', 'mixed_avg', 'variance_display'
+            ]].rename(columns={
+                'bom_code': 'BOM',
+                'material_code': 'Material',
+                'mat_source': 'Source',
+                'mo_count_pure': 'Pure MOs',
+                'mo_count_mixed': 'Mixed MOs',
+                'theory': 'Theory',
+                'pure_avg': 'Avg (Pure)',
+                'mixed_avg': 'Avg (Mixed)',
+                'variance_display': 'Variance'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
 
 
 def render_top_variances_table(filtered_data: pd.DataFrame, limit: int = 10):
@@ -1134,17 +1237,46 @@ def render_top_variances_table(filtered_data: pd.DataFrame, limit: int = 10):
         st.info("ℹ️ No variance data available for the selected filters.")
         return
     
+    # Filter to only show items with pure MO data (variance is calculated from pure MOs)
+    data_with_variance = filtered_data[filtered_data['variance_pct'].notna()].copy()
+    
+    if data_with_variance.empty:
+        st.info("ℹ️ No variance data from pure MOs. All MOs may have mixed material usage.")
+        return
+    
     # Sort by absolute variance
-    top_data = filtered_data.copy()
-    top_data['abs_variance'] = top_data['variance_pct'].abs()
-    top_data = top_data.sort_values('abs_variance', ascending=False).head(limit)
+    data_with_variance['abs_variance'] = data_with_variance['variance_pct'].abs()
+    top_data = data_with_variance.sort_values('abs_variance', ascending=False).head(limit)
+    
+    # Check if new columns exist (backward compatibility)
+    has_new_columns = 'mo_count_pure' in top_data.columns
     
     # Format for display
-    display_df = top_data[[
-        'bom_code', 'bom_type', 'material_code', 'material_name', 'material_type',
-        'theoretical_qty_with_scrap', 'actual_avg_per_unit', 
-        'variance_pct', 'mo_count', 'cv_percent'
-    ]].copy()
+    if has_new_columns:
+        display_df = top_data[[
+            'bom_code', 'bom_type', 'material_code', 'material_name', 'material_type',
+            'is_alternative', 'theoretical_qty_with_scrap', 'actual_avg_per_unit', 
+            'variance_pct', 'mo_count_pure', 'mo_count_mixed', 'cv_percent'
+        ]].copy()
+        
+        # Format MO count with pure/mixed indicator
+        display_df['mo_display'] = display_df.apply(
+            lambda row: f"{int(row['mo_count_pure'])}p" + (f"+{int(row['mo_count_mixed'])}m" if row['mo_count_mixed'] > 0 else ""),
+            axis=1
+        )
+        
+        # Format is_alternative
+        display_df['mat_source'] = display_df['is_alternative'].apply(
+            lambda x: '🔄 Alt' if x == 1 else '📦 Pri'
+        )
+    else:
+        display_df = top_data[[
+            'bom_code', 'bom_type', 'material_code', 'material_name', 'material_type',
+            'theoretical_qty_with_scrap', 'actual_avg_per_unit', 
+            'variance_pct', 'mo_count', 'cv_percent'
+        ]].copy()
+        display_df['mo_display'] = display_df['mo_count'].astype(int).astype(str)
+        display_df['mat_source'] = ''
     
     # Format columns
     display_df['theoretical_qty_with_scrap'] = display_df['theoretical_qty_with_scrap'].apply(lambda x: f"{x:.4f}")
@@ -1152,12 +1284,32 @@ def render_top_variances_table(filtered_data: pd.DataFrame, limit: int = 10):
     display_df['variance_display'] = display_df['variance_pct'].apply(format_variance_display)
     display_df['cv_display'] = display_df['cv_percent'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
     
-    st.dataframe(
-        display_df[[
+    # Select columns based on availability
+    if has_new_columns:
+        columns_to_show = [
+            'bom_code', 'bom_type', 'material_code', 'material_name', 'mat_source',
+            'theoretical_qty_with_scrap', 'actual_avg_per_unit',
+            'variance_display', 'mo_display', 'cv_display'
+        ]
+        column_names = {
+            'bom_code': 'BOM',
+            'bom_type': 'Type',
+            'material_code': 'Material',
+            'material_name': 'Name',
+            'mat_source': 'Source',
+            'theoretical_qty_with_scrap': 'Theory',
+            'actual_avg_per_unit': 'Actual',
+            'variance_display': 'Variance',
+            'mo_display': 'MOs',
+            'cv_display': 'CV%'
+        }
+    else:
+        columns_to_show = [
             'bom_code', 'bom_type', 'material_code', 'material_name', 'material_type',
             'theoretical_qty_with_scrap', 'actual_avg_per_unit',
-            'variance_display', 'mo_count', 'cv_display'
-        ]].rename(columns={
+            'variance_display', 'mo_display', 'cv_display'
+        ]
+        column_names = {
             'bom_code': 'BOM',
             'bom_type': 'Type',
             'material_code': 'Material',
@@ -1166,18 +1318,32 @@ def render_top_variances_table(filtered_data: pd.DataFrame, limit: int = 10):
             'theoretical_qty_with_scrap': 'Theory',
             'actual_avg_per_unit': 'Actual',
             'variance_display': 'Variance',
-            'mo_count': 'MOs',
+            'mo_display': 'MOs',
             'cv_display': 'CV%'
-        }),
+        }
+    
+    st.dataframe(
+        display_df[columns_to_show].rename(columns=column_names),
         use_container_width=True,
         hide_index=True
     )
     
-    st.caption("""
-    📝 **Legend:** Theory = Theoretical qty per output (with scrap) | 
-    Actual = Average actual consumption per output | 
-    CV% = Coefficient of Variation (high = inconsistent)
-    """)
+    # Legend
+    if has_new_columns:
+        st.caption("""
+        📝 **Legend:** 
+        - **Source:** 📦 Pri = Primary material | 🔄 Alt = Alternative material
+        - **Theory:** Theoretical qty per output (with scrap)
+        - **Actual:** Average consumption per output (from pure MOs only)
+        - **MOs:** Xp+Ym = X pure MOs + Y mixed MOs (variance calculated from pure MOs only)
+        - **CV%:** Coefficient of Variation (high = inconsistent)
+        """)
+    else:
+        st.caption("""
+        📝 **Legend:** Theory = Theoretical qty per output (with scrap) | 
+        Actual = Average actual consumption per output | 
+        CV% = Coefficient of Variation (high = inconsistent)
+        """)
 
 
 def format_variance_display(value: float) -> str:
@@ -1289,7 +1455,7 @@ def render_footer():
     
     with col1:
         st.caption(
-            f"📊 BOM Variance Analysis v1.3 | "
+            f"📊 BOM Variance Analysis v1.4 | "
             f"Period: {config.date_from} to {config.date_to} | "
             f"Threshold: {config.variance_threshold}%"
         )
