@@ -1,60 +1,84 @@
 # utils/production/orders/manager.py
 """
 Order Manager - Business logic for Production Orders
-Create, Update, Confirm, Cancel operations
+Create, Update, Confirm, Cancel operations with comprehensive validation
 
-Version: 1.0.0
+Version: 2.0.0
+Changes:
+- v2.0.0: Integrated comprehensive validation module
+          + All CRUD operations now use OrderValidators
+          + Support for BLOCK (hard stop) and WARNING (soft) validations
+          + Methods return ValidationResults for UI to handle warnings
 """
 
 import logging
 from datetime import datetime
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Tuple
 
 import pandas as pd
 from sqlalchemy import text
 
 from utils.db import get_db_engine
-from .common import get_vietnam_now, OrderConstants, OrderValidator
+from .common import get_vietnam_now, OrderConstants
+from .validators import (
+    OrderValidators, ValidationResults, ValidationLevel,
+    validate_create_order, validate_edit_order, 
+    validate_confirm_order, validate_cancel_order, validate_delete_order
+)
 
 logger = logging.getLogger(__name__)
 
 
 class OrderManager:
-    """Business logic for Production Order management"""
+    """Business logic for Production Order management with comprehensive validation"""
     
     def __init__(self):
         self.engine = get_db_engine()
+        self.validator = OrderValidators()
     
     # ==================== Create Order ====================
     
-    def create_order(self, order_data: Dict[str, Any]) -> str:
+    def validate_create(self, order_data: Dict[str, Any]) -> ValidationResults:
         """
-        Create new production order with validation
+        Validate order creation without executing
         
         Args:
-            order_data: Dictionary containing order information:
-                - bom_header_id: BOM to use
-                - product_id: Product to produce
-                - planned_qty: Planned quantity
-                - uom: Unit of measure
-                - warehouse_id: Source warehouse
-                - target_warehouse_id: Target warehouse
-                - scheduled_date: Scheduled production date
-                - priority: Order priority (optional)
-                - notes: Notes (optional)
-                - created_by: User ID creating the order
-                
+            order_data: Order data to validate
+            
         Returns:
-            Order number (e.g., "MO-20251201-0001")
+            ValidationResults with blocks and warnings
+        """
+        return self.validator.validate_create(order_data)
+    
+    def create_order(self, order_data: Dict[str, Any], 
+                    skip_warnings: bool = False) -> Tuple[Optional[str], ValidationResults]:
+        """
+        Create new production order with comprehensive validation
+        
+        Args:
+            order_data: Dictionary containing order information
+            skip_warnings: If True, proceed despite warnings
+            
+        Returns:
+            Tuple of (order_no or None, ValidationResults)
             
         Raises:
-            ValueError: If validation fails or creation fails
+            ValueError: If blocking validation fails
         """
-        # Validate
-        is_valid, error = OrderValidator.validate_create_order(order_data)
-        if not is_valid:
-            raise ValueError(error)
+        # Run validation
+        results = self.validator.validate_create(order_data)
         
+        # Check for blocking errors
+        if results.has_blocks:
+            error_msgs = [f"[{r.rule_id}] {r.message}" for r in results.blocks]
+            raise ValueError("Validation failed:\n" + "\n".join(error_msgs))
+        
+        # Check for warnings (if not skipping)
+        if results.has_warnings and not skip_warnings:
+            # Return results for UI to handle
+            return None, results
+        
+        # Proceed with creation
         with self.engine.begin() as conn:
             try:
                 # Generate order number
@@ -99,7 +123,7 @@ class OrderManager:
                 self._create_material_requirements(conn, order_id, order_data)
                 
                 logger.info(f"✅ Created production order {order_no} (ID: {order_id})")
-                return order_no
+                return order_no, results
                 
             except Exception as e:
                 logger.error(f"❌ Error creating order: {e}")
@@ -107,22 +131,50 @@ class OrderManager:
     
     # ==================== Update Order ====================
     
-    def update_order(self, order_id: int, update_data: Dict[str, Any], 
-                    user_id: int = None) -> bool:
+    def validate_update(self, order_id: int, update_data: Dict[str, Any]) -> ValidationResults:
         """
-        Update existing production order
+        Validate order update without executing
         
         Args:
             order_id: Order ID to update
-            update_data: Fields to update (planned_qty, scheduled_date, priority, notes, etc.)
-            user_id: User making the update
+            update_data: Fields to update
             
         Returns:
-            True if successful
+            ValidationResults with blocks and warnings
+        """
+        return self.validator.validate_edit(order_id, update_data)
+    
+    def update_order(self, order_id: int, update_data: Dict[str, Any], 
+                    user_id: int = None,
+                    skip_warnings: bool = False) -> Tuple[bool, ValidationResults]:
+        """
+        Update existing production order with comprehensive validation
+        
+        Args:
+            order_id: Order ID to update
+            update_data: Fields to update
+            user_id: User making the update
+            skip_warnings: If True, proceed despite warnings
+            
+        Returns:
+            Tuple of (success, ValidationResults)
             
         Raises:
-            ValueError: If order not found or cannot be edited
+            ValueError: If blocking validation fails
         """
+        # Run validation
+        results = self.validator.validate_edit(order_id, update_data)
+        
+        # Check for blocking errors
+        if results.has_blocks:
+            error_msgs = [f"[{r.rule_id}] {r.message}" for r in results.blocks]
+            raise ValueError("Validation failed:\n" + "\n".join(error_msgs))
+        
+        # Check for warnings (if not skipping)
+        if results.has_warnings and not skip_warnings:
+            return False, results
+        
+        # Proceed with update
         with self.engine.begin() as conn:
             try:
                 # Get current order
@@ -136,13 +188,7 @@ class OrderManager:
                 if not result:
                     raise ValueError(f"Order {order_id} not found")
                 
-                current_status = result[1]
                 bom_header_id = result[2]
-                
-                # Validate
-                is_valid, error = OrderValidator.validate_update_order(update_data, current_status)
-                if not is_valid:
-                    raise ValueError(error)
                 
                 # Build update query
                 update_fields = []
@@ -173,7 +219,7 @@ class OrderManager:
                     params['target_warehouse_id'] = update_data['target_warehouse_id']
                 
                 if not update_fields:
-                    return True  # Nothing to update
+                    return True, results  # Nothing to update
                 
                 # Add audit fields
                 update_fields.extend([
@@ -195,7 +241,7 @@ class OrderManager:
                                                update_data['planned_qty'])
                 
                 logger.info(f"✅ Updated order {order_id}: {list(update_data.keys())}")
-                return True
+                return True, results
                 
             except Exception as e:
                 logger.error(f"❌ Error updating order {order_id}: {e}")
@@ -203,38 +249,56 @@ class OrderManager:
     
     # ==================== Confirm Order ====================
     
-    def confirm_order(self, order_id: int, user_id: int = None) -> bool:
+    def validate_confirm(self, order_id: int) -> ValidationResults:
         """
-        Confirm a DRAFT order - changes status to CONFIRMED
+        Validate order confirmation without executing
+        
+        Args:
+            order_id: Order ID to confirm
+            
+        Returns:
+            ValidationResults with blocks and warnings
+        """
+        return self.validator.validate_confirm(order_id)
+    
+    def confirm_order(self, order_id: int, user_id: int = None,
+                     skip_warnings: bool = False) -> Tuple[bool, ValidationResults]:
+        """
+        Confirm a DRAFT order with comprehensive validation
         
         Args:
             order_id: Order ID to confirm
             user_id: User confirming the order
+            skip_warnings: If True, proceed despite warnings
             
         Returns:
-            True if successful
+            Tuple of (success, ValidationResults)
             
         Raises:
-            ValueError: If order cannot be confirmed
+            ValueError: If blocking validation fails
         """
+        # Run validation
+        results = self.validator.validate_confirm(order_id)
+        
+        # Check for blocking errors
+        if results.has_blocks:
+            error_msgs = [f"[{r.rule_id}] {r.message}" for r in results.blocks]
+            raise ValueError("Validation failed:\n" + "\n".join(error_msgs))
+        
+        # Check for warnings (if not skipping)
+        if results.has_warnings and not skip_warnings:
+            return False, results
+        
+        # Proceed with confirmation
         with self.engine.begin() as conn:
             try:
-                # Get current status
+                # Get order number for logging
                 status_query = text("""
-                    SELECT status, order_no 
-                    FROM manufacturing_orders 
+                    SELECT order_no FROM manufacturing_orders 
                     WHERE id = :order_id AND delete_flag = 0
                 """)
                 result = conn.execute(status_query, {'order_id': order_id}).fetchone()
-                
-                if not result:
-                    raise ValueError(f"Order {order_id} not found")
-                
-                current_status = result[0]
-                order_no = result[1]
-                
-                if not OrderValidator.can_confirm(current_status):
-                    raise ValueError(f"Cannot confirm order with status: {current_status}")
+                order_no = result[0] if result else order_id
                 
                 # Update status
                 update_query = text("""
@@ -251,7 +315,7 @@ class OrderManager:
                 })
                 
                 logger.info(f"✅ Confirmed order {order_no} (ID: {order_id})")
-                return True
+                return True, results
                 
             except Exception as e:
                 logger.error(f"❌ Error confirming order {order_id}: {e}")
@@ -259,40 +323,59 @@ class OrderManager:
     
     # ==================== Cancel Order ====================
     
-    def cancel_order(self, order_id: int, reason: str = None, 
-                    user_id: int = None) -> bool:
+    def validate_cancel(self, order_id: int, reason: str = None) -> ValidationResults:
         """
-        Cancel an order - changes status to CANCELLED
+        Validate order cancellation without executing
+        
+        Args:
+            order_id: Order ID to cancel
+            reason: Cancellation reason
+            
+        Returns:
+            ValidationResults with blocks and warnings
+        """
+        return self.validator.validate_cancel(order_id, reason)
+    
+    def cancel_order(self, order_id: int, reason: str = None, 
+                    user_id: int = None,
+                    skip_warnings: bool = False) -> Tuple[bool, ValidationResults]:
+        """
+        Cancel an order with comprehensive validation
         
         Args:
             order_id: Order ID to cancel
             reason: Cancellation reason
             user_id: User cancelling the order
+            skip_warnings: If True, proceed despite warnings
             
         Returns:
-            True if successful
+            Tuple of (success, ValidationResults)
             
         Raises:
-            ValueError: If order cannot be cancelled
+            ValueError: If blocking validation fails
         """
+        # Run validation
+        results = self.validator.validate_cancel(order_id, reason)
+        
+        # Check for blocking errors
+        if results.has_blocks:
+            error_msgs = [f"[{r.rule_id}] {r.message}" for r in results.blocks]
+            raise ValueError("Validation failed:\n" + "\n".join(error_msgs))
+        
+        # Check for warnings (if not skipping)
+        if results.has_warnings and not skip_warnings:
+            return False, results
+        
+        # Proceed with cancellation
         with self.engine.begin() as conn:
             try:
-                # Get current status
+                # Get order number for logging
                 status_query = text("""
-                    SELECT status, order_no 
-                    FROM manufacturing_orders 
+                    SELECT order_no FROM manufacturing_orders 
                     WHERE id = :order_id AND delete_flag = 0
                 """)
                 result = conn.execute(status_query, {'order_id': order_id}).fetchone()
-                
-                if not result:
-                    raise ValueError(f"Order {order_id} not found")
-                
-                current_status = result[0]
-                order_no = result[1]
-                
-                if not OrderValidator.can_cancel(current_status):
-                    raise ValueError(f"Cannot cancel order with status: {current_status}")
+                order_no = result[0] if result else order_id
                 
                 # Build notes with reason
                 notes_update = ""
@@ -320,7 +403,7 @@ class OrderManager:
                 })
                 
                 logger.info(f"✅ Cancelled order {order_no} (ID: {order_id})")
-                return True
+                return True, results
                 
             except Exception as e:
                 logger.error(f"❌ Error cancelling order {order_id}: {e}")
@@ -328,36 +411,56 @@ class OrderManager:
     
     # ==================== Delete Order ====================
     
-    def delete_order(self, order_id: int, user_id: int = None) -> bool:
+    def validate_delete(self, order_id: int) -> ValidationResults:
         """
-        Soft delete an order (set delete_flag = 1)
-        Only DRAFT and CANCELLED orders can be deleted
+        Validate order deletion without executing
+        
+        Args:
+            order_id: Order ID to delete
+            
+        Returns:
+            ValidationResults with blocks and warnings
+        """
+        return self.validator.validate_delete(order_id)
+    
+    def delete_order(self, order_id: int, user_id: int = None,
+                    skip_warnings: bool = False) -> Tuple[bool, ValidationResults]:
+        """
+        Soft delete an order with comprehensive validation
         
         Args:
             order_id: Order ID to delete
             user_id: User deleting the order
+            skip_warnings: If True, proceed despite warnings
             
         Returns:
-            True if successful
+            Tuple of (success, ValidationResults)
+            
+        Raises:
+            ValueError: If blocking validation fails
         """
+        # Run validation
+        results = self.validator.validate_delete(order_id)
+        
+        # Check for blocking errors
+        if results.has_blocks:
+            error_msgs = [f"[{r.rule_id}] {r.message}" for r in results.blocks]
+            raise ValueError("Validation failed:\n" + "\n".join(error_msgs))
+        
+        # Check for warnings (if not skipping)
+        if results.has_warnings and not skip_warnings:
+            return False, results
+        
+        # Proceed with deletion
         with self.engine.begin() as conn:
             try:
-                # Get current status
+                # Get order number for logging
                 status_query = text("""
-                    SELECT status, order_no 
-                    FROM manufacturing_orders 
+                    SELECT order_no FROM manufacturing_orders 
                     WHERE id = :order_id AND delete_flag = 0
                 """)
                 result = conn.execute(status_query, {'order_id': order_id}).fetchone()
-                
-                if not result:
-                    raise ValueError(f"Order {order_id} not found")
-                
-                current_status = result[0]
-                order_no = result[1]
-                
-                if current_status not in ['DRAFT', 'CANCELLED']:
-                    raise ValueError(f"Cannot delete order with status: {current_status}")
+                order_no = result[0] if result else order_id
                 
                 # Soft delete
                 delete_query = text("""
@@ -374,7 +477,7 @@ class OrderManager:
                 })
                 
                 logger.info(f"✅ Deleted order {order_no} (ID: {order_id})")
-                return True
+                return True, results
                 
             except Exception as e:
                 logger.error(f"❌ Error deleting order {order_id}: {e}")

@@ -1,29 +1,16 @@
 # utils/production/orders/forms.py
 """
 Form components for Orders domain
-Create and Edit order forms
+Create and Edit order forms with comprehensive validation
 
-Version: 4.0.0
+Version: 5.0.0
 Changes:
+- v5.0.0: Integrated comprehensive validation module
+          + Create form now shows all validation warnings before submission
+          + Edit form validates and shows warnings
+          + Warning acknowledgment required before proceeding
 - v4.0.0: Applied Fragment pattern to minimize reruns
-          + Fragment 1: Product Selection (isolated rerun)
-          + Fragment 2: BOM Selection (isolated rerun)
-          + Fragment 3: Order Details Form (isolated rerun)
-          + Fragment 4: Material Availability Check (isolated rerun)
-          + Dashboard and other sections NOT affected by form interactions
 - v3.0.0: Refactored Create Order flow to Product-first selection
-          + Step 1: Select Product (with BOM conflict blocking)
-          + Step 2: Select BOM (only BOMs for selected product)
-          + Step 3: Order Details
-          + Step 4: Material Availability Check
-          + Block order creation if product has multiple active BOMs
-- v2.1.0: Added alternative materials display in Material Availability Check (Step 3)
-          Shows alternatives for PARTIAL/INSUFFICIENT primary materials
-- v2.0.1: Added st.form() to prevent unnecessary reruns in Create form (Step 2)
-- Added st.form() to prevent unnecessary reruns in Edit form
-- Added session state to preserve form values across interactions
-- BOM selection remains outside form (needs to reload materials)
-- Fixed: Swapped default Source/Target warehouse (Source=RAW, Target=FG)
 """
 
 import logging
@@ -35,9 +22,14 @@ import pandas as pd
 
 from .queries import OrderQueries
 from .manager import OrderManager
+from .validators import ValidationResults
+from .validation_ui import (
+    render_validation_blocks, render_validation_warnings,
+    render_warning_acknowledgment
+)
 from .common import (
     format_number, create_status_indicator, get_vietnam_today,
-    OrderValidator, show_message, format_material_display, format_product_display,
+    format_material_display, format_product_display,
     calculate_percentage
 )
 
@@ -65,6 +57,10 @@ class OrderForms:
             st.session_state.create_form_product_id = None
         if 'create_form_bom_id' not in st.session_state:
             st.session_state.create_form_bom_id = None
+        if 'create_validation_results' not in st.session_state:
+            st.session_state.create_validation_results = None
+        if 'create_warnings_acknowledged' not in st.session_state:
+            st.session_state.create_warnings_acknowledged = False
         
         # Fragment 1: Product Selection
         self._fragment_product_selection()
@@ -82,6 +78,11 @@ class OrderForms:
                 
                 # Fragment 3: Order Details Form
                 self._fragment_order_details()
+                
+                # Show validation results if available (outside fragment to avoid nesting)
+                if st.session_state.get('create_validation_results'):
+                    st.markdown("---")
+                    self._render_validation_results()
     
     @st.fragment
     def _fragment_product_selection(self):
@@ -175,6 +176,8 @@ class OrderForms:
         if st.session_state.create_form_product_id != selected_product_id:
             st.session_state.create_form_product_id = selected_product_id
             st.session_state.create_form_bom_id = None  # Reset BOM selection
+            st.session_state.create_validation_results = None  # Reset validation
+            st.session_state.create_warnings_acknowledged = False
             st.rerun()
         
         # Get product info and check for conflicts
@@ -191,10 +194,10 @@ class OrderForms:
         with col3:
             st.info(f"**Package:** {product_row['package_size'] or 'N/A'}")
         
-        # BOM CONFLICT CHECK (BLOCKING)
+        # BOM CONFLICT CHECK (BLOCKING) - C4
         if active_bom_count > 1:
             st.error(f"""
-            🚫 **Cannot Create Order - BOM Conflict Detected!**
+            🚫 **Cannot Create Order - BOM Conflict Detected! [C4]**
             
             This product has **{active_bom_count} active BOMs** (total: {total_bom_count}).
             
@@ -285,6 +288,8 @@ class OrderForms:
         # Update session state only if changed
         if st.session_state.create_form_bom_id != selected_bom_id:
             st.session_state.create_form_bom_id = selected_bom_id
+            st.session_state.create_validation_results = None  # Reset validation
+            st.session_state.create_warnings_acknowledged = False
             st.rerun()
         
         # Show BOM details
@@ -301,8 +306,7 @@ class OrderForms:
     @st.fragment
     def _fragment_order_details(self):
         """
-        Fragment 3: Order Details Form
-        Isolated rerun - only reruns when form is submitted
+        Fragment 3: Order Details Form with Validation
         """
         st.markdown("### 3️⃣ Order Details")
         
@@ -350,7 +354,7 @@ class OrderForms:
         
         form_data = st.session_state.create_order_form_data
         
-        st.caption("💡 Fill in order details. **No page reload when changing values!**")
+        st.caption("💡 Fill in order details. Click 'Validate & Check' to see material availability and validation results.")
         
         # ========== FORM - Prevents reruns when changing inputs ==========
         with st.form(key="create_order_details_form", clear_on_submit=False):
@@ -410,21 +414,15 @@ class OrderForms:
             
             st.markdown("---")
             
-            # Material Availability Check Button (inside form)
-            col1, col2 = st.columns([1, 3])
-            
-            with col1:
-                check_materials_btn = st.form_submit_button(
-                    "🔍 Check Materials",
-                    use_container_width=True,
-                    help="Check material availability before creating order"
-                )
-            
-            with col2:
-                st.caption("💡 Click to check if materials are available for this order")
+            # Validate button
+            validate_btn = st.form_submit_button(
+                "🔍 Validate & Check Materials",
+                use_container_width=True,
+                help="Validate order data and check material availability"
+            )
         
-        # Handle material check button
-        if check_materials_btn:
+        # Handle validate button
+        if validate_btn:
             # Update form data
             st.session_state.create_order_form_data = {
                 'planned_qty': planned_qty,
@@ -434,22 +432,94 @@ class OrderForms:
                 'target_warehouse': target_warehouse,
                 'notes': notes
             }
+            st.session_state.create_warnings_acknowledged = False
             
-            # Show material check
-            st.markdown("---")
-            self._fragment_material_check(
-                bom_id=bom_id,
-                quantity=planned_qty,
-                warehouse_id=warehouse_options[source_warehouse]
-            )
-    
+            # Build order data for validation
+            order_data = {
+                'bom_header_id': bom_id,
+                'product_id': product_id,
+                'planned_qty': planned_qty,
+                'uom': bom_info['uom'],
+                'warehouse_id': warehouse_options[source_warehouse],
+                'target_warehouse_id': warehouse_options[target_warehouse],
+                'scheduled_date': scheduled_date,
+                'priority': priority,
+                'notes': notes
+            }
+            
+            # Run validation
+            results = self.manager.validate_create(order_data)
+            st.session_state.create_validation_results = results
+            st.session_state.create_order_data = order_data
+        
     @st.fragment
-    def _fragment_material_check(self, bom_id: int, quantity: float, warehouse_id: int):
+    def _render_validation_results(self):
         """
-        Fragment 4: Material Availability Check
-        Isolated rerun when checking materials
+        Fragment 4: Validation Results
+        Isolated rerun when acknowledging warnings
         """
-        st.markdown("### 4️⃣ Material Availability Check")
+        results = st.session_state.create_validation_results
+        order_data = st.session_state.get('create_order_data', {})
+        
+        st.markdown("### 4️⃣ Validation Results")
+        
+        # Show blocking errors
+        if results.has_blocks:
+            render_validation_blocks(results, language='en')
+            st.error("❌ Cannot create order due to blocking errors above.")
+            return
+        
+        # Show material availability
+        bom_id = order_data.get('bom_header_id')
+        quantity = order_data.get('planned_qty', 0)
+        warehouse_id = order_data.get('warehouse_id')
+        
+        if all([bom_id, quantity, warehouse_id]):
+            self._render_material_check(bom_id, quantity, warehouse_id)
+        
+        # Show warnings if any
+        if results.has_warnings:
+            st.markdown("---")
+            st.markdown("### ⚠️ Validation Warnings")
+            render_validation_warnings(results, language='en')
+            
+            # Acknowledgment checkbox
+            st.markdown("---")
+            acknowledged = st.checkbox(
+                "☑️ I understand the warnings and want to proceed with order creation",
+                value=st.session_state.get('create_warnings_acknowledged', False),
+                key="create_warnings_ack_checkbox"
+            )
+            st.session_state.create_warnings_acknowledged = acknowledged
+        else:
+            acknowledged = True
+            st.success("✅ All validations passed!")
+        
+        # Create Order button
+        st.markdown("---")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("✅ Create Order", type="primary", use_container_width=True,
+                        disabled=not acknowledged, key="btn_create_order_final"):
+                self._handle_create_order()
+        
+        with col2:
+            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
+                # Clear session state
+                st.session_state.create_form_product_id = None
+                st.session_state.create_form_bom_id = None
+                st.session_state.pop('create_order_form_data', None)
+                st.session_state.pop('create_validation_results', None)
+                st.session_state.pop('create_order_data', None)
+                st.session_state.create_warnings_acknowledged = False
+                st.session_state.orders_view = 'list'
+                st.rerun()
+    
+    def _render_material_check(self, bom_id: int, quantity: float, warehouse_id: int):
+        """Render material availability check"""
+        st.markdown("### 📦 Material Availability")
         
         with st.spinner("Checking material availability..."):
             result = self.queries.check_material_availability_with_alternatives(
@@ -518,16 +588,13 @@ class OrderForms:
             st.markdown("**Alternative Materials Available:**")
             st.info(f"ℹ️ Found alternatives for **{summary['has_alternatives']}** material(s) with partial/insufficient stock")
             
-            with st.expander("📦 View Alternative Materials", expanded=True):
-                # Group by bom_detail_id to show alternatives per primary material
+            with st.expander("📦 View Alternative Materials", expanded=False):
                 for bom_detail_id in alternatives_df['bom_detail_id'].unique():
                     alt_for_material = alternatives_df[alternatives_df['bom_detail_id'] == bom_detail_id]
                     
-                    # Get primary material name
                     primary_material = primary_df[primary_df['bom_detail_id'] == bom_detail_id].iloc[0]
                     st.markdown(f"**For:** {format_material_display(primary_material)}")
                     
-                    # Show alternatives
                     alt_display = alt_for_material.copy()
                     alt_display['alt_info'] = alt_display.apply(format_material_display, axis=1)
                     alt_display['required'] = alt_display['required_qty'].apply(lambda x: format_number(x, 4))
@@ -547,94 +614,62 @@ class OrderForms:
                         hide_index=True
                     )
                     st.markdown("---")
-        
-        # Create Order button
-        st.markdown("---")
-        
-        # Check if can proceed
-        can_proceed = summary['sufficient'] + summary['partial'] > 0
-        
-        if not can_proceed:
-            st.error("❌ Cannot create order: All materials are insufficient!")
-            st.info("💡 Please check inventory or use alternative materials")
-            return
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("✅ Create Order", type="primary", use_container_width=True,
-                        key="btn_create_order_final"):
-                self._handle_create_order()
-        
-        with col2:
-            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
-                # Clear session state
-                st.session_state.create_form_product_id = None
-                st.session_state.create_form_bom_id = None
-                st.session_state.pop('create_order_form_data', None)
-                st.session_state.orders_view = 'list'
-                st.rerun()
     
     def _handle_create_order(self):
         """Handle create order button click"""
         try:
-            # Get form data
-            bom_id = st.session_state.create_form_bom_id
-            product_id = st.session_state.create_form_product_id
-            form_data = st.session_state.create_order_form_data
+            order_data = st.session_state.get('create_order_data', {})
             
-            # Get warehouse IDs
-            warehouses = self.queries.get_warehouses()
-            warehouse_options = {row['name']: row['id'] for _, row in warehouses.iterrows()}
+            if not order_data:
+                st.error("❌ No order data available. Please fill the form again.")
+                return
             
-            # Get BOM info for UOM
-            bom_info = self.queries.get_bom_info(bom_id)
+            # Add user_id
+            order_data['created_by'] = st.session_state.get('user_id', 1)
             
-            # Build order data
-            order_data = {
-                'bom_header_id': bom_id,
-                'product_id': product_id,
-                'planned_qty': form_data['planned_qty'],
-                'uom': bom_info['uom'],
-                'warehouse_id': warehouse_options[form_data['source_warehouse']],
-                'target_warehouse_id': warehouse_options[form_data['target_warehouse']],
-                'scheduled_date': form_data['scheduled_date'],
-                'priority': form_data['priority'],
-                'notes': form_data['notes'],
-                'created_by': st.session_state.get('user_id', 1)
-            }
+            # Create order (skip_warnings=True since user already acknowledged)
+            order_no, results = self.manager.create_order(order_data, skip_warnings=True)
             
-            # Create order
-            order_no = self.manager.create_order(order_data)
+            if order_no:
+                # Clear session state
+                st.session_state.create_form_product_id = None
+                st.session_state.create_form_bom_id = None
+                st.session_state.pop('create_order_form_data', None)
+                st.session_state.pop('create_validation_results', None)
+                st.session_state.pop('create_order_data', None)
+                st.session_state.create_warnings_acknowledged = False
+                
+                # Set success flag
+                st.session_state.order_created_success = order_no
+                st.session_state.orders_view = 'list'
+                
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                st.error("❌ Failed to create order")
             
-            # Clear session state
-            st.session_state.create_form_product_id = None
-            st.session_state.create_form_bom_id = None
-            st.session_state.pop('create_order_form_data', None)
-            
-            # Set success flag
-            st.session_state.order_created_success = order_no
-            st.session_state.orders_view = 'list'
-            
-            time.sleep(0.5)
-            st.rerun()
-            
+        except ValueError as e:
+            st.error(f"❌ Validation Error: {str(e)}")
+            logger.error(f"Order creation validation failed: {e}")
         except Exception as e:
             st.error(f"❌ Error creating order: {str(e)}")
             logger.error(f"Order creation failed: {e}", exc_info=True)
-        
+    
+    # ==================== Edit Order Form ====================
+    
     def render_edit_form(self, order: Dict[str, Any]):
         """
-        Render edit order form
+        Render edit order form with validation
         
         Args:
             order: Current order data
         """
         st.markdown(f"### ✏️ Edit Order: {order['order_no']}")
         
-        # Check if editable
-        if not OrderValidator.can_edit(order['status']):
-            st.warning(f"⚠️ Cannot edit order with status: {order['status']}")
+        # E1: Check if editable (status check)
+        if order['status'] not in ['DRAFT', 'CONFIRMED']:
+            st.error(f"🚫 **[E1]** Cannot edit order with status: {order['status']}")
+            st.info("Only DRAFT or CONFIRMED orders can be edited.")
             return
         
         warehouses = self.queries.get_warehouses()
@@ -664,12 +699,14 @@ class OrderForms:
                 'target_warehouse': warehouse_id_to_name.get(order['target_warehouse_id'], warehouse_list[0]),
                 'notes': order.get('notes', '') or ''
             }
+            st.session_state['edit_validation_results'] = None
+            st.session_state['edit_warnings_acknowledged'] = False
         
         form_data = st.session_state['edit_order_form_data']
         
-        st.caption("💡 Edit order details. **No page reload when changing values!**")
+        st.caption("💡 Edit order details. Click 'Validate Changes' to check before saving.")
         
-        # ========== FORM - Prevents reruns when changing inputs ==========
+        # ========== FORM ==========
         with st.form(key="edit_order_form", clear_on_submit=False):
             col1, col2 = st.columns(2)
             
@@ -722,19 +759,13 @@ class OrderForms:
                     key="form_edit_order_notes"
                 )
             
-            # Warning about quantity change (shown inside form)
-            if new_planned_qty != float(order['planned_qty']):
-                st.warning("⚠️ Changing planned quantity will recalculate all required materials.")
-            
             st.markdown("---")
             
-            # Form submit buttons
             col1, col2 = st.columns(2)
             
             with col1:
-                save_btn = st.form_submit_button(
-                    "💾 Save Changes",
-                    type="primary",
+                validate_btn = st.form_submit_button(
+                    "🔍 Validate Changes",
                     use_container_width=True
                 )
             
@@ -744,14 +775,48 @@ class OrderForms:
                     use_container_width=True
                 )
         
-        # Handle form submission
+        # Handle cancel
         if cancel_btn:
             st.session_state.pop('edit_order_form_data', None)
             st.session_state.pop('edit_order_id', None)
+            st.session_state.pop('edit_validation_results', None)
+            st.session_state.pop('edit_update_data', None)
             st.rerun()
         
-        if save_btn:
-            # Update form data in session state
+        # Handle validate
+        if validate_btn:
+            # Build update data
+            update_data = {}
+            
+            from datetime import datetime
+            current_date = order['scheduled_date']
+            if isinstance(current_date, str):
+                current_date = datetime.strptime(current_date, '%Y-%m-%d').date()
+            
+            if new_planned_qty != float(order['planned_qty']):
+                update_data['planned_qty'] = new_planned_qty
+            if new_scheduled_date != current_date:
+                update_data['scheduled_date'] = new_scheduled_date
+            if new_priority != order['priority']:
+                update_data['priority'] = new_priority
+            if warehouse_options[new_source_warehouse] != order['warehouse_id']:
+                update_data['warehouse_id'] = warehouse_options[new_source_warehouse]
+            if warehouse_options[new_target_warehouse] != order['target_warehouse_id']:
+                update_data['target_warehouse_id'] = warehouse_options[new_target_warehouse]
+            if new_notes != (order.get('notes', '') or ''):
+                update_data['notes'] = new_notes
+            
+            if not update_data:
+                st.info("ℹ️ No changes detected")
+                return
+            
+            # Run validation
+            results = self.manager.validate_update(order['id'], update_data)
+            st.session_state['edit_validation_results'] = results
+            st.session_state['edit_update_data'] = update_data
+            st.session_state['edit_warnings_acknowledged'] = False
+            
+            # Update form data
             st.session_state['edit_order_form_data'] = {
                 'planned_qty': new_planned_qty,
                 'scheduled_date': new_scheduled_date,
@@ -760,67 +825,71 @@ class OrderForms:
                 'target_warehouse': new_target_warehouse,
                 'notes': new_notes
             }
-            
-            self._handle_save_edit(
-                order_id=order['id'],
-                order=order,
-                new_planned_qty=new_planned_qty,
-                new_scheduled_date=new_scheduled_date,
-                new_priority=new_priority,
-                new_source_warehouse_id=warehouse_options[new_source_warehouse],
-                new_target_warehouse_id=warehouse_options[new_target_warehouse],
-                new_notes=new_notes
-            )
+        
+        # Show validation results
+        if st.session_state.get('edit_validation_results'):
+            self._render_edit_validation_results(order)
     
-    def _handle_save_edit(self, order_id: int, order: Dict,
-                         new_planned_qty: float, new_scheduled_date,
-                         new_priority: str, new_source_warehouse_id: int,
-                         new_target_warehouse_id: int, new_notes: str):
-        """Handle save edit button click"""
-        from datetime import datetime
+    @st.fragment
+    def _render_edit_validation_results(self, order: Dict[str, Any]):
+        """
+        Fragment: Edit Validation Results
+        Isolated rerun when acknowledging warnings
+        """
+        results = st.session_state['edit_validation_results']
+        update_data = st.session_state.get('edit_update_data', {})
         
-        # Build update data
-        update_data = {}
+        st.markdown("---")
+        st.markdown("### Validation Results")
         
-        current_date = order['scheduled_date']
-        if isinstance(current_date, str):
-            current_date = datetime.strptime(current_date, '%Y-%m-%d').date()
-        
-        if new_planned_qty != float(order['planned_qty']):
-            update_data['planned_qty'] = new_planned_qty
-        if new_scheduled_date != current_date:
-            update_data['scheduled_date'] = new_scheduled_date
-        if new_priority != order['priority']:
-            update_data['priority'] = new_priority
-        if new_source_warehouse_id != order['warehouse_id']:
-            update_data['warehouse_id'] = new_source_warehouse_id
-        if new_target_warehouse_id != order['target_warehouse_id']:
-            update_data['target_warehouse_id'] = new_target_warehouse_id
-        if new_notes != (order.get('notes', '') or ''):
-            update_data['notes'] = new_notes
-        
-        if not update_data:
-            st.info("ℹ️ No changes detected")
+        # Show blocking errors
+        if results.has_blocks:
+            render_validation_blocks(results, language='en')
             return
         
-        try:
-            user_id = st.session_state.get('user_id', 1)
-            success = self.manager.update_order(order_id, update_data, user_id)
+        # Show warnings
+        if results.has_warnings:
+            render_validation_warnings(results, language='en')
             
-            if success:
-                # Clear form data
-                st.session_state.pop('edit_order_form_data', None)
-                st.session_state.pop('edit_order_id', None)
+            acknowledged = st.checkbox(
+                "☑️ I understand the warnings and want to proceed",
+                value=st.session_state.get('edit_warnings_acknowledged', False),
+                key="edit_warnings_ack"
+            )
+            st.session_state['edit_warnings_acknowledged'] = acknowledged
+        else:
+            acknowledged = True
+            st.success("✅ All validations passed!")
+        
+        # Save button
+        st.markdown("---")
+        
+        if st.button("💾 Save Changes", type="primary", use_container_width=True,
+                    disabled=not acknowledged, key="btn_save_edit"):
+            try:
+                user_id = st.session_state.get('user_id', 1)
+                success, _ = self.manager.update_order(
+                    order['id'], update_data, user_id, skip_warnings=True
+                )
                 
-                st.success(f"✅ Order {order['order_no']} updated successfully!")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.error("❌ Failed to update order")
-                
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
-            logger.error(f"Order update failed: {e}", exc_info=True)
+                if success:
+                    # Clear form data
+                    st.session_state.pop('edit_order_form_data', None)
+                    st.session_state.pop('edit_order_id', None)
+                    st.session_state.pop('edit_validation_results', None)
+                    st.session_state.pop('edit_update_data', None)
+                    
+                    st.success(f"✅ Order {order['order_no']} updated successfully!")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to update order")
+                    
+            except ValueError as e:
+                st.error(f"❌ Validation Error: {str(e)}")
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                logger.error(f"Order update failed: {e}", exc_info=True)
 
 
 # Convenience functions

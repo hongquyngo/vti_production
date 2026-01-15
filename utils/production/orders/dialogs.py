@@ -1,9 +1,14 @@
 # utils/production/orders/dialogs.py
 """
 Dialog components for Orders domain
-Confirm, Cancel, Detail, Edit, Delete, PDF dialogs
+Confirm, Cancel, Detail, Edit, Delete, PDF dialogs with comprehensive validation
 
-Version: 1.0.1 - Fixed nested dialog issues
+Version: 2.0.0
+Changes:
+- v2.0.0: Integrated comprehensive validation with warning acknowledgment
+          + Dialogs now show both BLOCK errors and WARNINGs
+          + Users must acknowledge warnings before proceeding
+          + Consistent validation UI across all dialogs
 """
 
 import logging
@@ -15,9 +20,14 @@ import pandas as pd
 
 from .queries import OrderQueries
 from .manager import OrderManager
+from .validators import ValidationResults
+from .validation_ui import (
+    render_validation_blocks, render_validation_warnings,
+    render_warning_acknowledgment, ValidationUI
+)
 from .common import (
     format_number, create_status_indicator, calculate_percentage,
-    OrderValidator, format_material_display, format_date, get_vietnam_now,
+    format_material_display, format_date, get_vietnam_now,
     format_product_display
 )
 
@@ -26,35 +36,64 @@ logger = logging.getLogger(__name__)
 
 # ==================== Confirm Order Dialog ====================
 
-@st.dialog("✅ Confirm Production Order", width="medium")
+@st.dialog("✅ Confirm Production Order", width="large")
 def show_confirm_dialog(order_id: int, order_no: str):
     """
-    Dialog to confirm a DRAFT order
+    Dialog to confirm a DRAFT order with validation
     
     Args:
         order_id: Order ID to confirm
         order_no: Order number for display
     """
-    st.markdown(f"""
-    ### Confirm Order: **{order_no}**
+    manager = OrderManager()
     
+    # Run validation
+    results = manager.validate_confirm(order_id)
+    
+    st.markdown(f"### Confirm Order: **{order_no}**")
+    
+    # Check for blocking errors
+    if results.has_blocks:
+        render_validation_blocks(results, language='en')
+        
+        st.markdown("---")
+        if st.button("❌ Close", use_container_width=True, key="dialog_close_confirm"):
+            st.rerun()
+        return
+    
+    # Show order info
+    st.markdown("""
     This action will change the order status from **DRAFT** to **CONFIRMED**.
     
     ⚠️ **Important:**
     - Once confirmed, the order cannot be reverted to DRAFT
     - Materials can be issued after confirmation
-    - Please review order details before confirming
     """)
     
+    # Show warnings if any
+    if results.has_warnings:
+        st.markdown("---")
+        st.markdown("### ⚠️ Warnings")
+        render_validation_warnings(results, language='en')
+        
+        # Acknowledgment checkbox
+        st.markdown("---")
+        acknowledged = st.checkbox(
+            "☑️ I understand the warnings and want to proceed",
+            key="confirm_dialog_ack"
+        )
+    else:
+        acknowledged = True
+    
+    st.markdown("---")
     col1, col2 = st.columns(2)
     
     with col1:
         if st.button("✅ Confirm Order", type="primary", use_container_width=True,
-                    key="dialog_confirm_btn"):
+                    disabled=not acknowledged, key="dialog_confirm_btn"):
             try:
-                manager = OrderManager()
                 user_id = st.session_state.get('user_id', 1)
-                success = manager.confirm_order(order_id, user_id)
+                success, _ = manager.confirm_order(order_id, user_id, skip_warnings=True)
                 
                 if success:
                     st.success(f"✅ Order {order_no} confirmed successfully!")
@@ -77,95 +116,150 @@ def show_confirm_dialog(order_id: int, order_no: str):
 
 # ==================== Cancel Order Dialog ====================
 
-@st.dialog("❌ Cancel Production Order", width="medium")
+@st.dialog("❌ Cancel Production Order", width="large")
 def show_cancel_dialog(order_id: int, order_no: str):
     """
-    Dialog to cancel an order
+    Dialog to cancel an order with validation
     
     Args:
         order_id: Order ID to cancel
         order_no: Order number for display
     """
-    st.markdown(f"""
-    ### Cancel Order: **{order_no}**
+    manager = OrderManager()
     
-    ⚠️ **Warning:** This action will:
-    - Change status to CANCELLED
-    - Prevent any further material issues
-    - Cannot be undone
-    """)
+    st.markdown(f"### Cancel Order: **{order_no}**")
     
+    # Cancel reason input (needed for validation)
     cancel_reason = st.text_area(
         "Cancel Reason",
         placeholder="Please provide a reason for cancellation...",
         key="cancel_reason_input"
     )
     
+    # Run validation with reason
+    results = manager.validate_cancel(order_id, cancel_reason)
+    
+    # Check for blocking errors
+    if results.has_blocks:
+        st.markdown("---")
+        render_validation_blocks(results, language='en')
+        
+        st.markdown("---")
+        if st.button("❌ Close", use_container_width=True, key="dialog_close_cancel"):
+            st.rerun()
+        return
+    
+    st.markdown("""
+    ⚠️ **Warning:** This action will:
+    - Change status to CANCELLED
+    - Prevent any further material issues
+    - Cannot be undone
+    """)
+    
+    # Show warnings if any
+    if results.has_warnings:
+        st.markdown("---")
+        st.markdown("### ⚠️ Warnings")
+        render_validation_warnings(results, language='en')
+        
+        # Acknowledgment checkbox
+        st.markdown("---")
+        acknowledged = st.checkbox(
+            "☑️ I understand the warnings and want to proceed",
+            key="cancel_dialog_ack"
+        )
+    else:
+        acknowledged = True
+    
+    st.markdown("---")
     col1, col2 = st.columns(2)
     
     with col1:
         if st.button("❌ Cancel Order", type="primary", use_container_width=True,
-                    key="dialog_cancel_order_btn"):
-            if not cancel_reason:
-                st.warning("⚠️ Please provide a cancel reason")
-            else:
-                try:
-                    manager = OrderManager()
-                    user_id = st.session_state.get('user_id', 1)
-                    success = manager.cancel_order(order_id, user_id, cancel_reason)
+                    disabled=not acknowledged, key="dialog_cancel_order_btn"):
+            try:
+                user_id = st.session_state.get('user_id', 1)
+                success, _ = manager.cancel_order(order_id, cancel_reason, user_id, skip_warnings=True)
+                
+                if success:
+                    st.success(f"✅ Order {order_no} cancelled")
+                    logger.info(f"User {user_id} cancelled order {order_id}")
+                    time.sleep(1.5)
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to cancel order")
                     
-                    if success:
-                        st.success(f"✅ Order {order_no} cancelled")
-                        logger.info(f"User {user_id} cancelled order {order_id}")
-                        time.sleep(1.5)
-                        st.rerun()
-                    else:
-                        st.error("❌ Failed to cancel order")
-                        
-                except ValueError as e:
-                    st.error(f"❌ Validation error: {str(e)}")
-                except Exception as e:
-                    st.error(f"❌ System error: {str(e)}")
-                    logger.error(f"Error cancelling order {order_id}: {e}", exc_info=True)
+            except ValueError as e:
+                st.error(f"❌ Validation error: {str(e)}")
+            except Exception as e:
+                st.error(f"❌ System error: {str(e)}")
+                logger.error(f"Error cancelling order {order_id}: {e}", exc_info=True)
     
     with col2:
-        if st.button("✖️ Close", use_container_width=True, key="dialog_close_cancel"):
+        if st.button("✖️ Close", use_container_width=True, key="dialog_close_cancel_btn"):
             st.rerun()
 
 
 # ==================== Delete Order Dialog ====================
 
-@st.dialog("🗑️ Delete Production Order", width="medium")
+@st.dialog("🗑️ Delete Production Order", width="large")
 def show_delete_dialog(order_id: int, order_no: str):
     """
-    Dialog to delete an order (soft delete)
+    Dialog to delete an order with validation
     
     Args:
         order_id: Order ID to delete
         order_no: Order number for display
     """
-    st.markdown(f"""
-    ### Delete Order: **{order_no}**
+    manager = OrderManager()
     
+    # Run validation
+    results = manager.validate_delete(order_id)
+    
+    st.markdown(f"### Delete Order: **{order_no}**")
+    
+    # Check for blocking errors
+    if results.has_blocks:
+        render_validation_blocks(results, language='en')
+        
+        st.markdown("---")
+        if st.button("❌ Close", use_container_width=True, key="dialog_close_delete"):
+            st.rerun()
+        return
+    
+    st.markdown("""
     ⚠️ **Warning:** This action will:
     - Mark this order as deleted
     - Remove it from the active orders list
     - This action cannot be undone
-    
-    Only **DRAFT** or **CANCELLED** orders can be deleted.
     """)
+    
+    # Show warnings if any
+    if results.has_warnings:
+        st.markdown("---")
+        st.markdown("### ⚠️ Warnings")
+        render_validation_warnings(results, language='en')
+        
+        # Acknowledgment checkbox
+        st.markdown("---")
+        acknowledged = st.checkbox(
+            "☑️ I understand the warnings and want to proceed",
+            key="delete_dialog_ack"
+        )
+    else:
+        acknowledged = True
     
     st.warning("Are you sure you want to delete this order?")
     
+    st.markdown("---")
     col1, col2 = st.columns(2)
     
     with col1:
         if st.button("🗑️ Delete Order", type="primary", use_container_width=True,
-                    key="dialog_delete_btn"):
+                    disabled=not acknowledged, key="dialog_delete_btn"):
             try:
-                manager = OrderManager()
                 user_id = st.session_state.get('user_id', 1)
-                success = manager.delete_order(order_id, user_id)
+                success, _ = manager.delete_order(order_id, user_id, skip_warnings=True)
                 
                 if success:
                     st.success(f"✅ Order {order_no} deleted")
@@ -182,7 +276,7 @@ def show_delete_dialog(order_id: int, order_no: str):
                 logger.error(f"Error deleting order {order_id}: {e}", exc_info=True)
     
     with col2:
-        if st.button("✖️ Close", use_container_width=True, key="dialog_close_delete"):
+        if st.button("✖️ Close", use_container_width=True, key="dialog_close_delete_btn"):
             st.rerun()
 
 
@@ -465,20 +559,11 @@ def handle_row_action(action: str, order_id: int, order_no: str, status: str = '
     if action == 'view':
         show_detail_dialog(order_id)
     elif action == 'edit':
-        if OrderValidator.can_edit(status):
-            show_edit_dialog(order_id)
-        else:
-            st.warning(f"Cannot edit order with status: {status}")
+        show_edit_dialog(order_id)
     elif action == 'confirm':
-        if OrderValidator.can_confirm(status):
-            show_confirm_dialog(order_id, order_no)
-        else:
-            st.warning(f"Cannot confirm order with status: {status}")
+        show_confirm_dialog(order_id, order_no)
     elif action == 'cancel':
-        if OrderValidator.can_cancel(status):
-            show_cancel_dialog(order_id, order_no)
-        else:
-            st.warning(f"Cannot cancel order with status: {status}")
+        show_cancel_dialog(order_id, order_no)
     elif action == 'pdf':
         show_pdf_dialog(order_id, order_no)
     elif action == 'delete':
