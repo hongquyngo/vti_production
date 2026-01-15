@@ -1,9 +1,15 @@
 # pages/4_📊_BOM_Variance.py
 """
-BOM Variance Analysis - VERSION 1.2 (Phase 1 + Advanced Filters)
+BOM Variance Analysis - VERSION 1.3 (Simplified Filters)
 
 Dashboard for analyzing actual material consumption vs BOM theoretical values.
 Identifies variances and suggests adjustments to improve BOM accuracy.
+
+Changes in v1.3:
+- Added "Apply Filters" button to trigger data refresh after filter selection
+- Fixed issue where filters didn't update the data table (due to @st.fragment isolation)
+- Removed Quick Filter buttons to simplify UI (less overwhelming)
+- Cleaner action row with just Reset All + Apply Filters
 
 Changes in v1.2:
 - Added Output Product multiselect filter
@@ -872,54 +878,22 @@ def render_filters_section(full_data: pd.DataFrame):
                 )
                 st.session_state['filter_zero_actual_only'] = zero_actual
         
-        # Row 4: Quick Actions
+        # Action Buttons Row
         st.markdown("---")
-        st.markdown("##### Quick Filters")
+        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
         
-        # Material Type Quick Filters
-        mt_col1, mt_col2, mt_col3, mt_col4 = st.columns(4)
-        
-        with mt_col1:
-            if st.button("🧪 RAW Only", use_container_width=True, help="Quick filter: Raw materials"):
-                st.session_state['filter_material_types'] = ['RAW_MATERIAL']
-                st.rerun()
-        
-        with mt_col2:
-            if st.button("📦 Packaging", use_container_width=True, help="Quick filter: Packaging materials"):
-                st.session_state['filter_material_types'] = ['PACKAGING']
-                st.rerun()
-        
-        with mt_col3:
-            if st.button("🔧 Consumable", use_container_width=True, help="Quick filter: Consumable materials"):
-                st.session_state['filter_material_types'] = ['CONSUMABLE']
-                st.rerun()
-        
-        with mt_col4:
-            if st.button("🏭 CUTTING", use_container_width=True, help="Quick filter: CUTTING BOMs"):
-                st.session_state['filter_bom_types'] = ['CUTTING']
-                st.rerun()
-        
-        # Problem & Reset Filters
-        pr_col1, pr_col2, pr_col3, pr_col4 = st.columns(4)
-        
-        with pr_col1:
-            if st.button("📋 KITTING", use_container_width=True, help="Quick filter: KITTING BOMs"):
-                st.session_state['filter_bom_types'] = ['KITTING']
-                st.rerun()
-        
-        with pr_col2:
-            if st.button("⚠️ Problems", use_container_width=True, help="Show high variance + zero actual"):
-                st.session_state['filter_high_variance_only'] = True
-                st.rerun()
-        
-        with pr_col3:
-            if st.button("❌ Zero Actual", use_container_width=True, help="Show only zero actual consumption"):
-                st.session_state['filter_zero_actual_only'] = True
-                st.rerun()
-        
-        with pr_col4:
+        with btn_col1:
             if st.button("🔄 Reset All", use_container_width=True, help="Reset all filters to default"):
                 reset_filters()
+                st.rerun()
+        
+        with btn_col2:
+            if st.button(
+                "✅ Apply Filters", 
+                use_container_width=True, 
+                type="primary",
+                help="Apply selected filters to refresh the data view"
+            ):
                 st.rerun()
 
 
@@ -1315,7 +1289,7 @@ def render_footer():
     
     with col1:
         st.caption(
-            f"📊 BOM Variance Analysis v1.2 | "
+            f"📊 BOM Variance Analysis v1.3 | "
             f"Period: {config.date_from} to {config.date_to} | "
             f"Threshold: {config.variance_threshold}%"
         )
