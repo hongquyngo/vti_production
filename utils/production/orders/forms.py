@@ -133,44 +133,26 @@ class OrderForms:
             for _, row in products_df.iterrows()
         }
         
-        # Search box for product
-        search_product = st.text_input(
-            "🔍 Search Product",
-            placeholder="Search by code, name, brand...",
-            key="fragment_product_search"
-        )
-        
-        # Filter product options based on search
-        filtered_options = product_options
-        if search_product:
-            search_lower = search_product.lower()
-            filtered_options = {
-                k: v for k, v in product_options.items()
-                if search_lower in k.lower()
-            }
-        
-        if not filtered_options:
-            st.warning("⚠️ No products match your search")
-            return
-        
         # Get current selection index
         current_product_id = st.session_state.create_form_product_id
         current_index = 0
         if current_product_id:
             # Find index of current selection
-            for idx, (label, pid) in enumerate(filtered_options.items()):
+            for idx, (label, pid) in enumerate(product_options.items()):
                 if pid == current_product_id:
                     current_index = idx
                     break
         
+        # Selectbox has built-in search - just type to filter
         selected_product_label = st.selectbox(
             "Select Product",
-            options=list(filtered_options.keys()),
+            options=list(product_options.keys()),
             index=current_index,
-            key="fragment_product_select"
+            key="fragment_product_select",
+            help="Type to search by code, name, or brand"
         )
         
-        selected_product_id = filtered_options[selected_product_label]
+        selected_product_id = product_options[selected_product_label]
         
         # Update session state only if changed
         if st.session_state.create_form_product_id != selected_product_id:
