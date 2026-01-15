@@ -468,10 +468,16 @@ class VarianceQueries:
                     bh.output_qty as bom_output_qty,
                     op.pt_code as output_product_code,
                     op.name as output_product_name,
+                    op.legacy_pt_code as output_product_legacy_code,
+                    op.package_size as output_product_package_size,
+                    ob.brand_name as output_product_brand,
                     bd.material_id,
                     mp.pt_code as material_code,
                     mp.name as material_name,
                     mp.uom as material_uom,
+                    mp.legacy_pt_code as material_legacy_code,
+                    mp.package_size as material_package_size,
+                    mb.brand_name as material_brand,
                     bd.material_type,
                     bd.quantity as bom_quantity,
                     bd.scrap_rate,
@@ -479,8 +485,10 @@ class VarianceQueries:
                     (bd.quantity / bh.output_qty) * (1 + bd.scrap_rate/100) as qty_per_output_with_scrap
                 FROM bom_headers bh
                 JOIN products op ON bh.product_id = op.id
+                LEFT JOIN brands ob ON op.brand_id = ob.id
                 JOIN bom_details bd ON bd.bom_header_id = bh.id
                 JOIN products mp ON bd.material_id = mp.id
+                LEFT JOIN brands mb ON mp.brand_id = mb.id
                 WHERE bh.delete_flag = 0
         """
         
@@ -498,10 +506,16 @@ class VarianceQueries:
                 t.bom_output_qty,
                 t.output_product_code,
                 t.output_product_name,
+                t.output_product_legacy_code,
+                t.output_product_package_size,
+                t.output_product_brand,
                 t.material_id,
                 t.material_code,
                 t.material_name,
                 t.material_uom,
+                t.material_legacy_code,
+                t.material_package_size,
+                t.material_brand,
                 t.material_type,
                 t.bom_quantity,
                 t.scrap_rate,
