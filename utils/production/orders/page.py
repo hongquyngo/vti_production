@@ -1,28 +1,35 @@
-# utils/production/orders/page.py
+# utils/production/orders/page_optimized.py
 """
-Main UI orchestrator for Orders domain
+OPTIMIZED: Main UI orchestrator for Orders domain
 Renders the Orders tab with dashboard, filters, list, and actions
 
-Version: 1.2.0
+Version: 2.0.0 - Performance Optimized
 Changes:
+- v2.0.0: Applied @st.fragment pattern throughout to minimize full page reruns
+          + Dashboard isolated in fragment
+          + Filters isolated in fragment with callback pattern
+          + Order list + actions isolated in single fragment
+          + Removed unnecessary st.rerun() calls
+          + Used on_click callbacks for buttons
 - v1.2.0: Added BOM conflict detection and warning
-          + Conflict warning banner at top
-          + 'Conflicts Only' filter checkbox
-          + 'Issues' column in order table showing BOM conflict count
-          + Toggle for checking active BOMs only vs all BOMs
-- v1.1.0: Enhanced search placeholder with help tooltip showing all searchable fields
+
+PERFORMANCE IMPROVEMENTS:
+1. Fragment isolation: Each section reruns independently
+2. Callback pattern: Buttons use on_click instead of inline if-block
+3. Session state optimization: Minimize state changes that trigger reruns
+4. Lazy loading: Only fetch data when needed
 """
 
 import logging
 from datetime import timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 
 import streamlit as st
 import pandas as pd
 
 from .queries import OrderQueries
 from .manager import OrderManager
-from .dashboard import render_dashboard
+from .dashboard import OrderDashboard
 from .forms import render_create_form
 from .dialogs import (
     show_detail_dialog, show_edit_dialog, show_confirm_dialog,
@@ -44,25 +51,84 @@ def _init_session_state():
     """Initialize session state for orders tab"""
     defaults = {
         'orders_page': 1,
-        'orders_view': 'list',  # 'list' or 'create'
+        'orders_view': 'list',
         'orders_selected_id': None,
+        'orders_selected_idx': None,
         'orders_conflicts_only': False,
-        'orders_conflict_check_active_only': True,  # Default: check active BOMs only
+        'orders_conflict_check_active_only': True,
+        # Filter cache - avoid re-fetching on every rerun
+        'orders_filters_cache': None,
+        # Action flags - for dialog opening
+        'pending_dialog': None,
+        'pending_dialog_params': {},
     }
     
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
 
-# ==================== Filter Bar ====================
+# ==================== Callback Functions ====================
+# Using callbacks instead of inline if-blocks reduces reruns
 
-def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
+def _on_create_order_click():
+    """Callback for Create Order button"""
+    st.session_state.orders_view = 'create'
+
+
+def _on_back_to_list_click():
+    """Callback for Back to List button"""
+    st.session_state.orders_view = 'list'
+
+
+def _on_refresh_click():
+    """Callback for Refresh button - just clears cache"""
+    st.session_state.pop('orders_data_cache', None)
+
+
+def _on_page_change(direction: int):
+    """Callback for pagination"""
+    st.session_state.orders_page = max(1, st.session_state.orders_page + direction)
+    st.session_state.orders_selected_idx = None
+
+
+def _on_action_click(action: str, order_id: int, order_no: str):
     """
-    Render filter bar and return selected filters
+    Callback for action buttons - sets pending dialog
+    Dialog will be opened on next fragment rerun, not full page rerun
+    """
+    st.session_state.pending_dialog = action
+    st.session_state.pending_dialog_params = {
+        'order_id': order_id,
+        'order_no': order_no
+    }
+
+
+# ==================== Fragment: Dashboard ====================
+
+@st.fragment
+def _fragment_dashboard():
+    """
+    ISOLATED FRAGMENT: Dashboard metrics
+    Only reruns when explicitly needed, not on every page interaction
+    """
+    # Get filter values from session state (set by filter fragment)
+    conflict_check_active_only = st.session_state.get('orders_conflict_check_active_only', True)
     
-    Returns:
-        Dictionary with filter values
+    dashboard = OrderDashboard()
+    dashboard.render(conflict_check_active_only=conflict_check_active_only)
+
+
+# ==================== Fragment: Filters ====================
+
+@st.fragment
+def _fragment_filters() -> Dict[str, Any]:
     """
+    ISOLATED FRAGMENT: Filter bar
+    Changes here only rerun this fragment, not the entire page
+    
+    Returns filter values via session state for other fragments to use
+    """
+    queries = OrderQueries()
     filter_options = queries.get_filter_options()
     
     # Default date range
@@ -77,21 +143,21 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
             status = st.selectbox(
                 "Status",
                 options=filter_options['statuses'],
-                key="order_filter_status"
+                key="frag_filter_status"
             )
         
         with col2:
             order_type = st.selectbox(
                 "Type",
                 options=filter_options['order_types'],
-                key="order_filter_type"
+                key="frag_filter_type"
             )
         
         with col3:
             priority = st.selectbox(
                 "Priority",
                 options=filter_options['priorities'],
-                key="order_filter_priority"
+                key="frag_filter_priority"
             )
         
         with col4:
@@ -100,20 +166,20 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                 from_date = st.date_input(
                     "From",
                     value=default_from,
-                    key="order_filter_from"
+                    key="frag_filter_from"
                 )
             with date_col2:
                 to_date = st.date_input(
                     "To",
                     value=default_to,
-                    key="order_filter_to"
+                    key="frag_filter_to"
                 )
         
         with col5:
             search = st.text_input(
                 "🔍 Search",
                 placeholder="Order, product, BOM, brand, size, notes, creator...",
-                key="order_filter_search",
+                key="frag_filter_search",
                 help="Search by: Order No, Product Name/Code, Package Size, Legacy Code, BOM Name/Code, Brand, Notes, Creator Name"
             )
         
@@ -125,36 +191,164 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
             conflicts_only = st.checkbox(
                 "🔴 Conflicts Only",
                 value=st.session_state.get('orders_conflicts_only', False),
-                key="order_filter_conflicts_only",
-                help="Show only orders with BOM conflicts (multiple active BOMs for same product)"
+                key="frag_filter_conflicts_only",
+                help="Show only orders with BOM conflicts"
             )
-            st.session_state['orders_conflicts_only'] = conflicts_only
         
         with col2:
             conflict_check_active_only = st.checkbox(
                 "Check Active BOMs Only",
                 value=st.session_state.get('orders_conflict_check_active_only', True),
-                key="order_filter_conflict_check_active",
-                help="If checked, count only ACTIVE BOMs for conflict detection. If unchecked, count ALL BOMs."
+                key="frag_filter_conflict_check_active",
+                help="If checked, count only ACTIVE BOMs for conflict detection"
             )
-            st.session_state['orders_conflict_check_active_only'] = conflict_check_active_only
+        
+        # Apply filters button - only updates when user explicitly clicks
+        if st.button("🔄 Apply Filters", use_container_width=True, key="btn_apply_filters"):
+            # Update session state with new filter values
+            st.session_state.orders_conflicts_only = conflicts_only
+            st.session_state.orders_conflict_check_active_only = conflict_check_active_only
+            st.session_state.orders_page = 1  # Reset to first page
+            st.session_state.orders_selected_idx = None  # Clear selection
     
-    return {
+    # Build and cache filter values
+    filters = {
         'status': status if status != "All" else None,
         'order_type': order_type if order_type != "All" else None,
         'priority': priority if priority != "All" else None,
         'from_date': from_date,
         'to_date': to_date,
         'search': search if search else None,
-        'conflicts_only': conflicts_only,
-        'conflict_check_active_only': conflict_check_active_only
+        'conflicts_only': st.session_state.get('orders_conflicts_only', False),
+        'conflict_check_active_only': st.session_state.get('orders_conflict_check_active_only', True)
     }
+    
+    # Store in session state for other fragments
+    st.session_state.orders_filters_cache = filters
+    
+    return filters
 
 
-# ==================== Order List ====================
+# ==================== Fragment: Order List with Actions ====================
 
-def _render_conflict_warning(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render BOM conflict warning banner if there are conflicts"""
+@st.fragment
+def _fragment_order_list_with_actions():
+    """
+    ISOLATED FRAGMENT: Order list table + action buttons
+    
+    This is the main interactive area. Isolating it means:
+    - Selecting rows only reruns this fragment
+    - Clicking action buttons only reruns this fragment
+    - Opening dialogs happens within fragment context
+    """
+    queries = OrderQueries()
+    
+    # Get filters from session state (set by filter fragment)
+    filters = st.session_state.get('orders_filters_cache', {})
+    if not filters:
+        # Fallback defaults
+        filters = {
+            'status': None, 'order_type': None, 'priority': None,
+            'from_date': None, 'to_date': None, 'search': None,
+            'conflicts_only': False, 'conflict_check_active_only': True
+        }
+    
+    # Check for pending dialog (from previous action click)
+    _handle_pending_dialog()
+    
+    # Render conflict warning
+    _render_conflict_warning_inline(queries, filters)
+    
+    # Action bar
+    _render_action_bar_inline()
+    
+    # Get data
+    page_size = OrderConstants.DEFAULT_PAGE_SIZE
+    page = st.session_state.orders_page
+    
+    orders = queries.get_orders(
+        status=filters.get('status'),
+        order_type=filters.get('order_type'),
+        priority=filters.get('priority'),
+        from_date=filters.get('from_date'),
+        to_date=filters.get('to_date'),
+        search=filters.get('search'),
+        conflicts_only=filters.get('conflicts_only', False),
+        conflict_check_active_only=filters.get('conflict_check_active_only', True),
+        page=page,
+        page_size=page_size
+    )
+    
+    # Handle connection error
+    if orders is None:
+        error_msg = queries.get_last_error() or "Cannot connect to database"
+        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
+        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection")
+        return
+    
+    total_count = queries.get_orders_count(
+        status=filters.get('status'),
+        order_type=filters.get('order_type'),
+        priority=filters.get('priority'),
+        from_date=filters.get('from_date'),
+        to_date=filters.get('to_date'),
+        search=filters.get('search'),
+        conflicts_only=filters.get('conflicts_only', False),
+        conflict_check_active_only=filters.get('conflict_check_active_only', True)
+    )
+    
+    # Handle empty data
+    if orders.empty:
+        if filters.get('conflicts_only'):
+            st.success("✅ No orders with BOM conflicts found!")
+        else:
+            st.info("📭 No orders found matching the filters")
+        return
+    
+    # Render table with selection
+    _render_order_table(orders)
+    
+    # Render action buttons for selected row
+    _render_selected_row_actions(orders)
+    
+    # Pagination
+    _render_pagination_inline(total_count, page_size, page)
+
+
+def _handle_pending_dialog():
+    """Handle any pending dialog from previous action click"""
+    pending = st.session_state.get('pending_dialog')
+    if not pending:
+        return
+    
+    params = st.session_state.get('pending_dialog_params', {})
+    order_id = params.get('order_id')
+    order_no = params.get('order_no', '')
+    
+    # Clear pending state BEFORE opening dialog
+    st.session_state.pending_dialog = None
+    st.session_state.pending_dialog_params = {}
+    
+    if not order_id:
+        return
+    
+    # Open the appropriate dialog
+    if pending == 'view':
+        show_detail_dialog(order_id)
+    elif pending == 'edit':
+        show_edit_dialog(order_id)
+    elif pending == 'confirm':
+        show_confirm_dialog(order_id, order_no)
+    elif pending == 'cancel':
+        show_cancel_dialog(order_id, order_no)
+    elif pending == 'pdf':
+        show_pdf_dialog(order_id, order_no)
+    elif pending == 'delete':
+        show_delete_dialog(order_id, order_no)
+
+
+def _render_conflict_warning_inline(queries: OrderQueries, filters: Dict[str, Any]):
+    """Render BOM conflict warning banner"""
     conflict_summary = queries.get_bom_conflict_summary(
         active_only=filters.get('conflict_check_active_only', True),
         from_date=filters.get('from_date'),
@@ -172,67 +366,44 @@ def _render_conflict_warning(queries: OrderQueries, filters: Dict[str, Any]):
         )
 
 
-def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render order list with single row selection and conflict indicators"""
-    page_size = OrderConstants.DEFAULT_PAGE_SIZE
-    page = st.session_state.orders_page
+def _render_action_bar_inline():
+    """Render action bar with callbacks"""
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
     
-    # Get conflict filter options
-    conflicts_only = filters.get('conflicts_only', False)
-    conflict_check_active_only = filters.get('conflict_check_active_only', True)
+    with col1:
+        # Use on_click callback instead of if-block
+        st.button(
+            "➕ Create Order",
+            type="primary",
+            use_container_width=True,
+            key="frag_btn_create",
+            on_click=_on_create_order_click
+        )
     
-    # Get orders with conflict count
-    orders = queries.get_orders(
-        status=filters['status'],
-        order_type=filters['order_type'],
-        priority=filters['priority'],
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        search=filters['search'],
-        conflicts_only=conflicts_only,
-        conflict_check_active_only=conflict_check_active_only,
-        page=page,
-        page_size=page_size
-    )
+    with col2:
+        if st.button("📊 Export Excel", use_container_width=True, key="frag_btn_export"):
+            _export_orders_excel_inline()
     
-    # Check for connection error (returns None)
-    if orders is None:
-        error_msg = queries.get_last_error() or "Cannot connect to database"
-        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
-        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
-        return
-    
-    total_count = queries.get_orders_count(
-        status=filters['status'],
-        order_type=filters['order_type'],
-        priority=filters['priority'],
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        search=filters['search'],
-        conflicts_only=conflicts_only,
-        conflict_check_active_only=conflict_check_active_only
-    )
-    
-    # Check for empty data (returns empty DataFrame)
-    if orders.empty:
-        if conflicts_only:
-            st.success("✅ No orders with BOM conflicts found!")
-        else:
-            st.info("📭 No orders found matching the filters")
-        return
-    
-    # Initialize selected index in session state
-    if 'orders_selected_idx' not in st.session_state:
-        st.session_state.orders_selected_idx = None
-    
-    # Prepare display dataframe
+    with col3:
+        st.button(
+            "🔄 Refresh",
+            use_container_width=True,
+            key="frag_btn_refresh",
+            on_click=_on_refresh_click
+        )
+
+
+def _render_order_table(orders: pd.DataFrame):
+    """Render order table with selection"""
     display_df = orders.copy()
     
-    # Set Select column based on session state (single selection)
+    # Set Select column
     display_df['Select'] = False
-    if st.session_state.orders_selected_idx is not None and st.session_state.orders_selected_idx < len(display_df):
-        display_df.loc[st.session_state.orders_selected_idx, 'Select'] = True
+    selected_idx = st.session_state.get('orders_selected_idx')
+    if selected_idx is not None and selected_idx < len(display_df):
+        display_df.loc[display_df.index[selected_idx], 'Select'] = True
     
+    # Format columns
     display_df['status_display'] = display_df['status'].apply(create_status_indicator)
     display_df['priority_display'] = display_df['priority'].apply(create_status_indicator)
     display_df['progress'] = display_df.apply(
@@ -243,20 +414,15 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     display_df['scheduled'] = display_df['scheduled_date'].apply(
         lambda x: format_datetime_vn(x, '%d/%m/%Y') if x else ''
     )
+    display_df['issues'] = display_df.apply(
+        lambda row: f"🔴 {row.get('bom_conflict_count', 1)}" if row.get('bom_conflict_count', 1) > 1 else "-",
+        axis=1
+    )
     
-    # Issues column - show BOM conflict count if > 1
-    def format_issues(row):
-        conflict_count = row.get('bom_conflict_count', 1)
-        if conflict_count > 1:
-            return f"🔴 {conflict_count}"
-        return "-"
-    
-    display_df['issues'] = display_df.apply(format_issues, axis=1)
-    
-    # Create editable dataframe with selection
+    # Data editor - selection changes only trigger fragment rerun
     edited_df = st.data_editor(
         display_df[[
-            'Select', 'order_no', 'product_display', 'progress', 
+            'Select', 'order_no', 'product_display', 'progress',
             'status_display', 'priority_display', 'issues', 'scheduled',
             'warehouse_name', 'target_warehouse_name'
         ]].rename(columns={
@@ -286,144 +452,160 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
                 width='small'
             )
         },
-        key="orders_table_editor"
+        key="frag_orders_table"
     )
     
-    # Handle single selection - find newly selected row
+    # Handle selection - NO st.rerun() needed within fragment
     selected_indices = edited_df[edited_df['Select'] == True].index.tolist()
     
     if selected_indices:
-        # If multiple selected (user clicked new one), keep only the newest
-        if len(selected_indices) > 1:
-            # Find the new selection (not the previously stored one)
-            new_selection = [idx for idx in selected_indices if idx != st.session_state.orders_selected_idx]
-            if new_selection:
-                st.session_state.orders_selected_idx = new_selection[0]
-                st.rerun()
-        else:
-            st.session_state.orders_selected_idx = selected_indices[0]
+        # Convert DataFrame index to positional index
+        new_idx = list(display_df.index).index(selected_indices[0]) if selected_indices[0] in display_df.index else 0
+        
+        # Only update if changed
+        if st.session_state.orders_selected_idx != new_idx:
+            st.session_state.orders_selected_idx = new_idx
+            # Fragment will naturally rerun due to state change
     else:
-        st.session_state.orders_selected_idx = None
+        if st.session_state.orders_selected_idx is not None:
+            st.session_state.orders_selected_idx = None
+
+
+def _render_selected_row_actions(orders: pd.DataFrame):
+    """Render action buttons for selected row"""
+    selected_idx = st.session_state.get('orders_selected_idx')
     
-    # Action buttons - only show when row is selected
-    if st.session_state.orders_selected_idx is not None:
-        selected_order = orders.iloc[st.session_state.orders_selected_idx]
-        order_id = selected_order['id']
-        order_no = selected_order['order_no']
-        status = selected_order['status']
-        bom_conflict_count = selected_order.get('bom_conflict_count', 1)
-        
-        st.markdown("---")
-        
-        # Show selected order info with conflict warning if applicable
-        selected_info = f"**Selected:** `{order_no}` | Status: {create_status_indicator(status)} | {selected_order['product_name']}"
-        if bom_conflict_count > 1:
-            selected_info += f" | ⚠️ **BOM Conflict ({bom_conflict_count} active BOMs)**"
-        st.markdown(selected_info)
-        
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-        
-        with col1:
-            if st.button("👁️ View", type="primary", use_container_width=True, key="btn_view_order"):
-                show_detail_dialog(order_id)
-        
-        with col2:
-            if st.button("✏️ Edit", use_container_width=True, key="btn_edit_order",
-                        disabled=not OrderValidator.can_edit(status)):
-                show_edit_dialog(order_id)
-        
-        with col3:
-            if st.button("✅ Confirm", use_container_width=True, key="btn_confirm_order",
-                        disabled=not OrderValidator.can_confirm(status)):
-                show_confirm_dialog(order_id, order_no)
-        
-        with col4:
-            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_order",
-                        disabled=not OrderValidator.can_cancel(status)):
-                show_cancel_dialog(order_id, order_no)
-        
-        with col5:
-            if st.button("📄 PDF", use_container_width=True, key="btn_pdf_order"):
-                show_pdf_dialog(order_id, order_no)
-        
-        with col6:
-            if st.button("🗑️ Delete", use_container_width=True, key="btn_delete_order",
-                        disabled=status not in ['DRAFT', 'CANCELLED']):
-                show_delete_dialog(order_id, order_no)
-    else:
+    if selected_idx is None or selected_idx >= len(orders):
         st.info("💡 Tick checkbox to select an order and perform actions")
+        return
     
-    # Pagination
+    selected_order = orders.iloc[selected_idx]
+    order_id = selected_order['id']
+    order_no = selected_order['order_no']
+    status = selected_order['status']
+    bom_conflict_count = selected_order.get('bom_conflict_count', 1)
+    
+    st.markdown("---")
+    
+    # Selected order info
+    selected_info = f"**Selected:** `{order_no}` | Status: {create_status_indicator(status)} | {selected_order['product_name']}"
+    if bom_conflict_count > 1:
+        selected_info += f" | ⚠️ **BOM Conflict ({bom_conflict_count} active BOMs)**"
+    st.markdown(selected_info)
+    
+    # Action buttons with on_click callbacks - NO st.rerun() needed
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    
+    with col1:
+        st.button(
+            "👁️ View",
+            type="primary",
+            use_container_width=True,
+            key="frag_btn_view",
+            on_click=lambda: _on_action_click('view', order_id, order_no)
+        )
+    
+    with col2:
+        st.button(
+            "✏️ Edit",
+            use_container_width=True,
+            key="frag_btn_edit",
+            disabled=not OrderValidator.can_edit(status),
+            on_click=lambda: _on_action_click('edit', order_id, order_no)
+        )
+    
+    with col3:
+        st.button(
+            "✅ Confirm",
+            use_container_width=True,
+            key="frag_btn_confirm",
+            disabled=not OrderValidator.can_confirm(status),
+            on_click=lambda: _on_action_click('confirm', order_id, order_no)
+        )
+    
+    with col4:
+        st.button(
+            "❌ Cancel",
+            use_container_width=True,
+            key="frag_btn_cancel",
+            disabled=not OrderValidator.can_cancel(status),
+            on_click=lambda: _on_action_click('cancel', order_id, order_no)
+        )
+    
+    with col5:
+        st.button(
+            "📄 PDF",
+            use_container_width=True,
+            key="frag_btn_pdf",
+            on_click=lambda: _on_action_click('pdf', order_id, order_no)
+        )
+    
+    with col6:
+        st.button(
+            "🗑️ Delete",
+            use_container_width=True,
+            key="frag_btn_delete",
+            disabled=status not in ['DRAFT', 'CANCELLED'],
+            on_click=lambda: _on_action_click('delete', order_id, order_no)
+        )
+
+
+def _render_pagination_inline(total_count: int, page_size: int, page: int):
+    """Render pagination controls"""
     st.markdown("---")
     total_pages = max(1, (total_count + page_size - 1) // page_size)
     
     col1, col2, col3 = st.columns([1, 2, 1])
     
     with col1:
-        if st.button("⬅️ Previous", disabled=page <= 1, key="btn_prev_page"):
-            st.session_state.orders_page = max(1, page - 1)
-            st.session_state.orders_selected_idx = None  # Reset selection on page change
-            st.rerun()
+        st.button(
+            "⬅️ Previous",
+            disabled=page <= 1,
+            key="frag_btn_prev",
+            on_click=lambda: _on_page_change(-1)
+        )
     
     with col2:
-        st.markdown(f"<div style='text-align:center'>Page {page} of {total_pages} | Total: {total_count} orders</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='text-align:center'>Page {page} of {total_pages} | Total: {total_count} orders</div>",
+            unsafe_allow_html=True
+        )
     
     with col3:
-        if st.button("Next ➡️", disabled=page >= total_pages, key="btn_next_page"):
-            st.session_state.orders_page = page + 1
-            st.session_state.orders_selected_idx = None  # Reset selection on page change
-            st.rerun()
+        st.button(
+            "Next ➡️",
+            disabled=page >= total_pages,
+            key="frag_btn_next",
+            on_click=lambda: _on_page_change(1)
+        )
 
 
-# ==================== Action Bar ====================
-
-def _render_action_bar(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render action bar with bulk actions"""
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-    
-    with col1:
-        if st.button("➕ Create Order", type="primary", use_container_width=True,
-                    key="btn_create_order"):
-            st.session_state.orders_view = 'create'
-            st.rerun()
-    
-    with col2:
-        if st.button("📊 Export Excel", use_container_width=True, key="btn_export_excel"):
-            _export_orders_excel(queries, filters)
-    
-    with col3:
-        if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_orders"):
-            st.rerun()
-
-
-def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
+def _export_orders_excel_inline():
     """Export orders to Excel"""
+    queries = OrderQueries()
+    filters = st.session_state.get('orders_filters_cache', {})
+    
     with st.spinner("Exporting..."):
-        # Get all orders (no pagination)
         orders = queries.get_orders(
-            status=filters['status'],
-            order_type=filters['order_type'],
-            priority=filters['priority'],
-            from_date=filters['from_date'],
-            to_date=filters['to_date'],
-            search=filters['search'],
+            status=filters.get('status'),
+            order_type=filters.get('order_type'),
+            priority=filters.get('priority'),
+            from_date=filters.get('from_date'),
+            to_date=filters.get('to_date'),
+            search=filters.get('search'),
             page=1,
             page_size=10000
         )
         
-        if orders.empty:
+        if orders is None or orders.empty:
             st.warning("No orders to export")
             return
         
-        # Prepare export dataframe with full product info
         export_df = orders.copy()
-        
-        # Add formatted product display column
         export_df['product_display'] = export_df.apply(format_product_display, axis=1)
         
-        # Select and rename columns
         export_df = export_df[[
-            'order_no', 'order_date', 
+            'order_no', 'order_date',
             'pt_code', 'legacy_pt_code', 'product_name', 'package_size', 'brand_name',
             'product_display',
             'bom_name', 'bom_type',
@@ -432,7 +614,6 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
             'created_by_name'
         ]].copy()
         
-        # Fill empty legacy codes with 'NEW'
         export_df['legacy_pt_code'] = export_df['legacy_pt_code'].fillna('NEW').replace('', 'NEW')
         
         export_df.columns = [
@@ -446,7 +627,6 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
         ]
         
         excel_data = export_to_excel(export_df)
-        
         filename = f"Production_Orders_{get_vietnam_today().strftime('%Y%m%d')}.xlsx"
         
         st.download_button(
@@ -454,7 +634,7 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
             data=excel_data,
             file_name=filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="download_orders_excel"
+            key="frag_download_excel"
         )
 
 
@@ -462,12 +642,16 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
 
 def render_orders_tab():
     """
-    Main function to render the Orders tab
-    Called from the main Production page
+    OPTIMIZED: Main function to render the Orders tab
+    
+    Architecture:
+    - Orchestrator only handles view switching and success messages
+    - All interactive components are isolated in fragments
+    - Fragments only rerun when their specific state changes
     """
     _init_session_state()
     
-    # Check for pending dialogs (e.g., confirm/cancel dialog triggered from detail dialog)
+    # Check for pending dialogs from nested dialog scenario
     check_pending_dialogs()
     
     # Show success message if order was just created
@@ -482,31 +666,24 @@ def render_orders_tab():
         3. Issue materials to start production
         """)
     
-    queries = OrderQueries()
-    
-    # Check current view
+    # View switching - this is the only thing that triggers full page rerun
     if st.session_state.orders_view == 'create':
-        # Back button
-        if st.button("⬅️ Back to List", key="btn_back_to_list"):
-            st.session_state.orders_view = 'list'
-            st.rerun()
-        
+        st.button(
+            "⬅️ Back to List",
+            key="btn_back_to_list",
+            on_click=_on_back_to_list_click
+        )
         render_create_form()
         return
     
-    # List view
+    # List view - all components are fragments
     st.subheader("📋 Production Orders")
     
-    # Render components
-    # Get conflict check option from session state
-    conflict_check_active_only = st.session_state.get('orders_conflict_check_active_only', True)
-    render_dashboard(conflict_check_active_only=conflict_check_active_only)
-
-    filters = _render_filter_bar(queries)
+    # Fragment 1: Dashboard (isolated)
+    _fragment_dashboard()
     
-    # Render BOM conflict warning banner
-    _render_conflict_warning(queries, filters)
-
-    _render_action_bar(queries, filters)
-
-    _render_order_list(queries, filters)
+    # Fragment 2: Filters (isolated)
+    _fragment_filters()
+    
+    # Fragment 3: Order list + actions (isolated)
+    _fragment_order_list_with_actions()
