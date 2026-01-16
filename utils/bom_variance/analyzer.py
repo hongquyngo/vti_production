@@ -1,90 +1,23 @@
-# utils/bom/variance/analyzer.py
+# utils/bom_variance/analyzer.py
 """
-BOM Variance Analyzer - VERSION 1.0
+BOM Variance Analyzer - VERSION 2.0
 
 Core analysis logic for comparing actual vs theoretical material consumption.
-Provides configuration management and analysis utilities.
+Provides analysis utilities and recommendation calculations.
+
+Refactored: VarianceConfig moved to config.py
 """
 
 import logging
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
-from typing import Optional, List, Dict, Any, Tuple
-from enum import Enum
+from typing import Optional, List, Dict, Any
 
 import pandas as pd
-import numpy as np
 
+from .config import VarianceConfig
 from .queries import VarianceQueries
 
 logger = logging.getLogger(__name__)
 
-
-# ==================== Configuration ====================
-
-class ApplyMode(Enum):
-    """How to apply recommendations"""
-    CLONE = "clone"          # Clone BOM with adjusted values (creates DRAFT)
-    DIRECT_UPDATE = "update" # Direct update if BOM has no usage
-
-
-@dataclass
-class VarianceConfig:
-    """
-    Configuration for variance analysis
-    
-    Attributes:
-        variance_threshold: Flag materials with variance above this % (default: 5%)
-        high_variance_threshold: Urgent attention threshold % (default: 10%)
-        min_mo_count: Minimum completed MOs for reliable statistics (default: 3)
-        cv_threshold: Coefficient of variation threshold for high variability flag (default: 15%)
-        date_from: Start date for analysis window
-        date_to: End date for analysis window
-        default_months: Default analysis window in months (default: 3)
-    """
-    variance_threshold: float = 5.0
-    high_variance_threshold: float = 10.0
-    min_mo_count: int = 3
-    cv_threshold: float = 15.0
-    date_from: Optional[date] = None
-    date_to: Optional[date] = None
-    default_months: int = 3
-    
-    def __post_init__(self):
-        """Set default date range if not provided"""
-        if self.date_to is None:
-            self.date_to = date.today()
-        
-        if self.date_from is None:
-            self.date_from = self.date_to - timedelta(days=self.default_months * 30)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert config to dictionary"""
-        return {
-            'variance_threshold': self.variance_threshold,
-            'high_variance_threshold': self.high_variance_threshold,
-            'min_mo_count': self.min_mo_count,
-            'cv_threshold': self.cv_threshold,
-            'date_from': self.date_from,
-            'date_to': self.date_to,
-            'default_months': self.default_months
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'VarianceConfig':
-        """Create config from dictionary"""
-        return cls(
-            variance_threshold=data.get('variance_threshold', 5.0),
-            high_variance_threshold=data.get('high_variance_threshold', 10.0),
-            min_mo_count=data.get('min_mo_count', 3),
-            cv_threshold=data.get('cv_threshold', 15.0),
-            date_from=data.get('date_from'),
-            date_to=data.get('date_to'),
-            default_months=data.get('default_months', 3)
-        )
-
-
-# ==================== Variance Analyzer ====================
 
 class VarianceAnalyzer:
     """
@@ -196,6 +129,8 @@ class VarianceAnalyzer:
         Returns:
             Dictionary with distribution data for charts
         """
+        import numpy as np
+        
         df = self.get_variance_data()
         
         if df.empty:
@@ -232,9 +167,9 @@ class VarianceAnalyzer:
         threshold = self.config.variance_threshold
         
         categories = {
-            'under_used': int((variance_pct < -threshold).sum()),  # Less than expected (saving)
-            'on_target': int((variance_pct.abs() <= threshold).sum()),  # Within threshold
-            'over_used': int((variance_pct > threshold).sum()),  # More than expected (waste)
+            'under_used': int((variance_pct < -threshold).sum()),
+            'on_target': int((variance_pct.abs() <= threshold).sum()),
+            'over_used': int((variance_pct > threshold).sum()),
             'high_variance': int((variance_pct.abs() > self.config.high_variance_threshold).sum())
         }
         
@@ -316,13 +251,9 @@ class VarianceAnalyzer:
         variance_pct = ((actual_avg - theoretical_qty_with_scrap) / theoretical_qty_with_scrap) * 100
         
         # Option 1: Adjust quantity, keep scrap rate
-        # actual = new_qty / output_qty * (1 + scrap/100)
-        # new_qty = actual * output_qty / (1 + scrap/100)
         suggested_qty_for_bom = actual_avg * bom_output_qty / (1 + current_scrap_rate/100)
         
         # Option 2: Adjust scrap rate, keep quantity
-        # actual = qty / output * (1 + new_scrap/100)
-        # new_scrap = (actual * output / qty - 1) * 100
         suggested_scrap = ((actual_avg / theoretical_qty) - 1) * 100
         
         return {
@@ -403,9 +334,9 @@ class VarianceAnalyzer:
             return "N/A"
         
         if value > 0:
-            return f"▲ +{value:.1f}%"  # Over-consumption
+            return f"▲ +{value:.1f}%"
         elif value < 0:
-            return f"▼ {value:.1f}%"   # Under-consumption
+            return f"▼ {value:.1f}%"
         else:
             return "= 0.0%"
     
