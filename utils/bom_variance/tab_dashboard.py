@@ -23,6 +23,7 @@ from .config import (
     MATERIAL_TYPES, BOM_TYPES, VARIANCE_DIRECTIONS,
     get_config, reset_filters,
     format_product_display, format_bom_display, format_variance_display,
+    format_bom_display_full, create_bom_options_from_df,
     extract_code_from_option, extract_bom_code_from_option
 )
 
@@ -128,10 +129,21 @@ def get_filter_options(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     
     products = df[product_cols].drop_duplicates().sort_values('output_product_code')
     
-    # Unique BOMs
+    # Unique BOMs with stats for better display
     bom_cols = ['bom_header_id', 'bom_code', 'bom_name', 'bom_type', 'output_product_code']
     bom_cols = [c for c in bom_cols if c in df.columns]
-    boms = df[bom_cols].drop_duplicates().sort_values('bom_code')
+    
+    # Aggregate BOM stats
+    bom_stats = df.groupby('bom_header_id').agg({
+        'material_id': 'count',
+        'has_high_variance': 'sum',
+        'mo_count': 'first' if 'mo_count' in df.columns else lambda x: 0
+    }).reset_index()
+    bom_stats.columns = ['bom_header_id', 'material_count', 'high_variance_count', 'mo_count']
+    
+    boms_base = df[bom_cols].drop_duplicates()
+    boms = boms_base.merge(bom_stats, on='bom_header_id', how='left')
+    boms = boms.sort_values('high_variance_count', ascending=False)
     
     # Unique materials
     material_cols = ['material_id', 'material_code', 'material_name', 'material_type']
@@ -149,19 +161,35 @@ def get_filter_options(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
 
 def get_cascaded_bom_options(df: pd.DataFrame, selected_products: List[str]) -> pd.DataFrame:
-    """Get BOM options filtered by selected products (cascading filter)"""
+    """Get BOM options filtered by selected products (cascading filter) with stats"""
     if df.empty:
         return pd.DataFrame()
     
-    bom_cols = ['bom_header_id', 'bom_code', 'bom_name', 'bom_type', 'output_product_code']
-    bom_cols = [c for c in bom_cols if c in df.columns]
-    
+    # Filter by selected products if any
     if selected_products:
         filtered_df = df[df['output_product_code'].isin(selected_products)]
     else:
         filtered_df = df
     
-    return filtered_df[bom_cols].drop_duplicates().sort_values('bom_code')
+    if filtered_df.empty:
+        return pd.DataFrame()
+    
+    # Get basic columns
+    bom_cols = ['bom_header_id', 'bom_code', 'bom_name', 'bom_type', 'output_product_code']
+    bom_cols = [c for c in bom_cols if c in filtered_df.columns]
+    
+    # Aggregate BOM stats
+    bom_stats = filtered_df.groupby('bom_header_id').agg({
+        'material_id': 'count',
+        'has_high_variance': 'sum',
+        'mo_count': 'first' if 'mo_count' in filtered_df.columns else lambda x: 0
+    }).reset_index()
+    bom_stats.columns = ['bom_header_id', 'material_count', 'high_variance_count', 'mo_count']
+    
+    boms_base = filtered_df[bom_cols].drop_duplicates()
+    boms = boms_base.merge(bom_stats, on='bom_header_id', how='left')
+    
+    return boms.sort_values('high_variance_count', ascending=False)
 
 
 def create_product_options(products_df: pd.DataFrame) -> List[str]:
@@ -183,21 +211,31 @@ def create_product_options(products_df: pd.DataFrame) -> List[str]:
     return options
 
 
-def create_bom_options(boms_df: pd.DataFrame) -> List[str]:
-    """Create formatted BOM options for multiselect"""
+def create_bom_options(boms_df: pd.DataFrame) -> tuple:
+    """
+    Create formatted BOM options for multiselect
+    
+    Returns:
+        Tuple of (list of display options, dict mapping display -> bom_code)
+    """
     if boms_df.empty:
-        return []
+        return [], {}
     
-    options = []
+    # Use unified format function
+    options, id_map = create_bom_options_from_df(boms_df, include_stats=True)
+    
+    # Create bom_code map (for filtering, we need bom_code not bom_id)
+    code_map = {}
     for _, row in boms_df.iterrows():
-        display = format_bom_display(
-            bom_code=row.get('bom_code', ''),
-            bom_name=row.get('bom_name', ''),
-            bom_type=row.get('bom_type')
-        )
-        options.append(display)
+        bom_id = row['bom_header_id']
+        bom_code = row.get('bom_code', str(bom_id))
+        # Find the display option that maps to this bom_id
+        for display, mapped_id in id_map.items():
+            if mapped_id == bom_id:
+                code_map[display] = bom_code
+                break
     
-    return options
+    return options, code_map
 
 
 def create_material_options(materials_df: pd.DataFrame) -> List[str]:
@@ -472,7 +510,7 @@ def render_filters_section(full_data: pd.DataFrame):
         with col5:
             selected_product_codes = [extract_code_from_option(p) for p in selected_products]
             cascaded_boms = get_cascaded_bom_options(full_data, selected_product_codes)
-            bom_options = create_bom_options(cascaded_boms)
+            bom_options, bom_code_map = create_bom_options(cascaded_boms)
             
             current_bom_selections = st.session_state['filter_boms']
             valid_bom_selections = [b for b in current_bom_selections if b in bom_options]

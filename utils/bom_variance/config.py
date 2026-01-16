@@ -10,9 +10,10 @@ Contains:
 """
 
 import streamlit as st
+import pandas as pd
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from enum import Enum
 
 
@@ -211,7 +212,7 @@ def format_product_display(
 
 def format_bom_display(bom_code: str, bom_name: str, bom_type: str = None) -> str:
     """
-    Format BOM display: bom_code | bom_name [type]
+    Format BOM display (simple): bom_code | bom_name [type]
     
     Examples:
         "BOM-CUT-001 | Main Product BOM [CUTTING]"
@@ -220,6 +221,147 @@ def format_bom_display(bom_code: str, bom_name: str, bom_type: str = None) -> st
     if bom_type:
         result += f" [{bom_type}]"
     return result
+
+
+def format_bom_display_full(
+    bom_code: str,
+    bom_name: str,
+    bom_type: str = None,
+    output_product_code: str = None,
+    output_product_name: str = None,
+    high_variance_count: int = 0,
+    mo_count: int = 0,
+    material_count: int = 0,
+    max_name_length: int = 30
+) -> str:
+    """
+    Format BOM display (full): emoji BOM-CODE | Name [TYPE] | 🎯 Product (stats)
+    
+    Unified format for all tabs (Dashboard, Detail, Recommendations)
+    
+    Args:
+        bom_code: BOM code
+        bom_name: BOM name
+        bom_type: BOM type (CUTTING, KITTING, etc.)
+        output_product_code: Output product code
+        output_product_name: Output product name
+        high_variance_count: Number of materials with high variance
+        mo_count: Number of completed MOs
+        material_count: Number of materials in BOM
+        max_name_length: Max length for BOM name truncation
+    
+    Returns:
+        Formatted string like:
+        "🔴 BOM-202511-005 | Product Name [CUTTING] | 🎯 PT-001 (3 issues, 15 MOs)"
+    
+    Examples:
+        "🔴 BOM-001 | Main BOM [CUTTING] | 🎯 PT-001 (5 issues, 20 MOs)"
+        "🟠 BOM-002 | Secondary BOM [KITTING] | 🎯 PT-002 (2 issues)"
+        "🟢 BOM-003 | Clean BOM [REPACKING] | 🎯 PT-003 (10 MOs)"
+    """
+    # Status emoji based on variance issues
+    if high_variance_count > 3:
+        emoji = "🔴"
+    elif high_variance_count > 0:
+        emoji = "🟠"
+    else:
+        emoji = "🟢"
+    
+    # Truncate BOM name if too long
+    display_name = bom_name or ""
+    if display_name and len(display_name) > max_name_length:
+        display_name = display_name[:max_name_length - 3] + "..."
+    
+    # Build main part: emoji CODE | Name [TYPE]
+    result = f"{emoji} {bom_code}"
+    if display_name:
+        result += f" | {display_name}"
+    if bom_type:
+        result += f" [{bom_type}]"
+    
+    # Build stats part
+    stats_parts = []
+    
+    # Output product
+    if output_product_code:
+        result += f" | 🎯 {output_product_code}"
+    
+    # Stats in parentheses
+    if high_variance_count > 0:
+        stats_parts.append(f"{high_variance_count} issues")
+    if mo_count > 0:
+        stats_parts.append(f"{mo_count} MOs")
+    elif material_count > 0:
+        stats_parts.append(f"{material_count} mats")
+    
+    if stats_parts:
+        result += f" ({', '.join(stats_parts)})"
+    
+    return result
+
+
+def create_bom_options_from_df(
+    df: pd.DataFrame,
+    include_stats: bool = True
+) -> Tuple[List[str], Dict[str, int]]:
+    """
+    Create BOM options for dropdown from DataFrame
+    
+    Args:
+        df: DataFrame with BOM data (must have bom_header_id, bom_code, etc.)
+        include_stats: Whether to include stats (issues, MOs) in display
+    
+    Returns:
+        Tuple of (list of display options, dict mapping display -> bom_id)
+    
+    Expected DataFrame columns:
+        Required: bom_header_id, bom_code
+        Optional: bom_name, bom_type, output_product_code, output_product_name,
+                  high_variance_count, mo_count, material_count
+    """
+    import pandas as pd
+    
+    if df.empty:
+        return [], {}
+    
+    options = []
+    id_map = {}
+    
+    for _, row in df.iterrows():
+        # Get values with fallbacks
+        bom_id = row['bom_header_id']
+        bom_code = row.get('bom_code', str(bom_id))
+        bom_name = row.get('bom_name', '')
+        bom_type = row.get('bom_type', None)
+        output_code = row.get('output_product_code', None)
+        output_name = row.get('output_product_name', None)
+        high_var = int(row.get('high_variance_count', 0)) if pd.notna(row.get('high_variance_count')) else 0
+        mo_count = int(row.get('mo_count', 0)) if pd.notna(row.get('mo_count')) else 0
+        mat_count = int(row.get('material_count', 0)) if pd.notna(row.get('material_count')) else 0
+        
+        if include_stats:
+            display = format_bom_display_full(
+                bom_code=bom_code,
+                bom_name=bom_name,
+                bom_type=bom_type,
+                output_product_code=output_code,
+                output_product_name=output_name,
+                high_variance_count=high_var,
+                mo_count=mo_count,
+                material_count=mat_count
+            )
+        else:
+            display = format_bom_display(bom_code, bom_name, bom_type)
+        
+        options.append(display)
+        id_map[display] = int(bom_id)
+    
+    return options, id_map
+
+
+def extract_bom_id_from_option(option: str, id_map: Dict[str, int]) -> Optional[int]:
+    """Extract BOM ID from selected option using the id_map"""
+    return id_map.get(option)
 
 
 def format_variance_display(value: float) -> str:
@@ -265,7 +407,11 @@ def extract_code_from_option(option: str) -> str:
 
 def extract_bom_code_from_option(option: str) -> str:
     """Extract BOM code from formatted option string"""
-    # Format: "BOM-CODE | name [TYPE]"
+    # Format: "🔴 BOM-CODE | name [TYPE] | ..." or "BOM-CODE | name [TYPE]"
     if '|' in option:
-        return option.split('|')[0].strip()
+        first_part = option.split('|')[0].strip()
+        # Remove status emoji if present (🔴, 🟠, 🟢)
+        if first_part and first_part[0] in ['🔴', '🟠', '🟢']:
+            first_part = first_part[1:].strip()
+        return first_part
     return option

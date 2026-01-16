@@ -23,6 +23,8 @@ from .config import (
     get_config,
     format_variance_display,
     format_bom_display,
+    format_bom_display_full,
+    create_bom_options_from_df,
     MATERIAL_TYPES,
     BOM_TYPES,
     ApplyMode
@@ -240,6 +242,36 @@ def render_summary_stats(full_data: pd.DataFrame):
 
 # ==================== Filters Section ====================
 
+def get_bom_summary_for_filter(recommendations: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate BOM stats for filter dropdown"""
+    if recommendations.empty:
+        return pd.DataFrame()
+    
+    # Group by BOM to get stats
+    bom_agg = recommendations.groupby('bom_header_id').agg({
+        'bom_code': 'first',
+        'bom_name': 'first',
+        'bom_type': 'first',
+        'output_product_code': 'first' if 'output_product_code' in recommendations.columns else lambda x: None,
+        'material_id': 'count',  # material_count
+        'variance_pct': lambda x: (x.abs() > get_config().variance_threshold).sum()  # high_variance_count
+    }).reset_index()
+    
+    bom_agg.columns = [
+        'bom_header_id', 'bom_code', 'bom_name', 'bom_type', 
+        'output_product_code', 'material_count', 'high_variance_count'
+    ]
+    
+    # Add mo_count if available
+    if 'mo_count' in recommendations.columns:
+        mo_counts = recommendations.groupby('bom_header_id')['mo_count'].first().reset_index()
+        bom_agg = bom_agg.merge(mo_counts, on='bom_header_id', how='left')
+    else:
+        bom_agg['mo_count'] = 0
+    
+    return bom_agg.sort_values('high_variance_count', ascending=False)
+
+
 def render_filters(recommendations: pd.DataFrame) -> pd.DataFrame:
     """Render filter controls and return filtered data"""
     
@@ -247,15 +279,28 @@ def render_filters(recommendations: pd.DataFrame) -> pd.DataFrame:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            # BOM filter
-            bom_options = sorted(recommendations['bom_code'].unique().tolist())
-            selected_boms = st.multiselect(
+            # BOM filter with full display format
+            bom_summary = get_bom_summary_for_filter(recommendations)
+            bom_options, bom_id_map = create_bom_options_from_df(bom_summary, include_stats=True)
+            
+            selected_bom_displays = st.multiselect(
                 "Filter by BOM",
                 options=bom_options,
                 default=[],
                 placeholder="All BOMs",
                 key="rec_bom_filter"
             )
+            
+            # Convert selected displays back to bom_codes
+            selected_boms = []
+            if selected_bom_displays:
+                for display in selected_bom_displays:
+                    bom_id = bom_id_map.get(display)
+                    if bom_id:
+                        # Find bom_code from bom_id
+                        match = bom_summary[bom_summary['bom_header_id'] == bom_id]
+                        if not match.empty:
+                            selected_boms.append(match.iloc[0]['bom_code'])
         
         with col2:
             # Material type filter

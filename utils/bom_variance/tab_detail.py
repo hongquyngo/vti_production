@@ -20,7 +20,9 @@ from datetime import date
 from .config import (
     get_config, 
     format_variance_display,
-    format_product_display
+    format_product_display,
+    format_bom_display_full,
+    create_bom_options_from_df
 )
 
 logger = logging.getLogger(__name__)
@@ -151,16 +153,11 @@ def render_bom_selector(bom_options: pd.DataFrame) -> Optional[int]:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # Create display options
-        display_options = []
-        bom_id_map = {}
-        
-        for _, row in bom_options.iterrows():
-            high_var = int(row['high_variance_count'])
-            emoji = "🔴" if high_var > 3 else ("🟠" if high_var > 0 else "🟢")
-            display = f"{emoji} {row['bom_code']} | {row['bom_name']} [{row['bom_type']}] - {high_var} issues"
-            display_options.append(display)
-            bom_id_map[display] = row['bom_header_id']
+        # Create display options using unified format function
+        display_options, bom_id_map = create_bom_options_from_df(
+            bom_options, 
+            include_stats=True
+        )
         
         selected_display = st.selectbox(
             "BOM",
