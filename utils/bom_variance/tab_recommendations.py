@@ -438,7 +438,7 @@ def render_actions_section(selected_items: List[Dict], recommendations: pd.DataF
     if 'apply_results' not in st.session_state:
         st.session_state['apply_results'] = None
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
         # Export to Excel
@@ -452,22 +452,13 @@ def render_actions_section(selected_items: List[Dict], recommendations: pd.DataF
         )
     
     with col2:
-        # Preview selected
+        # Review & Apply button
         if selected_items:
-            if st.button("👁️ Preview Changes", use_container_width=True, type="secondary"):
+            if st.button("📋 Review & Apply", use_container_width=True, type="primary"):
                 st.session_state['show_apply_dialog'] = True
         else:
-            st.button("👁️ Preview Changes", use_container_width=True, disabled=True, 
+            st.button("📋 Review & Apply", use_container_width=True, type="primary", disabled=True,
                      help="Select items first")
-    
-    with col3:
-        # Apply button
-        if selected_items:
-            if st.button("✅ Apply Selected", use_container_width=True, type="primary"):
-                st.session_state['show_apply_dialog'] = True
-        else:
-            st.button("✅ Apply Selected", use_container_width=True, type="primary", disabled=True,
-                     help="Select items to apply")
     
     # Show apply dialog
     if st.session_state['show_apply_dialog'] and selected_items:
