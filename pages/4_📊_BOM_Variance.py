@@ -216,7 +216,7 @@ def main():
         tab_dashboard.render(analyzer)
     
     with tab2:
-        tab_detail.render(full_data)
+        tab_detail.render(full_data, analyzer)
     
     with tab3:
         tab_recommendations.render(full_data, analyzer)
