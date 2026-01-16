@@ -276,7 +276,8 @@ def render_filters(recommendations: pd.DataFrame) -> pd.DataFrame:
     """Render filter controls and return filtered data"""
     
     with st.expander("🔍 Filter Recommendations", expanded=False):
-        col1, col2, col3 = st.columns(3)
+        # BOM filter gets more space (3:1:1 ratio)
+        col1, col2, col3 = st.columns([3, 1, 1])
         
         with col1:
             # BOM filter with full display format
