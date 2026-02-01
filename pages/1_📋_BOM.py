@@ -1,7 +1,17 @@
 # pages/1___BOM.py
 """
-Bill of Materials (BOM) Management - VERSION 2.5
+Bill of Materials (BOM) Management - VERSION 2.6
 Clean single-page UI with dialog-driven workflows
+
+Changes in v2.6:
+- Smart Filter Bar with multiselect widgets
+- Replaced single selects with multiselect for Type, Status, Issues
+- Added filters: Date Range, Creator, Brand
+- Auto-apply filters (no Search button needed)
+- Active filter chips with remove capability
+- Fragment-based rendering for better performance
+- Export filtered results only
+- Default filter: ACTIVE status
 
 Changes in v2.5:
 - Added Multiple Active BOM Conflict detection (Phase 2)
@@ -28,8 +38,9 @@ Changes in v2.1:
 import streamlit as st
 import pandas as pd
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from io import BytesIO
+from typing import List, Optional
 
 from utils.auth import AuthManager
 from utils.bom.manager import BOMManager
@@ -111,13 +122,13 @@ def main():
     # Show messages if any
     render_messages()
     
-    # Filters and metrics
+    # Metrics row (non-fragment)
     render_filters_and_metrics()
     
-    # BOM table
-    render_bom_table()
+    # Smart Filter Bar + BOM Table (fragment-based for efficient re-rendering)
+    render_smart_filter_bar()
     
-    # Mount active dialog
+    # Mount active dialog (outside fragment)
     render_active_dialog()
     
     # Footer
@@ -126,7 +137,7 @@ def main():
 
 def render_header():
     """Render page header with action buttons"""
-    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+    col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
     
     with col1:
         st.title("📋 BOM Management")
@@ -139,14 +150,32 @@ def render_header():
     
     with col3:
         st.markdown("<br>", unsafe_allow_html=True)
+        # Export filtered list button
+        filtered_boms = st.session_state.get('filtered_boms', pd.DataFrame())
+        if not filtered_boms.empty:
+            excel_data = export_boms_to_excel(filtered_boms)
+            st.download_button(
+                label="📥 Export List",
+                data=excel_data,
+                file_name=f"BOM_List_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                help=f"Export {len(filtered_boms)} filtered BOMs to Excel"
+            )
+        else:
+            st.button("📥 Export List", use_container_width=True, disabled=True)
+    
+    with col4:
+        st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🔄 Refresh", use_container_width=True):
             state.clear_cache()
+            state.reset_filters()  # Reset filters to default
             # Also clear conflict cache
             if 'conflict_products' in st.session_state:
                 del st.session_state['conflict_products']
             st.rerun()
     
-    with col4:
+    with col5:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("➕ Create BOM", type="primary", use_container_width=True):
             state.open_dialog(state.DIALOG_CREATE)
@@ -166,10 +195,10 @@ def render_messages():
 
 
 def render_filters_and_metrics():
-    """Render filters and metrics with conflict detection"""
-    st.markdown("### 🔍 Filters & Metrics")
+    """Render metrics row (non-fragment, runs once per page load)"""
+    st.markdown("### 📊 Dashboard Metrics")
     
-    # Metrics row - 6 columns now including Conflicts
+    # Metrics row - 6 columns
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     # Get BOMs for metrics (use cached if available)
@@ -192,6 +221,9 @@ def render_filters_and_metrics():
             conflict_bom_ids.add(bom['bom_id'])
     conflict_bom_count = len(conflict_bom_ids)
     
+    # Store for use in filters
+    st.session_state['conflict_bom_ids'] = conflict_bom_ids
+    
     with col1:
         st.metric("Total BOMs", len(all_boms))
     
@@ -212,7 +244,6 @@ def render_filters_and_metrics():
         st.metric("In Use", in_use_count)
     
     with col6:
-        # Conflicts metric with warning color
         if conflict_product_count > 0:
             st.metric(
                 "⚠️ Conflicts", 
@@ -222,86 +253,381 @@ def render_filters_and_metrics():
                 help=f"{conflict_product_count} product(s) have multiple active BOMs"
             )
         else:
-            st.metric(
-                "✅ Conflicts", 
-                0,
-                help="No products with multiple active BOMs"
-            )
+            st.metric("✅ Conflicts", 0, help="No products with multiple active BOMs")
     
-    # Show conflict summary warning if any
     if conflict_product_count > 0:
         st.warning(
             f"⚠️ **{conflict_product_count} product(s)** have multiple active BOMs "
-            f"({conflict_bom_count} BOMs affected). Use 'Show Conflicts Only' filter to review."
+            f"({conflict_bom_count} BOMs affected). Use Issues filter to review."
         )
+
+
+def get_filter_options():
+    """Get available options for filter dropdowns from cached data"""
+    all_boms = st.session_state.get('all_boms', pd.DataFrame())
+    
+    if all_boms.empty:
+        return {
+            'bom_codes': [],
+            'bom_names': [],
+            'products': [],
+            'creators': [],
+            'brands': []
+        }
+    
+    # Get unique BOM codes
+    bom_codes = all_boms['bom_code'].dropna().unique().tolist()
+    bom_codes.sort()
+    
+    # Get unique BOM names
+    bom_names = all_boms['bom_name'].dropna().unique().tolist()
+    bom_names.sort()
+    
+    # Get unique products (format: code - name)
+    products = []
+    product_seen = set()
+    for _, row in all_boms.iterrows():
+        prod_code = row.get('product_code', '')
+        prod_name = row.get('product_name', '')
+        if prod_code and prod_code not in product_seen:
+            product_seen.add(prod_code)
+            products.append(f"{prod_code} - {prod_name}")
+    products.sort()
+    
+    # Get unique creators (non-null)
+    creators = all_boms['creator_name'].dropna().unique().tolist()
+    creators = [c for c in creators if c and c != 'Unknown']
+    creators.sort()
+    
+    # Get unique brands (non-null)
+    brands = all_boms['brand'].dropna().unique().tolist()
+    brands = [b for b in brands if b and str(b).strip()]
+    brands.sort()
+    
+    return {
+        'bom_codes': bom_codes,
+        'bom_names': bom_names,
+        'products': products,
+        'creators': creators,
+        'brands': brands
+    }
+
+
+def apply_smart_filters(boms: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply all smart filters to BOM dataframe
+    
+    Args:
+        boms: Source DataFrame with all BOMs
+        
+    Returns:
+        Filtered DataFrame
+    """
+    if boms.empty:
+        return boms
+    
+    filtered = boms.copy()
+    
+    # Get filter values from state
+    filter_bom_codes = state.get_filter_bom_codes()
+    filter_bom_names = state.get_filter_bom_names()
+    filter_products = state.get_filter_products()
+    filter_types = state.get_filter_types()
+    filter_statuses = state.get_filter_statuses()
+    filter_issues = state.get_filter_issues()
+    filter_date_from, filter_date_to = state.get_filter_date_range()
+    filter_creators = state.get_filter_creators()
+    filter_brands = state.get_filter_brands()
+    
+    # Apply BOM Code filter
+    if filter_bom_codes:
+        filtered = filtered[filtered['bom_code'].isin(filter_bom_codes)]
+    
+    # Apply BOM Name filter
+    if filter_bom_names:
+        filtered = filtered[filtered['bom_name'].isin(filter_bom_names)]
+    
+    # Apply Product filter (format: "code - name")
+    if filter_products:
+        # Extract product codes from filter values
+        product_codes = [p.split(' - ')[0] for p in filter_products]
+        filtered = filtered[filtered['product_code'].isin(product_codes)]
+    
+    # Apply Type filter
+    if filter_types:
+        filtered = filtered[filtered['bom_type'].isin(filter_types)]
+    
+    # Apply Status filter
+    if filter_statuses:
+        filtered = filtered[filtered['status'].isin(filter_statuses)]
+    
+    # Apply Date Range filter (created_date)
+    if filter_date_from:
+        filtered = filtered[filtered['created_date'].dt.date >= filter_date_from]
+    
+    if filter_date_to:
+        filtered = filtered[filtered['created_date'].dt.date <= filter_date_to]
+    
+    # Apply Creator filter
+    if filter_creators:
+        filtered = filtered[filtered['creator_name'].isin(filter_creators)]
+    
+    # Apply Brand filter
+    if filter_brands:
+        filtered = filtered[filtered['brand'].isin(filter_brands)]
+    
+    # Apply Issues filter (requires additional checks)
+    if filter_issues:
+        # Get duplicate and conflict maps
+        bom_ids = filtered['id'].tolist()
+        duplicates_map = get_boms_with_duplicate_check(bom_ids)
+        conflicts_map = get_boms_with_active_conflict_check(bom_ids)
+        
+        # Build mask based on selected issues
+        mask = pd.Series([False] * len(filtered), index=filtered.index)
+        
+        if 'Conflicts' in filter_issues:
+            # BOMs with conflicts (ACTIVE status and conflict_count > 0)
+            for idx, row in filtered.iterrows():
+                if row['status'] == 'ACTIVE' and conflicts_map.get(row['id'], 0) > 0:
+                    mask[idx] = True
+        
+        if 'Duplicates' in filter_issues:
+            # BOMs with duplicate materials
+            for idx, row in filtered.iterrows():
+                if duplicates_map.get(row['id'], False):
+                    mask[idx] = True
+        
+        if 'No Issues' in filter_issues:
+            # BOMs without any issues
+            for idx, row in filtered.iterrows():
+                has_conflict = row['status'] == 'ACTIVE' and conflicts_map.get(row['id'], 0) > 0
+                has_duplicate = duplicates_map.get(row['id'], False)
+                if not has_conflict and not has_duplicate:
+                    mask[idx] = True
+        
+        filtered = filtered[mask]
+    
+    return filtered
+
+
+@st.fragment
+def render_smart_filter_bar():
+    """
+    Render Smart Filter Bar with multiselects and active filter chips
+    Uses fragment for efficient re-rendering without full page reload
+    """
+    st.markdown("### 🔍 Smart Filters")
+    
+    # Get filter options
+    options = get_filter_options()
+    
+    # Row 1: BOM Code, BOM Name, Product (main search filters - searchable multiselect)
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        selected_bom_codes = st.multiselect(
+            "🔖 BOM Code",
+            options=options['bom_codes'],
+            default=state.get_filter_bom_codes(),
+            key='ms_filter_bom_codes',
+            placeholder="Search BOM codes..."
+        )
+        if selected_bom_codes != state.get_filter_bom_codes():
+            state.set_filter_bom_codes(selected_bom_codes)
+    
+    with col2:
+        selected_bom_names = st.multiselect(
+            "📝 BOM Name",
+            options=options['bom_names'],
+            default=state.get_filter_bom_names(),
+            key='ms_filter_bom_names',
+            placeholder="Search BOM names..."
+        )
+        if selected_bom_names != state.get_filter_bom_names():
+            state.set_filter_bom_names(selected_bom_names)
+    
+    with col3:
+        selected_products = st.multiselect(
+            "📦 Product",
+            options=options['products'],
+            default=state.get_filter_products(),
+            key='ms_filter_products',
+            placeholder="Search products..."
+        )
+        if selected_products != state.get_filter_products():
+            state.set_filter_products(selected_products)
+    
+    # Row 2: Type, Status, Issues (categorization)
+    col4, col5, col6 = st.columns(3)
+    
+    with col4:
+        selected_types = st.multiselect(
+            "🏭 BOM Type",
+            options=['KITTING', 'CUTTING', 'REPACKING'],
+            default=state.get_filter_types(),
+            key='ms_filter_types',
+            placeholder="All Types"
+        )
+        if selected_types != state.get_filter_types():
+            state.set_filter_types(selected_types)
+    
+    with col5:
+        selected_statuses = st.multiselect(
+            "📊 Status",
+            options=['DRAFT', 'ACTIVE', 'INACTIVE'],
+            default=state.get_filter_statuses(),
+            key='ms_filter_statuses',
+            placeholder="All Statuses"
+        )
+        if selected_statuses != state.get_filter_statuses():
+            state.set_filter_statuses(selected_statuses)
+    
+    with col6:
+        selected_issues = st.multiselect(
+            "⚠️ Issues",
+            options=['Conflicts', 'Duplicates', 'No Issues'],
+            default=state.get_filter_issues(),
+            key='ms_filter_issues',
+            placeholder="All (No Filter)",
+            help="Conflicts: Multiple active BOMs | Duplicates: Duplicate materials | No Issues: Clean BOMs"
+        )
+        if selected_issues != state.get_filter_issues():
+            state.set_filter_issues(selected_issues)
+    
+    # Row 3: Creator, Brand, Date Range, Reset
+    col7, col8, col9, col10 = st.columns([1.2, 1.2, 1.4, 0.4])
+    
+    with col7:
+        selected_creators = st.multiselect(
+            "👤 Creator",
+            options=options['creators'],
+            default=state.get_filter_creators(),
+            key='ms_filter_creators',
+            placeholder="All Creators"
+        )
+        if selected_creators != state.get_filter_creators():
+            state.set_filter_creators(selected_creators)
+    
+    with col8:
+        selected_brands = st.multiselect(
+            "🏷️ Brand",
+            options=options['brands'],
+            default=state.get_filter_brands(),
+            key='ms_filter_brands',
+            placeholder="All Brands"
+        )
+        if selected_brands != state.get_filter_brands():
+            state.set_filter_brands(selected_brands)
+    
+    with col9:
+        st.markdown("**📅 Date Range**")
+        date_col1, date_col2 = st.columns(2)
+        
+        current_from, current_to = state.get_filter_date_range()
+        
+        with date_col1:
+            use_date_from = st.checkbox("From", value=current_from is not None, key="use_date_from")
+            if use_date_from:
+                date_from = st.date_input(
+                    "From",
+                    value=current_from or date.today() - timedelta(days=30),
+                    key='filter_date_from',
+                    format="DD/MM/YYYY",
+                    label_visibility="collapsed"
+                )
+            else:
+                date_from = None
+        
+        with date_col2:
+            use_date_to = st.checkbox("To", value=current_to is not None, key="use_date_to")
+            if use_date_to:
+                date_to = st.date_input(
+                    "To",
+                    value=current_to or date.today(),
+                    key='filter_date_to',
+                    format="DD/MM/YYYY",
+                    label_visibility="collapsed"
+                )
+            else:
+                date_to = None
+        
+        if date_from != current_from or date_to != current_to:
+            state.set_filter_date_range(date_from, date_to)
+    
+    with col10:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        if st.button("🔄", use_container_width=True, help="Reset all filters to default"):
+            state.reset_filters()
+            st.rerun(scope="fragment")
+    
+    # Active filter chips
+    render_active_filter_chips()
     
     st.markdown("---")
     
-    # Filters row - 5 columns now
-    col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
+    # Apply filters and render table
+    all_boms = st.session_state.get('all_boms', pd.DataFrame())
+    filtered_boms = apply_smart_filters(all_boms)
     
-    with col1:
-        filter_type = st.selectbox(
-            "BOM Type",
-            ["All", "KITTING", "CUTTING", "REPACKING"],
-            key="filter_type"
-        )
+    # Store filtered result
+    st.session_state['filtered_boms'] = filtered_boms
     
-    with col2:
-        filter_status = st.selectbox(
-            "Status",
-            ["All", "DRAFT", "ACTIVE", "INACTIVE"],
-            key="filter_status"
-        )
+    # Show result count
+    total_count = len(all_boms)
+    filtered_count = len(filtered_boms)
     
-    with col3:
-        filter_search = st.text_input(
-            "Search",
-            placeholder="BOM, product, material, brand, creator...",
-            key="filter_search"
-        )
+    if state.has_active_filters():
+        st.caption(f"📋 Showing **{filtered_count}** of {total_count} BOMs")
+    else:
+        st.caption(f"📋 Showing all **{total_count}** BOMs")
     
-    with col4:
-        # New filter: Show conflicts only
-        filter_conflicts = st.checkbox(
-            "🔴 Conflicts Only",
-            key="filter_conflicts",
-            help="Show only BOMs where product has multiple active BOMs"
-        )
-    
-    with col5:
-        st.markdown("<br>", unsafe_allow_html=True)
-        search_clicked = st.button("🔍 Search", use_container_width=True)
-    
-    # Apply filters
-    if search_clicked or 'filtered_boms' not in st.session_state:
-        try:
-            filtered_boms = bom_manager.get_boms(
-                bom_type=filter_type if filter_type != "All" else None,
-                status=filter_status if filter_status != "All" else None,
-                search=filter_search if filter_search else None
-            )
-            
-            # Apply conflict filter if enabled
-            if filter_conflicts and conflict_bom_ids:
-                filtered_boms = filtered_boms[filtered_boms['id'].isin(conflict_bom_ids)]
-            
-            st.session_state['filtered_boms'] = filtered_boms
-        except Exception as e:
-            logger.error(f"Error filtering BOMs: {e}")
-            st.error(f"❌ Error: {str(e)}")
-            st.session_state['filtered_boms'] = pd.DataFrame()
+    # Render the BOM table within the fragment
+    render_bom_table_content(filtered_boms)
 
 
-def render_bom_table():
-    """Render BOM table with actions, duplicate warnings, and conflict badges"""
+def render_active_filter_chips():
+    """Render clickable chips for active filters"""
+    chips = state.get_active_filter_chips()
+    
+    if not chips:
+        return
+    
+    st.markdown("**Active Filters:**")
+    
+    # Create columns for chips (max 8 per row)
+    num_chips = len(chips)
+    if num_chips > 0:
+        cols = st.columns(min(num_chips + 1, 9))  # +1 for Clear All button
+        
+        for idx, chip in enumerate(chips[:8]):  # Max 8 chips shown
+            with cols[idx]:
+                if st.button(
+                    f"✕ {chip['label']}", 
+                    key=f"chip_{chip['category']}_{chip['value']}",
+                    use_container_width=True
+                ):
+                    state.remove_filter_chip(chip['category'], chip['value'])
+                    st.rerun(scope="fragment")
+        
+        # Clear All button
+        with cols[min(num_chips, 8)]:
+            if st.button("🗑️ Clear All", key="clear_all_chips", use_container_width=True):
+                state.reset_filters()
+                st.rerun(scope="fragment")
+
+
+def render_bom_table_content(boms: pd.DataFrame):
+    """
+    Render BOM table content with actions, duplicate warnings, and conflict badges
+    
+    Args:
+        boms: Filtered DataFrame of BOMs to display
+    """
     st.markdown("### 📋 BOM List")
     
-    # Get filtered BOMs
-    boms = st.session_state.get('filtered_boms', pd.DataFrame())
-    
     if boms.empty:
-        st.info("ℹ️ No BOMs found. Create your first BOM using the button above.")
+        st.info("ℹ️ No BOMs match the current filters. Try adjusting your filters or create a new BOM.")
         return
     
     # Check for duplicates in all BOMs (cached for performance)
@@ -317,9 +643,10 @@ def render_bom_table():
     # Count BOMs with conflicts (other active BOMs for same product)
     boms_with_conflicts = sum(1 for v in conflicts_map.values() if v > 0)
     
-    # Show summary warnings
-    if boms_with_duplicates > 0:
-        st.warning(f"⚠️ **Warning:** {boms_with_duplicates} BOM(s) have duplicate materials. See 'Issues' column for details.")
+    # Show summary warnings (only if not already filtering by issues)
+    filter_issues = state.get_filter_issues()
+    if boms_with_duplicates > 0 and 'Duplicates' not in filter_issues:
+        st.warning(f"⚠️ **Note:** {boms_with_duplicates} BOM(s) have duplicate materials. See 'Issues' column.")
     
     # Format display data
     display_df = boms.copy()
@@ -343,7 +670,7 @@ def render_bom_table():
         if row['has_duplicate']:
             issues.append("⚠️ Dup")
         
-        return " | ".join(issues) if issues else ""
+        return " | ".join(issues) if issues else "✅"
     
     display_df['issues_display'] = display_df.apply(format_issues_display, axis=1)
     
@@ -396,7 +723,7 @@ def render_bom_table():
         "status_display": st.column_config.TextColumn("Status", width="small"),
         "materials_display": st.column_config.TextColumn("Mat.", width="small"),
         "usage_display": st.column_config.TextColumn("Usage", width="small"),
-        "issues_display": st.column_config.TextColumn("Issues", width="medium"),
+        "issues_display": st.column_config.TextColumn("Issues", width="small"),
         "created_display": st.column_config.TextColumn("Date", width="small"),
     }
     
@@ -622,7 +949,7 @@ def render_footer():
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.caption("Manufacturing Module v2.5 - BOM Management | Multiple Active BOM Conflict Detection")
+        st.caption("Manufacturing Module v2.6 - BOM Management | Smart Filter Bar with Multiselect")
     
     with col2:
         st.caption(f"Session: {st.session_state.get('user_name', 'Guest')}")

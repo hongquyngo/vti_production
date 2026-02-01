@@ -1,7 +1,14 @@
 # utils/bom/state.py
 """
-Centralized State Management for BOM Module - VERSION 2.1
+Centralized State Management for BOM Module - VERSION 2.2
 Manages all UI state, dialog states, and user interactions
+
+Changes in v2.2:
+- Added Smart Filter Bar state management
+- Filter keys: types, statuses, issues, date_range, creators, brands
+- Default filter: ACTIVE status
+- Auto-persist filters in session
+- Added filter reset functionality
 
 Changes in v2.1:
 - Added DIALOG_EXPORT for export functionality
@@ -29,6 +36,20 @@ class StateManager:
     DIALOG_DATA = 'bom_dialog_data'
     UI_FLAGS = 'bom_ui_flags'
     LAST_ACTION = 'bom_last_action'
+    
+    # Filter state keys (v2.2)
+    FILTER_TYPES = 'bom_filter_types'
+    FILTER_STATUSES = 'bom_filter_statuses'
+    FILTER_ISSUES = 'bom_filter_issues'
+    FILTER_DATE_FROM = 'bom_filter_date_from'
+    FILTER_DATE_TO = 'bom_filter_date_to'
+    FILTER_CREATORS = 'bom_filter_creators'
+    FILTER_BRANDS = 'bom_filter_brands'
+    FILTER_BOM_CODES = 'bom_filter_bom_codes'
+    FILTER_BOM_NAMES = 'bom_filter_bom_names'
+    FILTER_PRODUCTS = 'bom_filter_products'
+    FILTER_BOM_SEARCH = 'bom_filter_bom_search'        # BOM code/name search
+    FILTER_PRODUCT_SEARCH = 'bom_filter_product_search'  # Product code/name search
     
     # Dialog names
     DIALOG_CREATE = 'create'
@@ -115,6 +136,43 @@ class StateManager:
                 'products_timestamp': None,
                 'cache_ttl': 300  # 5 minutes
             }
+        
+        # Smart Filter Bar state (v2.2)
+        if self.FILTER_TYPES not in st.session_state:
+            st.session_state[self.FILTER_TYPES] = []  # Empty = All types
+        
+        if self.FILTER_STATUSES not in st.session_state:
+            st.session_state[self.FILTER_STATUSES] = ['ACTIVE']  # Default: ACTIVE
+        
+        if self.FILTER_ISSUES not in st.session_state:
+            st.session_state[self.FILTER_ISSUES] = []  # Empty = All
+        
+        if self.FILTER_DATE_FROM not in st.session_state:
+            st.session_state[self.FILTER_DATE_FROM] = None
+        
+        if self.FILTER_DATE_TO not in st.session_state:
+            st.session_state[self.FILTER_DATE_TO] = None
+        
+        if self.FILTER_CREATORS not in st.session_state:
+            st.session_state[self.FILTER_CREATORS] = []  # Empty = All
+        
+        if self.FILTER_BRANDS not in st.session_state:
+            st.session_state[self.FILTER_BRANDS] = []  # Empty = All
+        
+        if self.FILTER_BOM_CODES not in st.session_state:
+            st.session_state[self.FILTER_BOM_CODES] = []  # Empty = All
+        
+        if self.FILTER_BOM_NAMES not in st.session_state:
+            st.session_state[self.FILTER_BOM_NAMES] = []  # Empty = All
+        
+        if self.FILTER_PRODUCTS not in st.session_state:
+            st.session_state[self.FILTER_PRODUCTS] = []  # Empty = All
+        
+        if self.FILTER_BOM_SEARCH not in st.session_state:
+            st.session_state[self.FILTER_BOM_SEARCH] = ""  # Empty = No filter
+        
+        if self.FILTER_PRODUCT_SEARCH not in st.session_state:
+            st.session_state[self.FILTER_PRODUCT_SEARCH] = ""  # Empty = No filter
     
     # ==================== Current BOM Management ====================
     
@@ -517,3 +575,285 @@ class StateManager:
             del st.session_state['filtered_boms']
         
         logger.debug("BOM list cache cleared")
+    
+    # ==================== Smart Filter Bar Management (v2.2) ====================
+    
+    def get_filter_types(self) -> List[str]:
+        """Get selected BOM types filter"""
+        return st.session_state.get(self.FILTER_TYPES, [])
+    
+    def set_filter_types(self, types: List[str]):
+        """Set BOM types filter"""
+        st.session_state[self.FILTER_TYPES] = types
+    
+    def get_filter_statuses(self) -> List[str]:
+        """Get selected statuses filter"""
+        return st.session_state.get(self.FILTER_STATUSES, ['ACTIVE'])
+    
+    def set_filter_statuses(self, statuses: List[str]):
+        """Set statuses filter"""
+        st.session_state[self.FILTER_STATUSES] = statuses
+    
+    def get_filter_issues(self) -> List[str]:
+        """Get selected issues filter"""
+        return st.session_state.get(self.FILTER_ISSUES, [])
+    
+    def set_filter_issues(self, issues: List[str]):
+        """Set issues filter"""
+        st.session_state[self.FILTER_ISSUES] = issues
+    
+    def get_filter_date_range(self) -> tuple:
+        """Get date range filter (from, to)"""
+        return (
+            st.session_state.get(self.FILTER_DATE_FROM),
+            st.session_state.get(self.FILTER_DATE_TO)
+        )
+    
+    def set_filter_date_range(self, date_from, date_to):
+        """Set date range filter"""
+        st.session_state[self.FILTER_DATE_FROM] = date_from
+        st.session_state[self.FILTER_DATE_TO] = date_to
+    
+    def get_filter_creators(self) -> List[str]:
+        """Get selected creators filter"""
+        return st.session_state.get(self.FILTER_CREATORS, [])
+    
+    def set_filter_creators(self, creators: List[str]):
+        """Set creators filter"""
+        st.session_state[self.FILTER_CREATORS] = creators
+    
+    def get_filter_brands(self) -> List[str]:
+        """Get selected brands filter"""
+        return st.session_state.get(self.FILTER_BRANDS, [])
+    
+    def set_filter_brands(self, brands: List[str]):
+        """Set brands filter"""
+        st.session_state[self.FILTER_BRANDS] = brands
+    
+    def get_filter_bom_codes(self) -> List[str]:
+        """Get selected BOM codes filter"""
+        return st.session_state.get(self.FILTER_BOM_CODES, [])
+    
+    def set_filter_bom_codes(self, bom_codes: List[str]):
+        """Set BOM codes filter"""
+        st.session_state[self.FILTER_BOM_CODES] = bom_codes
+    
+    def get_filter_bom_names(self) -> List[str]:
+        """Get selected BOM names filter"""
+        return st.session_state.get(self.FILTER_BOM_NAMES, [])
+    
+    def set_filter_bom_names(self, bom_names: List[str]):
+        """Set BOM names filter"""
+        st.session_state[self.FILTER_BOM_NAMES] = bom_names
+    
+    def get_filter_products(self) -> List[str]:
+        """Get selected products filter (product_id as string)"""
+        return st.session_state.get(self.FILTER_PRODUCTS, [])
+    
+    def set_filter_products(self, products: List[str]):
+        """Set products filter"""
+        st.session_state[self.FILTER_PRODUCTS] = products
+    
+    def get_all_filters(self) -> Dict[str, Any]:
+        """Get all current filter values"""
+        return {
+            'types': self.get_filter_types(),
+            'statuses': self.get_filter_statuses(),
+            'issues': self.get_filter_issues(),
+            'date_from': st.session_state.get(self.FILTER_DATE_FROM),
+            'date_to': st.session_state.get(self.FILTER_DATE_TO),
+            'creators': self.get_filter_creators(),
+            'brands': self.get_filter_brands(),
+            'bom_codes': self.get_filter_bom_codes(),
+            'bom_names': self.get_filter_bom_names(),
+            'products': self.get_filter_products()
+        }
+    
+    def reset_filters(self):
+        """Reset all filters to default values"""
+        st.session_state[self.FILTER_TYPES] = []
+        st.session_state[self.FILTER_STATUSES] = ['ACTIVE']  # Default
+        st.session_state[self.FILTER_ISSUES] = []
+        st.session_state[self.FILTER_DATE_FROM] = None
+        st.session_state[self.FILTER_DATE_TO] = None
+        st.session_state[self.FILTER_CREATORS] = []
+        st.session_state[self.FILTER_BRANDS] = []
+        st.session_state[self.FILTER_BOM_CODES] = []
+        st.session_state[self.FILTER_BOM_NAMES] = []
+        st.session_state[self.FILTER_PRODUCTS] = []
+        logger.info("All filters reset to defaults")
+    
+    def has_active_filters(self) -> bool:
+        """Check if any non-default filters are active"""
+        filters = self.get_all_filters()
+        
+        # Check if any filter differs from default
+        if filters['types']:
+            return True
+        if filters['statuses'] != ['ACTIVE']:
+            return True
+        if filters['issues']:
+            return True
+        if filters['date_from'] or filters['date_to']:
+            return True
+        if filters['creators']:
+            return True
+        if filters['brands']:
+            return True
+        if filters['bom_codes']:
+            return True
+        if filters['bom_names']:
+            return True
+        if filters['products']:
+            return True
+        
+        return False
+    
+    def get_active_filter_chips(self) -> List[Dict[str, str]]:
+        """
+        Get list of active filter chips for display
+        
+        Returns:
+            List of dicts with keys: category, value, display_label
+        """
+        chips = []
+        
+        # BOM Code chips
+        for code in self.get_filter_bom_codes():
+            chips.append({
+                'category': 'bom_code',
+                'value': code,
+                'label': f"🔖 {code}"
+            })
+        
+        # BOM Name chips
+        for name in self.get_filter_bom_names():
+            display_name = name[:15] + "..." if len(name) > 15 else name
+            chips.append({
+                'category': 'bom_name',
+                'value': name,
+                'label': f"📝 {display_name}"
+            })
+        
+        # Product chips
+        for prod in self.get_filter_products():
+            display_prod = prod[:20] + "..." if len(prod) > 20 else prod
+            chips.append({
+                'category': 'product',
+                'value': prod,
+                'label': f"📦 {display_prod}"
+            })
+        
+        # Type chips
+        for t in self.get_filter_types():
+            chips.append({
+                'category': 'type',
+                'value': t,
+                'label': f"🏭 {t}"
+            })
+        
+        # Status chips
+        for s in self.get_filter_statuses():
+            chips.append({
+                'category': 'status',
+                'value': s,
+                'label': f"📊 {s}"
+            })
+        
+        # Issues chips
+        for i in self.get_filter_issues():
+            icon = "🔴" if i == "Conflicts" else "⚠️" if i == "Duplicates" else "✅"
+            chips.append({
+                'category': 'issue',
+                'value': i,
+                'label': f"{icon} {i}"
+            })
+        
+        # Date range chips
+        date_from, date_to = self.get_filter_date_range()
+        if date_from:
+            chips.append({
+                'category': 'date_from',
+                'value': str(date_from),
+                'label': f"📅 From: {date_from.strftime('%d/%m/%Y') if hasattr(date_from, 'strftime') else date_from}"
+            })
+        if date_to:
+            chips.append({
+                'category': 'date_to',
+                'value': str(date_to),
+                'label': f"📅 To: {date_to.strftime('%d/%m/%Y') if hasattr(date_to, 'strftime') else date_to}"
+            })
+        
+        # Creator chips
+        for c in self.get_filter_creators():
+            chips.append({
+                'category': 'creator',
+                'value': c,
+                'label': f"👤 {c}"
+            })
+        
+        # Brand chips
+        for b in self.get_filter_brands():
+            chips.append({
+                'category': 'brand',
+                'value': b,
+                'label': f"🏷️ {b}"
+            })
+        
+        return chips
+    
+    def remove_filter_chip(self, category: str, value: str):
+        """Remove a specific filter chip"""
+        if category == 'bom_code':
+            codes = self.get_filter_bom_codes()
+            if value in codes:
+                codes.remove(value)
+                self.set_filter_bom_codes(codes)
+        
+        elif category == 'bom_name':
+            names = self.get_filter_bom_names()
+            if value in names:
+                names.remove(value)
+                self.set_filter_bom_names(names)
+        
+        elif category == 'product':
+            products = self.get_filter_products()
+            if value in products:
+                products.remove(value)
+                self.set_filter_products(products)
+        
+        elif category == 'type':
+            types = self.get_filter_types()
+            if value in types:
+                types.remove(value)
+                self.set_filter_types(types)
+        
+        elif category == 'status':
+            statuses = self.get_filter_statuses()
+            if value in statuses:
+                statuses.remove(value)
+                self.set_filter_statuses(statuses)
+        
+        elif category == 'issue':
+            issues = self.get_filter_issues()
+            if value in issues:
+                issues.remove(value)
+                self.set_filter_issues(issues)
+        
+        elif category == 'date_from':
+            st.session_state[self.FILTER_DATE_FROM] = None
+        
+        elif category == 'date_to':
+            st.session_state[self.FILTER_DATE_TO] = None
+        
+        elif category == 'creator':
+            creators = self.get_filter_creators()
+            if value in creators:
+                creators.remove(value)
+                self.set_filter_creators(creators)
+        
+        elif category == 'brand':
+            brands = self.get_filter_brands()
+            if value in brands:
+                brands.remove(value)
+                self.set_filter_brands(brands)
