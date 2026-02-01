@@ -38,7 +38,7 @@ from .dialogs import (
 from .common import (
     format_number, create_status_indicator, calculate_percentage, format_datetime_vn,
     get_vietnam_today, export_to_excel, OrderConstants, OrderValidator,
-    format_product_display
+    format_product_display, format_date
 )
 
 logger = logging.getLogger(__name__)
@@ -256,7 +256,7 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     )
     display_df['product_display'] = display_df.apply(format_product_display, axis=1)
     display_df['scheduled'] = display_df['scheduled_date'].apply(
-        lambda x: format_datetime_vn(x, '%d/%m/%Y') if x else ''
+        lambda x: format_date(x, '%d/%m/%Y') if x else ''
     )
     
     # Issues column - show BOM conflict count if > 1
