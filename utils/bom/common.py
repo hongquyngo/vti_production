@@ -1246,6 +1246,181 @@ def render_output_material_conflict_warning(conflicts: List[Dict], products: pd.
     st.markdown("2. Remove the conflicting material(s) first")
 
 
+def get_boms_with_circular_dependency_check(bom_ids: List[int] = None) -> Dict[int, bool]:
+    """
+    Check multiple BOMs for circular dependency (output product = input material)
+    Used for dashboard/list display
+    
+    Args:
+        bom_ids: List of BOM IDs to check, or None for all BOMs
+        
+    Returns:
+        Dict mapping bom_id to has_circular_dependency boolean
+    """
+    try:
+        engine = get_db_engine()
+        
+        # Query to find BOMs where output product is also an input material
+        query = """
+            WITH circular_check AS (
+                -- Check primary materials
+                SELECT DISTINCT
+                    h.id as bom_id,
+                    h.product_id as output_product_id,
+                    d.material_id as input_material_id,
+                    'PRIMARY' as material_type
+                FROM bom_headers h
+                JOIN bom_details d ON h.id = d.bom_header_id
+                WHERE h.delete_flag = 0
+                  AND h.product_id = d.material_id
+                
+                UNION
+                
+                -- Check alternative materials
+                SELECT DISTINCT
+                    h.id as bom_id,
+                    h.product_id as output_product_id,
+                    a.alternative_material_id as input_material_id,
+                    'ALTERNATIVE' as material_type
+                FROM bom_headers h
+                JOIN bom_details d ON h.id = d.bom_header_id
+                JOIN bom_material_alternatives a ON d.id = a.bom_detail_id
+                WHERE h.delete_flag = 0
+                  AND h.product_id = a.alternative_material_id
+            )
+            SELECT DISTINCT bom_id FROM circular_check
+        """
+        
+        df = pd.read_sql(query, engine)
+        
+        # Build result map
+        circular_bom_ids = set(df['bom_id'].tolist()) if not df.empty else set()
+        
+        # If specific bom_ids requested, filter to those
+        if bom_ids:
+            return {bom_id: bom_id in circular_bom_ids for bom_id in bom_ids}
+        
+        # Return all circular dependencies found
+        return {bom_id: True for bom_id in circular_bom_ids}
+    
+    except Exception as e:
+        logger.error(f"Error checking circular dependencies: {e}")
+        return {}
+
+
+def detect_circular_dependency_in_bom(bom_id: int) -> Dict[str, Any]:
+    """
+    Detect circular dependency in a specific BOM
+    Returns detailed information about the conflict
+    
+    Args:
+        bom_id: BOM header ID
+        
+    Returns:
+        {
+            'has_circular': bool,
+            'output_product_id': int,
+            'output_product_code': str,
+            'output_product_name': str,
+            'conflicts': [
+                {'type': 'PRIMARY'|'ALTERNATIVE', 'detail_info': str, 'priority': int}
+            ]
+        }
+    """
+    try:
+        engine = get_db_engine()
+        
+        query = """
+            SELECT 
+                h.product_id as output_product_id,
+                op.pt_code as output_product_code,
+                op.name as output_product_name,
+                CASE 
+                    WHEN d.material_id = h.product_id THEN 'PRIMARY'
+                    WHEN a.alternative_material_id = h.product_id THEN 'ALTERNATIVE'
+                END as conflict_type,
+                CASE 
+                    WHEN d.material_id = h.product_id THEN 'Primary material'
+                    WHEN a.alternative_material_id = h.product_id THEN CONCAT('Alternative P', a.priority, ' for ', pm.name)
+                END as detail_info,
+                COALESCE(a.priority, 0) as priority
+            FROM bom_headers h
+            JOIN products op ON h.product_id = op.id
+            JOIN bom_details d ON h.id = d.bom_header_id
+            LEFT JOIN bom_material_alternatives a ON d.id = a.bom_detail_id AND a.alternative_material_id = h.product_id
+            LEFT JOIN products pm ON d.material_id = pm.id
+            WHERE h.id = %s
+              AND h.delete_flag = 0
+              AND (d.material_id = h.product_id OR a.alternative_material_id = h.product_id)
+        """
+        
+        df = pd.read_sql(query, engine, params=(bom_id,))
+        
+        if df.empty:
+            return {
+                'has_circular': False,
+                'output_product_id': None,
+                'output_product_code': None,
+                'output_product_name': None,
+                'conflicts': []
+            }
+        
+        first_row = df.iloc[0]
+        conflicts = []
+        
+        for _, row in df.iterrows():
+            if pd.notna(row['conflict_type']):
+                conflicts.append({
+                    'type': row['conflict_type'],
+                    'detail_info': row['detail_info'],
+                    'priority': int(row['priority']) if pd.notna(row['priority']) else 0
+                })
+        
+        return {
+            'has_circular': len(conflicts) > 0,
+            'output_product_id': int(first_row['output_product_id']),
+            'output_product_code': first_row['output_product_code'],
+            'output_product_name': first_row['output_product_name'],
+            'conflicts': conflicts
+        }
+    
+    except Exception as e:
+        logger.error(f"Error detecting circular dependency: {e}")
+        return {
+            'has_circular': False,
+            'output_product_id': None,
+            'output_product_code': None,
+            'output_product_name': None,
+            'conflicts': [],
+            'error': str(e)
+        }
+
+
+def render_circular_dependency_warning(circular_info: Dict[str, Any]):
+    """
+    Render warning for circular dependency in View/Edit dialogs
+    
+    Args:
+        circular_info: Dict from detect_circular_dependency_in_bom
+    """
+    if not circular_info.get('has_circular'):
+        return
+    
+    st.error("🔄 **Circular Dependency Detected!**")
+    st.markdown(
+        f"Output product **{circular_info['output_product_code']}** "
+        f"({circular_info['output_product_name']}) is also used as input material:"
+    )
+    
+    for conflict in circular_info.get('conflicts', []):
+        if conflict['type'] == 'PRIMARY':
+            st.markdown(f"- **{conflict['detail_info']}**")
+        else:
+            st.markdown(f"- {conflict['detail_info']}")
+    
+    st.markdown("**This BOM has a self-reference issue that should be fixed.**")
+
+
 # ==================== BOM Duplicate Detection for UI Warning ====================
 
 def detect_duplicate_materials_in_bom(bom_id: int) -> Dict[str, Any]:

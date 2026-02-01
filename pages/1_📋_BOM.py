@@ -1,7 +1,13 @@
 # pages/1___BOM.py
 """
-Bill of Materials (BOM) Management - VERSION 2.6
+Bill of Materials (BOM) Management - VERSION 2.7
 Clean single-page UI with dialog-driven workflows
+
+Changes in v2.7:
+- Added Circular Dependency Detection (output product = input material)
+- New issue badge: 🔄 Circular
+- New filter option: Circular in Issues filter
+- Critical warning banner for BOMs with circular dependency
 
 Changes in v2.6:
 - Smart Filter Bar with multiselect widgets
@@ -57,7 +63,9 @@ from utils.bom.common import (
     get_boms_with_duplicate_check,
     # Phase 2: Multiple Active BOM Conflict Detection
     get_boms_with_active_conflict_check,
-    get_products_with_multiple_active_boms
+    get_products_with_multiple_active_boms,
+    # Phase 3: Circular Dependency Detection (Output = Input)
+    get_boms_with_circular_dependency_check
 )
 
 # Import dialogs
@@ -378,10 +386,11 @@ def apply_smart_filters(boms: pd.DataFrame) -> pd.DataFrame:
     
     # Apply Issues filter (requires additional checks)
     if filter_issues:
-        # Get duplicate and conflict maps
+        # Get duplicate, conflict, and circular maps
         bom_ids = filtered['id'].tolist()
         duplicates_map = get_boms_with_duplicate_check(bom_ids)
         conflicts_map = get_boms_with_active_conflict_check(bom_ids)
+        circular_map = get_boms_with_circular_dependency_check(bom_ids)
         
         # Build mask based on selected issues
         mask = pd.Series([False] * len(filtered), index=filtered.index)
@@ -398,12 +407,19 @@ def apply_smart_filters(boms: pd.DataFrame) -> pd.DataFrame:
                 if duplicates_map.get(row['id'], False):
                     mask[idx] = True
         
+        if 'Circular' in filter_issues:
+            # BOMs with circular dependency (output = input)
+            for idx, row in filtered.iterrows():
+                if circular_map.get(row['id'], False):
+                    mask[idx] = True
+        
         if 'No Issues' in filter_issues:
             # BOMs without any issues
             for idx, row in filtered.iterrows():
                 has_conflict = row['status'] == 'ACTIVE' and conflicts_map.get(row['id'], 0) > 0
                 has_duplicate = duplicates_map.get(row['id'], False)
-                if not has_conflict and not has_duplicate:
+                has_circular = circular_map.get(row['id'], False)
+                if not has_conflict and not has_duplicate and not has_circular:
                     mask[idx] = True
         
         filtered = filtered[mask]
@@ -486,11 +502,11 @@ def render_smart_filter_bar():
     with col6:
         selected_issues = st.multiselect(
             "⚠️ Issues",
-            options=['Conflicts', 'Duplicates', 'No Issues'],
+            options=['Conflicts', 'Duplicates', 'Circular', 'No Issues'],
             default=state.get_filter_issues(),
             key='ms_filter_issues',
             placeholder="All (No Filter)",
-            help="Conflicts: Multiple active BOMs | Duplicates: Duplicate materials | No Issues: Clean BOMs"
+            help="Conflicts: Multiple active BOMs | Duplicates: Duplicate materials | Circular: Output=Input | No Issues: Clean BOMs"
         )
         if selected_issues != state.get_filter_issues():
             state.set_filter_issues(selected_issues)
@@ -619,7 +635,7 @@ def render_active_filter_chips():
 
 def render_bom_table_content(boms: pd.DataFrame):
     """
-    Render BOM table content with actions, duplicate warnings, and conflict badges
+    Render BOM table content with actions, duplicate warnings, conflict badges, and circular dependency
     
     Args:
         boms: Filtered DataFrame of BOMs to display
@@ -637,16 +653,25 @@ def render_bom_table_content(boms: pd.DataFrame):
     # Phase 2: Check for active BOM conflicts
     conflicts_map = get_boms_with_active_conflict_check(bom_ids)
     
+    # Phase 3: Check for circular dependencies (output = input)
+    circular_map = get_boms_with_circular_dependency_check(bom_ids)
+    
     # Count BOMs with duplicates for summary
     boms_with_duplicates = sum(1 for v in duplicates_map.values() if v)
     
     # Count BOMs with conflicts (other active BOMs for same product)
     boms_with_conflicts = sum(1 for v in conflicts_map.values() if v > 0)
     
+    # Count BOMs with circular dependencies
+    boms_with_circular = sum(1 for v in circular_map.values() if v)
+    
     # Show summary warnings (only if not already filtering by issues)
     filter_issues = state.get_filter_issues()
     if boms_with_duplicates > 0 and 'Duplicates' not in filter_issues:
         st.warning(f"⚠️ **Note:** {boms_with_duplicates} BOM(s) have duplicate materials. See 'Issues' column.")
+    
+    if boms_with_circular > 0 and 'Circular' not in filter_issues:
+        st.error(f"🔄 **Critical:** {boms_with_circular} BOM(s) have circular dependency (output = input). See 'Issues' column.")
     
     # Format display data
     display_df = boms.copy()
@@ -657,9 +682,16 @@ def render_bom_table_content(boms: pd.DataFrame):
     # Add conflict count
     display_df['conflict_count'] = display_df['id'].apply(lambda x: conflicts_map.get(x, 0))
     
-    # Combined Issues column (Phase 2 enhancement)
+    # Add circular dependency flag
+    display_df['has_circular'] = display_df['id'].apply(lambda x: circular_map.get(x, False))
+    
+    # Combined Issues column (Phase 3 enhancement)
     def format_issues_display(row):
         issues = []
+        
+        # Check circular dependency (highest priority - critical issue)
+        if row['has_circular']:
+            issues.append("🔄 Circular")
         
         # Check conflict (only for ACTIVE BOMs)
         if row['status'] == 'ACTIVE' and row['conflict_count'] > 0:
