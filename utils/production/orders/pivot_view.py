@@ -68,7 +68,7 @@ class PivotViewConfig:
     }
     
     # Default settings
-    DEFAULT_TIME_GROUP = 'weekly'
+    DEFAULT_TIME_GROUP = 'daily'
     DEFAULT_ROW_DIMENSION = 'product'
     DEFAULT_METRIC = 'planned_qty'
     DEFAULT_STATUSES = ['DRAFT', 'CONFIRMED', 'IN_PROGRESS']

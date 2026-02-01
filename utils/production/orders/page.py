@@ -46,7 +46,7 @@ def _init_session_state():
     """Initialize session state for orders tab"""
     defaults = {
         'orders_page': 1,
-        'orders_view': 'list',  # 'list', 'create', or 'pivot'
+        'orders_view': 'pivot',  # 'list', 'create', or 'pivot'
         'orders_conflicts_only': False,
         'orders_conflict_check_active_only': True,
         'orders_date_type': 'scheduled',
