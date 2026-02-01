@@ -1,8 +1,13 @@
 # utils/bom/dialogs/create.py
 """
-Create BOM Dialog with Alternatives Support - OPTIMIZED VERSION v2.2
+Create BOM Dialog with Alternatives Support - OPTIMIZED VERSION v2.3
 2-step wizard with form containers to prevent unnecessary reruns
 Validation: At least 1 RAW_MATERIAL required
+
+Changes in v2.3:
+- Added circular dependency validation: output product cannot be used as input material
+- Filter output product from material/alternative selection lists
+- Final validation before BOM creation
 
 Changes in v2.2:
 - Added info banner when selecting product that already has Active BOM
@@ -35,7 +40,11 @@ from utils.bom.common import (
     validate_material_not_duplicate,
     filter_available_materials,
     # Active BOM conflict detection
-    get_active_boms_for_product
+    get_active_boms_for_product,
+    # Output product vs materials validation (circular dependency prevention)
+    validate_output_not_in_materials,
+    validate_material_not_output_product,
+    filter_available_materials_excluding_output
 )
 
 logger = logging.getLogger(__name__)
@@ -418,14 +427,20 @@ def _render_alternatives_section_optimized(material_idx: int, material: dict,
     all_materials = state.get_create_materials()
     used_material_ids = get_all_material_ids_in_bom_list(all_materials)
     
+    # Get output product ID to exclude (prevent circular dependency)
+    header_data = state.get_create_header_data()
+    output_product_id = header_data.get('product_id')
+    
     with st.form(f"add_alternative_form_{material_idx}", clear_on_submit=True):
         products = get_cached_products()
         
         col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
         
         with col1:
-            # Filter products to exclude ALL materials already in BOM
-            product_options = filter_available_materials(products, used_material_ids)
+            # Filter products to exclude ALL materials already in BOM AND output product
+            product_options = filter_available_materials_excluding_output(
+                products, used_material_ids, output_product_id
+            )
             
             if not product_options:
                 st.warning("⚠️ No available materials (all products already used in this BOM)")
@@ -477,31 +492,42 @@ def _render_alternatives_section_optimized(material_idx: int, material: dict,
     
     # Handle add alternative
     if add_alt_button and alt_material_id:
-        # Double-check validation (in case of race condition)
+        # Validate not duplicate
         is_valid, error_msg = validate_material_not_duplicate(alt_material_id, used_material_ids)
         
         if not is_valid:
             st.error(f"❌ {error_msg}")
-        elif validate_quantity(quantity) and validate_percentage(scrap):
-            alternative_data = {
-                'alternative_material_id': alt_material_id,
-                'quantity': quantity,
-                'uom': alt_uom,
-                'scrap_rate': scrap,
-                'priority': priority
-            }
-            
-            materials = state.get_create_materials()
-            materials[material_idx]['alternatives'].append(alternative_data)
-            
-            state.set_dialog_state(state.DIALOG_CREATE, {
-                'step': state.get_create_step(),
-                'header_data': state.get_create_header_data(),
-                'materials': materials
-            })
-            
-            st.success("✅ Alternative added!")
-            st.rerun()
+            return
+        
+        # Validate not output product (circular dependency check)
+        is_valid_output, error_msg_output = validate_material_not_output_product(alt_material_id, output_product_id)
+        if not is_valid_output:
+            st.error(f"❌ {error_msg_output}")
+            return
+        
+        if not validate_quantity(quantity) or not validate_percentage(scrap):
+            st.error("❌ Invalid quantity or scrap rate")
+            return
+        
+        alternative_data = {
+            'alternative_material_id': alt_material_id,
+            'quantity': quantity,
+            'uom': alt_uom,
+            'scrap_rate': scrap,
+            'priority': priority
+        }
+        
+        materials = state.get_create_materials()
+        materials[material_idx]['alternatives'].append(alternative_data)
+        
+        state.set_dialog_state(state.DIALOG_CREATE, {
+            'step': state.get_create_step(),
+            'header_data': state.get_create_header_data(),
+            'materials': materials
+        })
+        
+        st.success("✅ Alternative added!")
+        st.rerun()
 
 
 def _render_add_material_form_optimized(state: StateManager):
@@ -511,6 +537,10 @@ def _render_add_material_form_optimized(state: StateManager):
     # Get all material IDs already used in this BOM (primary + alternatives)
     current_materials = state.get_create_materials()
     used_material_ids = get_all_material_ids_in_bom_list(current_materials)
+    
+    # Get output product ID to exclude (prevent circular dependency)
+    header_data = state.get_create_header_data()
+    output_product_id = header_data.get('product_id')
     
     with st.form("add_material_form", clear_on_submit=True):
         products = get_cached_products()
@@ -522,8 +552,10 @@ def _render_add_material_form_optimized(state: StateManager):
         col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
         
         with col1:
-            # Filter products to exclude materials already in BOM
-            product_options = filter_available_materials(products, used_material_ids)
+            # Filter products to exclude materials already in BOM AND output product
+            product_options = filter_available_materials_excluding_output(
+                products, used_material_ids, output_product_id
+            )
             
             if not product_options:
                 st.warning("⚠️ No available materials (all products already used in this BOM)")
@@ -571,28 +603,39 @@ def _render_add_material_form_optimized(state: StateManager):
     
     # Handle form submission
     if add_button and material_id:
-        # Double-check validation (in case of race condition)
+        # Validate not duplicate
         is_valid, error_msg = validate_material_not_duplicate(material_id, used_material_ids)
         
         if not is_valid:
             st.error(f"❌ {error_msg}")
-        elif not validate_quantity(quantity):
+            return
+        
+        # Validate not output product (circular dependency check)
+        is_valid_output, error_msg_output = validate_material_not_output_product(material_id, output_product_id)
+        if not is_valid_output:
+            st.error(f"❌ {error_msg_output}")
+            return
+        
+        if not validate_quantity(quantity):
             st.error("❌ Invalid quantity")
-        elif not validate_percentage(scrap_rate):
+            return
+        
+        if not validate_percentage(scrap_rate):
             st.error("❌ Invalid scrap rate (must be 0-100%)")
-        else:
-            material_data = {
-                'material_id': material_id,
-                'material_type': material_type,
-                'quantity': quantity,
-                'uom': mat_uom,
-                'scrap_rate': scrap_rate,
-                'alternatives': []
-            }
-            
-            state.add_create_material(material_data)
-            st.success("✅ Material added! You can add alternatives using 🔀 button.")
-            st.rerun()
+            return
+        
+        material_data = {
+            'material_id': material_id,
+            'material_type': material_type,
+            'quantity': quantity,
+            'uom': mat_uom,
+            'scrap_rate': scrap_rate,
+            'alternatives': []
+        }
+        
+        state.add_create_material(material_data)
+        st.success("✅ Material added! You can add alternatives using 🔀 button.")
+        st.rerun()
 
 
 def _validate_step1(bom_name: str, product_id: int, output_qty: float) -> list:
@@ -617,11 +660,19 @@ def _handle_create_bom(state: StateManager, manager: BOMManager):
         header_data = state.get_create_header_data()
         materials = state.get_create_materials()
         
-        # Final validation
+        # Final validation: materials structure
         can_create, validation_error = validate_materials_for_bom(materials)
         
         if not can_create:
             st.error(f"❌ {validation_error}")
+            return
+        
+        # Final validation: output product not in materials (circular dependency)
+        output_product_id = header_data.get('product_id')
+        is_valid, error_msg, _ = validate_output_not_in_materials(output_product_id, materials)
+        
+        if not is_valid:
+            st.error(f"❌ {error_msg}")
             return
         
         user_id = st.session_state.get('user_id', 1)

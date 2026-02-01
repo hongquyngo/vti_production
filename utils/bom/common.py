@@ -1,7 +1,15 @@
 # utils/bom/common.py
 """
-Common utilities for BOM module - ENHANCED VERSION v2.3
+Common utilities for BOM module - ENHANCED VERSION v2.4
 Formatting, UI helpers, product queries, Edit Level system, and Active BOM Conflict Detection
+
+Changes in v2.4:
+- Added Output Product vs Materials Validation (circular dependency prevention)
+- validate_output_not_in_materials(): Check output product not in materials list
+- validate_material_not_output_product(): Validate single material addition
+- filter_available_materials_excluding_output(): Filter with output product exclusion
+- check_materials_conflict_with_new_output(): Check conflict when changing output product
+- render_output_material_conflict_warning(): UI component for conflict display
 
 Changes in v2.3:
 - Added Active BOM Conflict Detection functions for Phase 1 & 2
@@ -1048,6 +1056,194 @@ def filter_available_materials(products: pd.DataFrame,
         }
     
     return product_options
+
+
+# ==================== Output Product vs Materials Validation ====================
+# Circular dependency prevention: Output product cannot be used as input material
+
+def validate_output_not_in_materials(output_product_id: int, materials: list) -> Tuple[bool, str, List[str]]:
+    """
+    Validate that output product is not used as any input material (primary or alternative)
+    
+    Business Rule: A BOM's output product cannot be one of its input materials
+    (prevents circular dependency / self-referencing)
+    
+    Args:
+        output_product_id: The output product ID of the BOM
+        materials: List of material dicts with structure:
+            {
+                'material_id': int,
+                'alternatives': [{'alternative_material_id': int}, ...]
+            }
+    
+    Returns:
+        Tuple of (is_valid, error_message, conflicting_positions)
+    """
+    if not output_product_id or not materials:
+        return True, "", []
+    
+    output_product_id = int(output_product_id)
+    conflicting = []
+    
+    for idx, mat in enumerate(materials):
+        # Check primary material
+        mat_id = mat.get('material_id')
+        if mat_id and int(mat_id) == output_product_id:
+            conflicting.append(f"Primary material #{idx + 1}")
+        
+        # Check alternatives
+        alternatives = mat.get('alternatives', [])
+        for alt_idx, alt in enumerate(alternatives):
+            alt_id = alt.get('alternative_material_id') or alt.get('material_id')
+            if alt_id and int(alt_id) == output_product_id:
+                conflicting.append(f"Alternative P{alt.get('priority', alt_idx + 1)} of material #{idx + 1}")
+    
+    if conflicting:
+        error_msg = f"Output product cannot be used as input material. Found in: {', '.join(conflicting)}"
+        return False, error_msg, conflicting
+    
+    return True, "", []
+
+
+def validate_material_not_output_product(material_id: int, output_product_id: int, 
+                                          material_name: str = None) -> Tuple[bool, str]:
+    """
+    Validate that a material being added is not the output product
+    
+    Args:
+        material_id: Material ID to check
+        output_product_id: Output product ID of the BOM
+        material_name: Optional material name for error message
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if not material_id or not output_product_id:
+        return True, ""
+    
+    if int(material_id) == int(output_product_id):
+        if material_name:
+            return False, f"Cannot add '{material_name}' as material - it is the output product of this BOM (circular dependency)"
+        return False, "Cannot add output product as input material (circular dependency)"
+    
+    return True, ""
+
+
+def filter_available_materials_excluding_output(products: pd.DataFrame, 
+                                                  used_ids: set,
+                                                  output_product_id: int = None,
+                                                  exclude_id: int = None) -> Dict:
+    """
+    Filter products to exclude already used materials AND the output product
+    Returns product options dict for selectbox
+    
+    Args:
+        products: DataFrame of all products
+        used_ids: Set of material IDs already used in BOM
+        output_product_id: Output product ID to also exclude (prevents circular dependency)
+        exclude_id: Optional single ID to also exclude (e.g., current primary material)
+    
+    Returns:
+        Dict of {display_text: {'id': int, 'uom': str, 'code': str, 'name': str}}
+    """
+    product_options = {}
+    
+    # Build exclusion set
+    exclude_set = set(used_ids) if used_ids else set()
+    if output_product_id:
+        exclude_set.add(int(output_product_id))
+    if exclude_id:
+        exclude_set.add(int(exclude_id))
+    
+    for _, row in products.iterrows():
+        mat_id = int(row['id'])
+        
+        # Skip if in exclusion set
+        if mat_id in exclude_set:
+            continue
+        
+        display_text = format_product_display(
+            code=row['code'],
+            name=row['name'],
+            package_size=row.get('package_size'),
+            brand=row.get('brand'),
+            legacy_code=row.get('legacy_code')
+        )
+        product_options[display_text] = {
+            'id': mat_id,
+            'uom': row['uom'],
+            'code': row['code'],
+            'name': row['name'],
+            'legacy_code': row.get('legacy_code')
+        }
+    
+    return product_options
+
+
+def check_materials_conflict_with_new_output(materials: list, new_output_product_id: int) -> Tuple[bool, List[Dict]]:
+    """
+    Check if existing materials would conflict with a new output product
+    Used when changing output product in clone/edit scenarios
+    
+    Args:
+        materials: List of material dicts
+        new_output_product_id: New output product ID being selected
+    
+    Returns:
+        Tuple of (has_conflict, list of conflicting material info dicts)
+    """
+    if not new_output_product_id or not materials:
+        return False, []
+    
+    new_output_id = int(new_output_product_id)
+    conflicts = []
+    
+    for idx, mat in enumerate(materials):
+        # Check primary material
+        mat_id = mat.get('material_id')
+        if mat_id and int(mat_id) == new_output_id:
+            conflicts.append({
+                'type': 'PRIMARY',
+                'index': idx,
+                'material_id': mat_id
+            })
+        
+        # Check alternatives
+        alternatives = mat.get('alternatives', [])
+        for alt_idx, alt in enumerate(alternatives):
+            alt_id = alt.get('alternative_material_id') or alt.get('material_id')
+            if alt_id and int(alt_id) == new_output_id:
+                conflicts.append({
+                    'type': 'ALTERNATIVE',
+                    'index': idx,
+                    'alt_index': alt_idx,
+                    'material_id': alt_id,
+                    'priority': alt.get('priority', 1)
+                })
+    
+    return len(conflicts) > 0, conflicts
+
+
+def render_output_material_conflict_warning(conflicts: List[Dict], products: pd.DataFrame = None):
+    """
+    Render warning when output product conflicts with existing materials
+    
+    Args:
+        conflicts: List of conflict dicts from check_materials_conflict_with_new_output
+        products: Optional products DataFrame for looking up names
+    """
+    st.error("⚠️ **Circular Dependency Detected!**")
+    st.markdown("The selected output product is already used as an input material:")
+    
+    for conflict in conflicts:
+        if conflict['type'] == 'PRIMARY':
+            st.markdown(f"- **Primary material** in row #{conflict['index'] + 1}")
+        else:
+            st.markdown(f"- **Alternative P{conflict['priority']}** in row #{conflict['index'] + 1}")
+    
+    st.markdown("**Please either:**")
+    st.markdown("1. Choose a different output product, OR")
+    st.markdown("2. Remove the conflicting material(s) first")
 
 
 # ==================== BOM Duplicate Detection for UI Warning ====================

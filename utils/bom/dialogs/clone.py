@@ -1,7 +1,12 @@
 # utils/bom/dialogs/clone.py
 """
-Clone BOM Dialog - Create new BOM from existing template - VERSION 2.1
+Clone BOM Dialog - Create new BOM from existing template - VERSION 2.2
 2-step wizard: Review/Edit Header → Review/Edit Materials
+
+Changes in v2.2:
+- Added circular dependency validation: output product cannot be used as input material
+- Validation when changing output product (check conflict with existing materials)
+- Final validation before clone creation
 
 Changes in v2.1:
 - Added info banner when selecting product that already has Active BOM
@@ -28,7 +33,10 @@ from utils.bom.common import (
     format_number,
     create_status_indicator,
     # Active BOM conflict detection
-    get_active_boms_for_product
+    get_active_boms_for_product,
+    # Output product vs materials validation (circular dependency prevention)
+    validate_output_not_in_materials,
+    check_materials_conflict_with_new_output
 )
 
 logger = logging.getLogger(__name__)
@@ -131,6 +139,7 @@ def _render_step1_clone_header():
     
     clone_data = st.session_state['clone_data']
     header_data = clone_data['header']
+    materials = clone_data.get('materials', [])
     source_code = clone_data.get('source_code', '')
     products = get_cached_products()
     
@@ -242,7 +251,7 @@ def _render_step1_clone_header():
     
     # Handle form submission
     if next_button:
-        # Validate
+        # Validate basic fields
         errors = []
         if not bom_name or len(bom_name.strip()) == 0:
             errors.append("BOM name is required")
@@ -250,6 +259,18 @@ def _render_step1_clone_header():
             errors.append("Output product is required")
         if output_qty <= 0:
             errors.append("Output quantity must be greater than 0")
+        
+        # Validate output product not in materials (circular dependency)
+        if product_id and materials:
+            has_conflict, conflicts = check_materials_conflict_with_new_output(materials, product_id)
+            if has_conflict:
+                conflict_details = []
+                for c in conflicts:
+                    if c['type'] == 'PRIMARY':
+                        conflict_details.append(f"Primary material #{c['index'] + 1}")
+                    else:
+                        conflict_details.append(f"Alternative P{c['priority']} of material #{c['index'] + 1}")
+                errors.append(f"Output product cannot be used as input material (circular dependency). Found in: {', '.join(conflict_details)}")
         
         if errors:
             for error in errors:
@@ -464,6 +485,14 @@ def _handle_clone_bom(manager: BOMManager):
         if not st.session_state.get('clone_keep_alternatives', True):
             for material in materials:
                 material['alternatives'] = []
+        
+        # Final validation: output product not in materials (circular dependency)
+        output_product_id = header_data.get('product_id')
+        is_valid, error_msg, _ = validate_output_not_in_materials(output_product_id, materials)
+        
+        if not is_valid:
+            st.error(f"❌ {error_msg}")
+            return
         
         # Prepare clone data
         user_id = st.session_state.get('user_id', 1)

@@ -1,11 +1,15 @@
 # utils/bom/dialogs/edit.py
 """
-Edit BOM Dialog with Usage-based Edit Levels - VERSION 2.1
+Edit BOM Dialog with Usage-based Edit Levels - VERSION 2.2
 
 Edit permission based on ACTUAL IMPACT, not just STATUS:
 - Level 4 (FULL_EDIT): DRAFT always, or ACTIVE/INACTIVE with no usage
 - Level 2 (ALTERNATIVES_PLUS): ACTIVE with IN_PROGRESS orders
 - Level 0 (READ_ONLY): Has completed orders or inactive with history
+
+Changes in v2.2:
+- Added circular dependency validation: output product cannot be used as input material
+- Filter output product from material/alternative selection lists
 
 Changes in v2.1:
 - Updated all product/material displays to use format_product_display with legacy_code
@@ -49,7 +53,10 @@ from utils.bom.common import (
     filter_available_materials,
     # Duplicate detection for warning
     detect_duplicate_materials_in_bom,
-    render_duplicate_warning_section
+    render_duplicate_warning_section,
+    # Output product vs materials validation (circular dependency prevention)
+    validate_material_not_output_product,
+    filter_available_materials_excluding_output
 )
 
 logger = logging.getLogger(__name__)
@@ -394,11 +401,15 @@ def _render_alternatives_manager(bom_id: int, detail_id: int, material: pd.Serie
 
 
 def _render_add_alternative_form(bom_id: int, detail_id: int, material: pd.Series, manager: BOMManager):
-    """Render form to add new alternative with duplicate validation"""
+    """Render form to add new alternative with duplicate and circular dependency validation"""
     st.markdown("**➕ Add Alternative:**")
     
     # Get all material IDs already used in this BOM (from database)
     used_material_ids = get_all_material_ids_in_bom_db(bom_id)
+    
+    # Get output product ID to exclude (prevent circular dependency)
+    bom_info = manager.get_bom_info(bom_id)
+    output_product_id = bom_info.get('product_id') if bom_info else None
     
     with st.form(f"add_alt_form_{detail_id}", clear_on_submit=True):
         products = get_cached_products()
@@ -406,8 +417,10 @@ def _render_add_alternative_form(bom_id: int, detail_id: int, material: pd.Serie
         col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 1, 1])
         
         with col1:
-            # Filter products to exclude ALL materials already in BOM
-            product_options = filter_available_materials(products, used_material_ids)
+            # Filter products to exclude ALL materials already in BOM AND output product
+            product_options = filter_available_materials_excluding_output(
+                products, used_material_ids, output_product_id
+            )
             
             if not product_options:
                 st.warning("⚠️ No available materials (all products already used in this BOM)")
@@ -437,38 +450,51 @@ def _render_add_alternative_form(bom_id: int, detail_id: int, material: pd.Serie
         add_btn = st.form_submit_button("➕ Add Alternative", use_container_width=True, disabled=not product_options)
     
     if add_btn and alt_material_id:
-        # Double-check validation (in case of race condition)
+        # Validate not duplicate
         is_valid, error_msg = validate_material_not_duplicate(alt_material_id, used_material_ids)
         
         if not is_valid:
             st.error(f"❌ {error_msg}")
-        elif validate_quantity(quantity) and validate_percentage(scrap):
-            try:
-                alternative_data = {
-                    'bom_detail_id': detail_id,
-                    'alternative_material_id': alt_material_id,
-                    'quantity': quantity,
-                    'scrap_rate': scrap,
-                    'priority': priority,
-                    'is_active': 1 if is_active else 0,
-                    'notes': notes if notes else None
-                }
-                
-                manager.add_material_alternative(alternative_data)
-                st.success("✅ Alternative added!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
-        else:
+            return
+        
+        # Validate not output product (circular dependency check)
+        is_valid_output, error_msg_output = validate_material_not_output_product(alt_material_id, output_product_id)
+        if not is_valid_output:
+            st.error(f"❌ {error_msg_output}")
+            return
+        
+        if not validate_quantity(quantity) or not validate_percentage(scrap):
             st.error("❌ Invalid quantity or scrap rate")
+            return
+        
+        try:
+            alternative_data = {
+                'bom_detail_id': detail_id,
+                'alternative_material_id': alt_material_id,
+                'quantity': quantity,
+                'scrap_rate': scrap,
+                'priority': priority,
+                'is_active': 1 if is_active else 0,
+                'notes': notes if notes else None
+            }
+            
+            manager.add_material_alternative(alternative_data)
+            st.success("✅ Alternative added!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
 
 
 def _render_add_material_form(bom_id: int, state: StateManager, manager: BOMManager):
-    """Render form to add new material to BOM with duplicate validation"""
+    """Render form to add new material to BOM with duplicate and circular dependency validation"""
     st.markdown("### ➕ Add New Material")
     
     # Get all material IDs already used in this BOM (from database)
     used_material_ids = get_all_material_ids_in_bom_db(bom_id)
+    
+    # Get output product ID to exclude (prevent circular dependency)
+    bom_info = manager.get_bom_info(bom_id)
+    output_product_id = bom_info.get('product_id') if bom_info else None
     
     with st.form("add_material_form", clear_on_submit=True):
         products = get_cached_products()
@@ -481,8 +507,10 @@ def _render_add_material_form(bom_id: int, state: StateManager, manager: BOMMana
         col1, col2, col3, col4, col5 = st.columns([3, 1.5, 1, 0.8, 0.8])
         
         with col1:
-            # Filter products to exclude materials already in BOM
-            product_options = filter_available_materials(products, used_material_ids)
+            # Filter products to exclude materials already in BOM AND output product
+            product_options = filter_available_materials_excluding_output(
+                products, used_material_ids, output_product_id
+            )
             
             if not product_options:
                 st.warning("⚠️ No available materials (all products already used in this BOM)")
@@ -510,28 +538,37 @@ def _render_add_material_form(bom_id: int, state: StateManager, manager: BOMMana
         add_btn = st.form_submit_button("➕ Add Material", type="primary", use_container_width=True, disabled=not product_options)
     
     if add_btn and material_id:
-        # Double-check validation (in case of race condition)
+        # Validate not duplicate
         is_valid, error_msg = validate_material_not_duplicate(material_id, used_material_ids)
         
         if not is_valid:
             st.error(f"❌ {error_msg}")
-        elif validate_quantity(quantity) and validate_percentage(scrap_rate):
-            try:
-                material_data = {
-                    'bom_header_id': bom_id,
-                    'material_id': material_id,
-                    'material_type': material_type,
-                    'quantity': quantity,
-                    'scrap_rate': scrap_rate
-                }
-                
-                manager.add_bom_material(material_data)
-                st.success("✅ Material added!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
-        else:
+            return
+        
+        # Validate not output product (circular dependency check)
+        is_valid_output, error_msg_output = validate_material_not_output_product(material_id, output_product_id)
+        if not is_valid_output:
+            st.error(f"❌ {error_msg_output}")
+            return
+        
+        if not validate_quantity(quantity) or not validate_percentage(scrap_rate):
             st.error("❌ Invalid quantity or scrap rate")
+            return
+        
+        try:
+            material_data = {
+                'bom_header_id': bom_id,
+                'material_id': material_id,
+                'material_type': material_type,
+                'quantity': quantity,
+                'scrap_rate': scrap_rate
+            }
+            
+            manager.add_bom_material(material_data)
+            st.success("✅ Material added!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
 
 
 # ==================== ALTERNATIVES ONLY MODE ====================
