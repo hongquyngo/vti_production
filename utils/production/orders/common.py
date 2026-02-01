@@ -3,7 +3,12 @@
 Common utilities for Orders domain
 Formatting, validation, UI helpers, and date utilities
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- v1.1.0: Enhanced date filter presets
+          + get_date_filter_presets() with include_future param
+          + get_default_date_range() for dynamic defaults based on date_type
+          + Added future presets: Next 7/14/30 Days
 """
 
 import logging
@@ -244,24 +249,80 @@ def get_status_color(status: str) -> str:
 
 # ==================== Date Helpers ====================
 
-def get_date_filter_presets() -> Dict[str, Tuple[date, date]]:
-    """Get common date filter presets"""
+def get_date_filter_presets(include_future: bool = True) -> Dict[str, Tuple[date, date]]:
+    """
+    Get common date filter presets
+    
+    Args:
+        include_future: If True, include future date presets (for scheduled date filtering)
+    
+    Returns:
+        Dictionary of preset name to (from_date, to_date) tuple
+    """
     today = get_vietnam_today()
     first_of_month = today.replace(day=1)
     last_month_end = first_of_month - timedelta(days=1)
     first_of_last_month = last_month_end.replace(day=1)
     
-    return {
+    # Calculate end of current month
+    if today.month == 12:
+        next_month_first = today.replace(year=today.year + 1, month=1, day=1)
+    else:
+        next_month_first = today.replace(month=today.month + 1, day=1)
+    end_of_month = next_month_first - timedelta(days=1)
+    
+    # Calculate end of next week (Sunday)
+    days_until_sunday = 6 - today.weekday()
+    end_of_week = today + timedelta(days=days_until_sunday)
+    
+    presets = {
         "Today": (today, today),
+        "This Week": (today - timedelta(days=today.weekday()), end_of_week),
+        "This Month": (first_of_month, end_of_month),
+    }
+    
+    if include_future:
+        # Future presets (for scheduled date)
+        presets.update({
+            "Next 7 Days": (today, today + timedelta(days=6)),
+            "Next 14 Days": (today, today + timedelta(days=13)),
+            "Next 30 Days": (today, today + timedelta(days=29)),
+        })
+    
+    # Past presets
+    presets.update({
         "Yesterday": (today - timedelta(days=1), today - timedelta(days=1)),
-        "This Week": (today - timedelta(days=today.weekday()), today),
-        "Last Week": (today - timedelta(days=today.weekday() + 7), 
-                     today - timedelta(days=today.weekday() + 1)),
-        "This Month": (first_of_month, today),
-        "Last Month": (first_of_last_month, last_month_end),
         "Last 7 Days": (today - timedelta(days=6), today),
         "Last 30 Days": (today - timedelta(days=29), today),
-    }
+        "Last Week": (today - timedelta(days=today.weekday() + 7), 
+                     today - timedelta(days=today.weekday() + 1)),
+        "Last Month": (first_of_last_month, last_month_end),
+    })
+    
+    return presets
+
+
+def get_default_date_range(date_type: str = 'scheduled') -> Tuple[date, date]:
+    """
+    Get default date range based on date type
+    
+    Args:
+        date_type: 'scheduled' or 'order'
+        
+    Returns:
+        Tuple of (from_date, to_date)
+    """
+    today = get_vietnam_today()
+    
+    if date_type == 'scheduled':
+        # For scheduled date: Today → +30 days (looking forward)
+        return (today, today + timedelta(days=29))
+    else:
+        # For order date: First of last month → Today (looking back)
+        first_of_month = today.replace(day=1)
+        last_month_end = first_of_month - timedelta(days=1)
+        first_of_last_month = last_month_end.replace(day=1)
+        return (first_of_last_month, today)
 
 
 def format_date(dt: Union[date, datetime, str, None], 

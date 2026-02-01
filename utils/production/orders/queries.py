@@ -3,8 +3,13 @@
 Database queries for Orders domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.4.0
+Version: 1.5.0
 Changes:
+- v1.5.0: Advanced multiselect filter support
+          + get_orders() and get_orders_count() accept list parameters
+          + Added product_ids, bom_ids, brand_ids, warehouse_ids filters
+          + Added order_nos for text search
+          + Added get_search_filter_options() for multiselect options
 - v1.4.0: Added BOM conflict detection for Product-first selection flow
           + get_products_with_active_boms() - Products with BOM count
           + get_boms_by_product() - BOMs for specific product
@@ -70,12 +75,18 @@ class OrderQueries:
     # ==================== Order Queries ====================
     
     def get_orders(self, 
-                   status: Optional[str] = None,
-                   order_type: Optional[str] = None,
-                   priority: Optional[str] = None,
+                   status: Optional[List[str]] = None,
+                   order_type: Optional[List[str]] = None,
+                   priority: Optional[List[str]] = None,
+                   product_ids: Optional[List[int]] = None,
+                   bom_ids: Optional[List[int]] = None,
+                   brand_ids: Optional[List[int]] = None,
+                   source_warehouse_ids: Optional[List[int]] = None,
+                   target_warehouse_ids: Optional[List[int]] = None,
+                   order_nos: Optional[List[str]] = None,
                    from_date: Optional[date] = None,
                    to_date: Optional[date] = None,
-                   search: Optional[str] = None,
+                   date_type: str = 'scheduled',
                    conflicts_only: bool = False,
                    conflict_check_active_only: bool = True,
                    page: int = 1, 
@@ -84,12 +95,18 @@ class OrderQueries:
         Get production orders with filters and pagination
         
         Args:
-            status: Filter by order status
-            order_type: Filter by BOM type (CUTTING, REPACKING, etc.)
-            priority: Filter by priority level
+            status: List of statuses to filter (e.g., ['DRAFT', 'CONFIRMED'])
+            order_type: List of BOM types (e.g., ['CUTTING', 'REPACKING'])
+            priority: List of priority levels
+            product_ids: List of product IDs to filter
+            bom_ids: List of BOM IDs to filter
+            brand_ids: List of brand IDs to filter
+            source_warehouse_ids: List of source warehouse IDs
+            target_warehouse_ids: List of target warehouse IDs
+            order_nos: List of order numbers to filter
             from_date: Filter orders from this date
             to_date: Filter orders to this date
-            search: Search in order_no, product name
+            date_type: 'scheduled' to filter by scheduled_date, 'order' to filter by order_date
             conflicts_only: If True, only return orders with BOM conflicts
             conflict_check_active_only: If True, count only active BOMs for conflict
             page: Page number (1-indexed)
@@ -155,43 +172,70 @@ class OrderQueries:
         
         params = []
         
-        if status:
-            query += " AND o.status = %s"
-            params.append(status)
+        # Status filter (list)
+        if status and len(status) > 0:
+            placeholders = ', '.join(['%s'] * len(status))
+            query += f" AND o.status IN ({placeholders})"
+            params.extend(status)
         
-        if order_type:
-            query += " AND b.bom_type = %s"
-            params.append(order_type)
+        # Order type filter (list)
+        if order_type and len(order_type) > 0:
+            placeholders = ', '.join(['%s'] * len(order_type))
+            query += f" AND b.bom_type IN ({placeholders})"
+            params.extend(order_type)
         
-        if priority:
-            query += " AND o.priority = %s"
-            params.append(priority)
+        # Priority filter (list)
+        if priority and len(priority) > 0:
+            placeholders = ', '.join(['%s'] * len(priority))
+            query += f" AND o.priority IN ({placeholders})"
+            params.extend(priority)
+        
+        # Product IDs filter
+        if product_ids and len(product_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(product_ids))
+            query += f" AND o.product_id IN ({placeholders})"
+            params.extend(product_ids)
+        
+        # BOM IDs filter
+        if bom_ids and len(bom_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(bom_ids))
+            query += f" AND o.bom_header_id IN ({placeholders})"
+            params.extend(bom_ids)
+        
+        # Brand IDs filter
+        if brand_ids and len(brand_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(brand_ids))
+            query += f" AND br.id IN ({placeholders})"
+            params.extend(brand_ids)
+        
+        # Source warehouse IDs filter
+        if source_warehouse_ids and len(source_warehouse_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(source_warehouse_ids))
+            query += f" AND o.warehouse_id IN ({placeholders})"
+            params.extend(source_warehouse_ids)
+        
+        # Target warehouse IDs filter
+        if target_warehouse_ids and len(target_warehouse_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(target_warehouse_ids))
+            query += f" AND o.target_warehouse_id IN ({placeholders})"
+            params.extend(target_warehouse_ids)
+        
+        # Order numbers filter (list)
+        if order_nos and len(order_nos) > 0:
+            placeholders = ", ".join(["%s"] * len(order_nos))
+            query += f" AND o.order_no IN ({placeholders})"
+            params.extend(order_nos)
+        
+        # Date filter - based on date_type
+        date_column = "o.scheduled_date" if date_type == 'scheduled' else "o.order_date"
         
         if from_date:
-            query += " AND DATE(o.order_date) >= %s"
+            query += f" AND DATE({date_column}) >= %s"
             params.append(from_date)
         
         if to_date:
-            query += " AND DATE(o.order_date) <= %s"
+            query += f" AND DATE({date_column}) <= %s"
             params.append(to_date)
-        
-        if search:
-            query += """
-                AND (
-                    o.order_no LIKE %s 
-                    OR p.name LIKE %s 
-                    OR p.pt_code LIKE %s
-                    OR p.package_size LIKE %s
-                    OR p.legacy_pt_code LIKE %s
-                    OR b.bom_name LIKE %s
-                    OR b.bom_code LIKE %s
-                    OR br.brand_name LIKE %s
-                    OR o.notes LIKE %s
-                    OR CONCAT(e.first_name, ' ', e.last_name) LIKE %s
-                )
-            """
-            search_pattern = f"%{search}%"
-            params.extend([search_pattern] * 10)
         
         # Filter for orders with BOM conflicts only
         if conflicts_only:
@@ -226,15 +270,39 @@ class OrderQueries:
             return None
     
     def get_orders_count(self,
-                        status: Optional[str] = None,
-                        order_type: Optional[str] = None,
-                        priority: Optional[str] = None,
+                        status: Optional[List[str]] = None,
+                        order_type: Optional[List[str]] = None,
+                        priority: Optional[List[str]] = None,
+                        product_ids: Optional[List[int]] = None,
+                        bom_ids: Optional[List[int]] = None,
+                        brand_ids: Optional[List[int]] = None,
+                        source_warehouse_ids: Optional[List[int]] = None,
+                        target_warehouse_ids: Optional[List[int]] = None,
+                        order_nos: Optional[List[str]] = None,
                         from_date: Optional[date] = None,
                         to_date: Optional[date] = None,
-                        search: Optional[str] = None,
+                        date_type: str = 'scheduled',
                         conflicts_only: bool = False,
                         conflict_check_active_only: bool = True) -> int:
-        """Get total count of orders matching filters"""
+        """
+        Get total count of orders matching filters
+        
+        Args:
+            status: List of statuses to filter
+            order_type: List of BOM types
+            priority: List of priority levels
+            product_ids: List of product IDs
+            bom_ids: List of BOM IDs
+            brand_ids: List of brand IDs
+            source_warehouse_ids: List of source warehouse IDs
+            target_warehouse_ids: List of target warehouse IDs
+            order_nos: List of order numbers to filter
+            from_date: Filter from date
+            to_date: Filter to date
+            date_type: 'scheduled' or 'order'
+            conflicts_only: Show only orders with BOM conflicts
+            conflict_check_active_only: Count only active BOMs for conflict
+        """
         # Condition for counting BOMs
         if conflict_check_active_only:
             bom_count_condition = "AND bh.status = 'ACTIVE'"
@@ -247,50 +315,75 @@ class OrderQueries:
             JOIN products p ON o.product_id = p.id
             JOIN bom_headers b ON o.bom_header_id = b.id
             JOIN brands br ON p.brand_id = br.id
-            LEFT JOIN users u ON o.created_by = u.id
-            LEFT JOIN employees e ON u.employee_id = e.id
             WHERE o.delete_flag = 0
         """
         
         params = []
         
-        if status:
-            query += " AND o.status = %s"
-            params.append(status)
+        # Status filter (list)
+        if status and len(status) > 0:
+            placeholders = ', '.join(['%s'] * len(status))
+            query += f" AND o.status IN ({placeholders})"
+            params.extend(status)
         
-        if order_type:
-            query += " AND b.bom_type = %s"
-            params.append(order_type)
+        # Order type filter (list)
+        if order_type and len(order_type) > 0:
+            placeholders = ', '.join(['%s'] * len(order_type))
+            query += f" AND b.bom_type IN ({placeholders})"
+            params.extend(order_type)
         
-        if priority:
-            query += " AND o.priority = %s"
-            params.append(priority)
+        # Priority filter (list)
+        if priority and len(priority) > 0:
+            placeholders = ', '.join(['%s'] * len(priority))
+            query += f" AND o.priority IN ({placeholders})"
+            params.extend(priority)
+        
+        # Product IDs filter
+        if product_ids and len(product_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(product_ids))
+            query += f" AND o.product_id IN ({placeholders})"
+            params.extend(product_ids)
+        
+        # BOM IDs filter
+        if bom_ids and len(bom_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(bom_ids))
+            query += f" AND o.bom_header_id IN ({placeholders})"
+            params.extend(bom_ids)
+        
+        # Brand IDs filter
+        if brand_ids and len(brand_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(brand_ids))
+            query += f" AND br.id IN ({placeholders})"
+            params.extend(brand_ids)
+        
+        # Source warehouse IDs filter
+        if source_warehouse_ids and len(source_warehouse_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(source_warehouse_ids))
+            query += f" AND o.warehouse_id IN ({placeholders})"
+            params.extend(source_warehouse_ids)
+        
+        # Target warehouse IDs filter
+        if target_warehouse_ids and len(target_warehouse_ids) > 0:
+            placeholders = ', '.join(['%s'] * len(target_warehouse_ids))
+            query += f" AND o.target_warehouse_id IN ({placeholders})"
+            params.extend(target_warehouse_ids)
+        
+        # Order numbers filter (list)
+        if order_nos and len(order_nos) > 0:
+            placeholders = ", ".join(["%s"] * len(order_nos))
+            query += f" AND o.order_no IN ({placeholders})"
+            params.extend(order_nos)
+        
+        # Date filter - based on date_type
+        date_column = "o.scheduled_date" if date_type == 'scheduled' else "o.order_date"
         
         if from_date:
-            query += " AND DATE(o.order_date) >= %s"
+            query += f" AND DATE({date_column}) >= %s"
             params.append(from_date)
         
         if to_date:
-            query += " AND DATE(o.order_date) <= %s"
+            query += f" AND DATE({date_column}) <= %s"
             params.append(to_date)
-        
-        if search:
-            query += """
-                AND (
-                    o.order_no LIKE %s 
-                    OR p.name LIKE %s 
-                    OR p.pt_code LIKE %s
-                    OR p.package_size LIKE %s
-                    OR p.legacy_pt_code LIKE %s
-                    OR b.bom_name LIKE %s
-                    OR b.bom_code LIKE %s
-                    OR br.brand_name LIKE %s
-                    OR o.notes LIKE %s
-                    OR CONCAT(e.first_name, ' ', e.last_name) LIKE %s
-                )
-            """
-            search_pattern = f"%{search}%"
-            params.extend([search_pattern] * 10)
         
         # Filter for orders with BOM conflicts only
         if conflicts_only:
@@ -729,7 +822,7 @@ class OrderQueries:
     # ==================== Filter Options ====================
     
     def get_filter_options(self) -> Dict[str, List[str]]:
-        """Get dynamic filter options from database"""
+        """Get dynamic filter options from database (for multiselect)"""
         status_query = """
             SELECT DISTINCT status 
             FROM manufacturing_orders 
@@ -758,16 +851,113 @@ class OrderQueries:
             priorities = pd.read_sql(priority_query, self.engine)['priority'].tolist()
             
             return {
-                'statuses': ['All'] + statuses,
-                'order_types': ['All'] + types,
-                'priorities': ['All'] + priorities
+                'statuses': statuses,
+                'order_types': types,
+                'priorities': priorities
             }
         except Exception as e:
             logger.error(f"Error getting filter options: {e}")
             return {
-                'statuses': ['All', 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'],
-                'order_types': ['All', 'CUTTING', 'REPACKING', 'KITTING'],
-                'priorities': ['All', 'LOW', 'NORMAL', 'HIGH', 'URGENT']
+                'statuses': ['DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'],
+                'order_types': ['CUTTING', 'REPACKING', 'KITTING'],
+                'priorities': ['LOW', 'NORMAL', 'HIGH', 'URGENT']
+            }
+    
+    def get_search_filter_options(self) -> Dict[str, pd.DataFrame]:
+        """
+        Get options for search multiselect filters
+        Returns products, BOMs, brands, warehouses that exist in orders
+        """
+        # Products used in orders
+        product_query = """
+            SELECT DISTINCT 
+                p.id,
+                p.pt_code,
+                p.name as product_name,
+                p.package_size,
+                p.legacy_pt_code,
+                br.brand_name
+            FROM manufacturing_orders mo
+            JOIN products p ON mo.product_id = p.id
+            JOIN brands br ON p.brand_id = br.id
+            WHERE mo.delete_flag = 0
+            ORDER BY p.name
+        """
+        
+        # BOMs used in orders
+        bom_query = """
+            SELECT DISTINCT 
+                bh.id,
+                bh.bom_code,
+                bh.bom_name,
+                bh.bom_type
+            FROM manufacturing_orders mo
+            JOIN bom_headers bh ON mo.bom_header_id = bh.id
+            WHERE mo.delete_flag = 0
+            ORDER BY bh.bom_name
+        """
+        
+        # Brands from products in orders
+        brand_query = """
+            SELECT DISTINCT 
+                br.id,
+                br.brand_name
+            FROM manufacturing_orders mo
+            JOIN products p ON mo.product_id = p.id
+            JOIN brands br ON p.brand_id = br.id
+            WHERE mo.delete_flag = 0
+            ORDER BY br.brand_name
+        """
+        
+        # Source warehouses used in orders
+        source_wh_query = """
+            SELECT DISTINCT 
+                w.id,
+                w.name as warehouse_name
+            FROM manufacturing_orders mo
+            JOIN warehouses w ON mo.warehouse_id = w.id
+            WHERE mo.delete_flag = 0
+            ORDER BY w.name
+        """
+        
+        # Target warehouses used in orders
+        target_wh_query = """
+            SELECT DISTINCT 
+                w.id,
+                w.name as warehouse_name
+            FROM manufacturing_orders mo
+            JOIN warehouses w ON mo.target_warehouse_id = w.id
+            WHERE mo.delete_flag = 0
+            ORDER BY w.name
+        """
+        
+        # Order numbers (for multiselect filter)
+        order_no_query = """
+            SELECT DISTINCT order_no
+            FROM manufacturing_orders
+            WHERE delete_flag = 0
+            ORDER BY order_no DESC
+            LIMIT 500
+        """
+        
+        try:
+            return {
+                'products': pd.read_sql(product_query, self.engine),
+                'boms': pd.read_sql(bom_query, self.engine),
+                'brands': pd.read_sql(brand_query, self.engine),
+                'source_warehouses': pd.read_sql(source_wh_query, self.engine),
+                'target_warehouses': pd.read_sql(target_wh_query, self.engine),
+                'order_nos': pd.read_sql(order_no_query, self.engine),
+            }
+        except Exception as e:
+            logger.error(f"Error getting search filter options: {e}")
+            return {
+                'products': pd.DataFrame(),
+                'boms': pd.DataFrame(),
+                'brands': pd.DataFrame(),
+                'source_warehouses': pd.DataFrame(),
+                'target_warehouses': pd.DataFrame(),
+                'order_nos': pd.DataFrame(),
             }
     
     # ==================== Material Availability ====================

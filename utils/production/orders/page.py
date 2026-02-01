@@ -3,8 +3,14 @@
 Main UI orchestrator for Orders domain
 Renders the Orders tab with dashboard, filters, list, and actions
 
-Version: 1.3.0
+Version: 1.5.0
 Changes:
+- v1.5.0: Advanced multiselect filters
+          + Status, Type, Priority as multiselect with default active statuses
+          + Search by Products, BOMs, Brands, Warehouses (multiselect)
+          + Order No text search
+          + Date filter: Scheduled Date / Order Date toggle
+          + Quick select presets for date ranges
 - v1.3.0: Performance optimization with fragment isolation
           + Migrated from st.data_editor to st.dataframe with selection_mode="single-row"
           + Wrapped order list in @st.fragment for isolated reruns
@@ -38,7 +44,7 @@ from .dialogs import (
 from .common import (
     format_number, create_status_indicator, calculate_percentage, format_datetime_vn,
     get_vietnam_today, export_to_excel, OrderConstants, OrderValidator,
-    format_product_display, format_date
+    format_product_display, format_date, get_date_filter_presets, get_default_date_range
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +59,7 @@ def _init_session_state():
         'orders_view': 'list',  # 'list' or 'create'
         'orders_conflicts_only': False,
         'orders_conflict_check_active_only': True,  # Default: check active BOMs only
+        'orders_date_type': 'scheduled',  # Default: filter by scheduled date
     }
     # Note: orders_selected_idx removed - st.dataframe handles selection internally
     
@@ -62,68 +69,249 @@ def _init_session_state():
 
 # ==================== Filter Bar ====================
 
+@st.cache_data(ttl=300)
+def _get_search_options(_queries: OrderQueries) -> Dict[str, Any]:
+    """Cache search filter options (5 min TTL)"""
+    return _queries.get_search_filter_options()
+
+
 def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
     """
-    Render filter bar and return selected filters
+    Render filter bar with multiselect widgets
+    
+    Features:
+    - Multiselect for Status (default: Draft, Confirmed, In Progress)
+    - Multiselect for Type, Priority
+    - Multiselect for Products, BOMs, Brands, Warehouses
+    - Text input for Order No search
+    - Date type toggle and quick select
     
     Returns:
-        Dictionary with filter values
+        Dictionary with filter values (lists for multiselect fields)
     """
     filter_options = queries.get_filter_options()
+    search_options = _get_search_options(queries)
     
-    # Default date range
-    default_to = get_vietnam_today()
-    default_from = (default_to.replace(day=1) - timedelta(days=1)).replace(day=1)
+    # Get current date type from session state
+    date_type = st.session_state.get('orders_date_type', 'scheduled')
     
-    with st.expander("🔍 Filters", expanded=False):
-        # Row 1: Main filters
-        col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 2])
+    # Get default date range based on date type
+    default_from, default_to = get_default_date_range(date_type)
+    
+    # Default statuses (Active = Draft + Confirmed + In Progress)
+    default_statuses = ['DRAFT', 'CONFIRMED', 'IN_PROGRESS']
+    
+    with st.expander("🔍 Filters", expanded=True):
+        # Row 1: Main filters (Status, Type, Priority)
+        st.markdown("##### 📋 Status & Type")
+        col1, col2, col3 = st.columns([2, 1.5, 1.5])
         
         with col1:
-            status = st.selectbox(
+            # Status multiselect with default selection
+            status_list = st.multiselect(
                 "Status",
                 options=filter_options['statuses'],
-                key="order_filter_status"
+                default=default_statuses,
+                key="order_filter_status",
+                help="Select one or more statuses. Empty = All statuses"
             )
         
         with col2:
-            order_type = st.selectbox(
+            # Type multiselect
+            order_type_list = st.multiselect(
                 "Type",
                 options=filter_options['order_types'],
-                key="order_filter_type"
+                default=[],
+                key="order_filter_type",
+                help="Select BOM types. Empty = All types"
             )
         
         with col3:
-            priority = st.selectbox(
+            # Priority multiselect
+            priority_list = st.multiselect(
                 "Priority",
                 options=filter_options['priorities'],
-                key="order_filter_priority"
+                default=[],
+                key="order_filter_priority",
+                help="Select priorities. Empty = All priorities"
+            )
+        
+        # Row 2: Search filters (Products, BOMs)
+        st.markdown("---")
+        st.markdown("##### 🔍 Search By")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Products multiselect
+            products_df = search_options.get('products', pd.DataFrame())
+            if not products_df.empty:
+                product_options = {
+                    f"{row['pt_code']} | {row['product_name']} | {row['package_size'] or ''} ({row['brand_name']})": row['id']
+                    for _, row in products_df.iterrows()
+                }
+                selected_products = st.multiselect(
+                    "Products",
+                    options=list(product_options.keys()),
+                    default=[],
+                    key="order_filter_products",
+                    help="Filter by specific products"
+                )
+                product_ids = [product_options[p] for p in selected_products]
+            else:
+                st.multiselect("Products", options=[], key="order_filter_products_empty")
+                product_ids = []
+        
+        with col2:
+            # BOMs multiselect
+            boms_df = search_options.get('boms', pd.DataFrame())
+            if not boms_df.empty:
+                bom_options = {
+                    f"{row['bom_code']} | {row['bom_name']} ({row['bom_type']})": row['id']
+                    for _, row in boms_df.iterrows()
+                }
+                selected_boms = st.multiselect(
+                    "BOMs",
+                    options=list(bom_options.keys()),
+                    default=[],
+                    key="order_filter_boms",
+                    help="Filter by specific BOMs"
+                )
+                bom_ids = [bom_options[b] for b in selected_boms]
+            else:
+                st.multiselect("BOMs", options=[], key="order_filter_boms_empty")
+                bom_ids = []
+        
+        # Row 3: Brands, Warehouses, Order No (all in one row)
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            # Brands multiselect
+            brands_df = search_options.get('brands', pd.DataFrame())
+            if not brands_df.empty:
+                brand_options = {row['brand_name']: row['id'] for _, row in brands_df.iterrows()}
+                selected_brands = st.multiselect(
+                    "Brands",
+                    options=list(brand_options.keys()),
+                    default=[],
+                    key="order_filter_brands",
+                    help="Filter by brands"
+                )
+                brand_ids = [brand_options[b] for b in selected_brands]
+            else:
+                st.multiselect("Brands", options=[], key="order_filter_brands_empty")
+                brand_ids = []
+        
+        with col2:
+            # Source Warehouse multiselect
+            source_wh_df = search_options.get('source_warehouses', pd.DataFrame())
+            if not source_wh_df.empty:
+                source_wh_options = {row['warehouse_name']: row['id'] for _, row in source_wh_df.iterrows()}
+                selected_source_wh = st.multiselect(
+                    "Source Warehouse",
+                    options=list(source_wh_options.keys()),
+                    default=[],
+                    key="order_filter_source_wh",
+                    help="Filter by source warehouse"
+                )
+                source_warehouse_ids = [source_wh_options[w] for w in selected_source_wh]
+            else:
+                st.multiselect("Source Warehouse", options=[], key="order_filter_source_wh_empty")
+                source_warehouse_ids = []
+        
+        with col3:
+            # Target Warehouse multiselect
+            target_wh_df = search_options.get('target_warehouses', pd.DataFrame())
+            if not target_wh_df.empty:
+                target_wh_options = {row['warehouse_name']: row['id'] for _, row in target_wh_df.iterrows()}
+                selected_target_wh = st.multiselect(
+                    "Target Warehouse",
+                    options=list(target_wh_options.keys()),
+                    default=[],
+                    key="order_filter_target_wh",
+                    help="Filter by target warehouse"
+                )
+                target_warehouse_ids = [target_wh_options[w] for w in selected_target_wh]
+            else:
+                st.multiselect("Target Warehouse", options=[], key="order_filter_target_wh_empty")
+                target_warehouse_ids = []
+        
+        with col4:
+            # Order No multiselect
+            order_nos = search_options.get('order_nos', pd.DataFrame())
+            if not order_nos.empty:
+                order_no_list = order_nos['order_no'].tolist()
+                selected_order_nos = st.multiselect(
+                    "Order No",
+                    options=order_no_list,
+                    default=[],
+                    key="order_filter_order_nos",
+                    help="Filter by specific order numbers"
+                )
+            else:
+                st.multiselect("Order No", options=[], key="order_filter_order_nos_empty")
+                selected_order_nos = []
+        
+        # Row 3: Date filter section
+        st.markdown("---")
+        st.markdown("##### 📅 Date Filter")
+        
+        col1, col2, col3, col4 = st.columns([1.5, 1, 1, 1.5])
+        
+        with col1:
+            # Date type radio
+            date_type_display = st.radio(
+                "Filter by",
+                options=["Scheduled Date", "Order Date"],
+                index=0 if date_type == 'scheduled' else 1,
+                key="order_filter_date_type",
+                horizontal=True,
+                help="Scheduled Date = ngày dự kiến sản xuất, Order Date = ngày tạo order"
+            )
+            new_date_type = 'scheduled' if date_type_display == "Scheduled Date" else 'order'
+            
+            # Update session state
+            if new_date_type != st.session_state.get('orders_date_type'):
+                st.session_state['orders_date_type'] = new_date_type
+        
+        with col2:
+            from_date = st.date_input(
+                "From",
+                value=default_from,
+                key="order_filter_from"
+            )
+        
+        with col3:
+            to_date = st.date_input(
+                "To",
+                value=default_to,
+                key="order_filter_to"
             )
         
         with col4:
-            date_col1, date_col2 = st.columns(2)
-            with date_col1:
-                from_date = st.date_input(
-                    "From",
-                    value=default_from,
-                    key="order_filter_from"
-                )
-            with date_col2:
-                to_date = st.date_input(
-                    "To",
-                    value=default_to,
-                    key="order_filter_to"
-                )
-        
-        with col5:
-            search = st.text_input(
-                "🔍 Search",
-                placeholder="Order, product, BOM, brand, size, notes, creator...",
-                key="order_filter_search",
-                help="Search by: Order No, Product Name/Code, Package Size, Legacy Code, BOM Name/Code, Brand, Notes, Creator Name"
+            # Quick select presets
+            presets = get_date_filter_presets(include_future=(new_date_type == 'scheduled'))
+            preset_names = ["Custom"] + list(presets.keys())
+            
+            # Determine default preset based on date type
+            default_preset = "Next 30 Days" if new_date_type == 'scheduled' else "Last 30 Days"
+            default_preset_idx = preset_names.index(default_preset) if default_preset in preset_names else 0
+            
+            selected_preset = st.selectbox(
+                "Quick Select",
+                options=preset_names,
+                index=default_preset_idx,
+                key="order_filter_preset",
+                help="Choose a preset date range"
             )
+            
+            # Apply preset if selected
+            if selected_preset != "Custom" and selected_preset in presets:
+                preset_from, preset_to = presets[selected_preset]
+                from_date = preset_from
+                to_date = preset_to
         
-        # Row 2: Conflict filters
+        # Row 4: Conflict filters
         st.markdown("---")
         col1, col2, col3 = st.columns([1, 1, 2])
         
@@ -132,7 +320,7 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                 "🔴 Conflicts Only",
                 value=st.session_state.get('orders_conflicts_only', False),
                 key="order_filter_conflicts_only",
-                help="Show only orders with BOM conflicts (multiple active BOMs for same product)"
+                help="Show only orders with BOM conflicts"
             )
             st.session_state['orders_conflicts_only'] = conflicts_only
         
@@ -141,17 +329,23 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                 "Check Active BOMs Only",
                 value=st.session_state.get('orders_conflict_check_active_only', True),
                 key="order_filter_conflict_check_active",
-                help="If checked, count only ACTIVE BOMs for conflict detection. If unchecked, count ALL BOMs."
+                help="Count only ACTIVE BOMs for conflict detection"
             )
             st.session_state['orders_conflict_check_active_only'] = conflict_check_active_only
     
     return {
-        'status': status if status != "All" else None,
-        'order_type': order_type if order_type != "All" else None,
-        'priority': priority if priority != "All" else None,
+        'status': status_list if status_list else None,
+        'order_type': order_type_list if order_type_list else None,
+        'priority': priority_list if priority_list else None,
+        'product_ids': product_ids if product_ids else None,
+        'bom_ids': bom_ids if bom_ids else None,
+        'brand_ids': brand_ids if brand_ids else None,
+        'source_warehouse_ids': source_warehouse_ids if source_warehouse_ids else None,
+        'target_warehouse_ids': target_warehouse_ids if target_warehouse_ids else None,
+        'order_nos': selected_order_nos if selected_order_nos else None,
         'from_date': from_date,
         'to_date': to_date,
-        'search': search if search else None,
+        'date_type': new_date_type,
         'conflicts_only': conflicts_only,
         'conflict_check_active_only': conflict_check_active_only
     }
@@ -201,18 +395,25 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     page_size = OrderConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.orders_page
     
-    # Get conflict filter options
+    # Get filter options
     conflicts_only = filters.get('conflicts_only', False)
     conflict_check_active_only = filters.get('conflict_check_active_only', True)
+    date_type = filters.get('date_type', 'scheduled')
     
-    # Get orders with conflict count
+    # Get orders with all filter parameters
     orders = queries.get_orders(
-        status=filters['status'],
-        order_type=filters['order_type'],
-        priority=filters['priority'],
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        search=filters['search'],
+        status=filters.get('status'),
+        order_type=filters.get('order_type'),
+        priority=filters.get('priority'),
+        product_ids=filters.get('product_ids'),
+        bom_ids=filters.get('bom_ids'),
+        brand_ids=filters.get('brand_ids'),
+        source_warehouse_ids=filters.get('source_warehouse_ids'),
+        target_warehouse_ids=filters.get('target_warehouse_ids'),
+        order_nos=filters.get('order_nos'),
+        from_date=filters.get('from_date'),
+        to_date=filters.get('to_date'),
+        date_type=date_type,
         conflicts_only=conflicts_only,
         conflict_check_active_only=conflict_check_active_only,
         page=page,
@@ -227,12 +428,18 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         return
     
     total_count = queries.get_orders_count(
-        status=filters['status'],
-        order_type=filters['order_type'],
-        priority=filters['priority'],
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        search=filters['search'],
+        status=filters.get('status'),
+        order_type=filters.get('order_type'),
+        priority=filters.get('priority'),
+        product_ids=filters.get('product_ids'),
+        bom_ids=filters.get('bom_ids'),
+        brand_ids=filters.get('brand_ids'),
+        source_warehouse_ids=filters.get('source_warehouse_ids'),
+        target_warehouse_ids=filters.get('target_warehouse_ids'),
+        order_nos=filters.get('order_nos'),
+        from_date=filters.get('from_date'),
+        to_date=filters.get('to_date'),
+        date_type=date_type,
         conflicts_only=conflicts_only,
         conflict_check_active_only=conflict_check_active_only
     )
@@ -411,17 +618,23 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
     with st.spinner("Exporting..."):
         # Get all orders (no pagination)
         orders = queries.get_orders(
-            status=filters['status'],
-            order_type=filters['order_type'],
-            priority=filters['priority'],
-            from_date=filters['from_date'],
-            to_date=filters['to_date'],
-            search=filters['search'],
+            status=filters.get('status'),
+            order_type=filters.get('order_type'),
+            priority=filters.get('priority'),
+            product_ids=filters.get('product_ids'),
+            bom_ids=filters.get('bom_ids'),
+            brand_ids=filters.get('brand_ids'),
+            source_warehouse_ids=filters.get('source_warehouse_ids'),
+            target_warehouse_ids=filters.get('target_warehouse_ids'),
+            order_nos=filters.get('order_nos'),
+            from_date=filters.get('from_date'),
+            to_date=filters.get('to_date'),
+            date_type=filters.get('date_type', 'scheduled'),
             page=1,
             page_size=10000
         )
         
-        if orders.empty:
+        if orders is None or orders.empty:
             st.warning("No orders to export")
             return
         
