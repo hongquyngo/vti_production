@@ -3,26 +3,15 @@
 Main UI orchestrator for Orders domain
 Renders the Orders tab with dashboard, filters, list, and actions
 
-Version: 1.5.0
+Version: 1.6.0
 Changes:
+- v1.6.0: Added Pivot View for data analysis
+          + View switcher: List View / Pivot View
+          + Pivot uses st.form + fragments for performance
+          + No full page rerun when changing pivot options
 - v1.5.0: Advanced multiselect filters
-          + Status, Type, Priority as multiselect with default active statuses
-          + Search by Products, BOMs, Brands, Warehouses (multiselect)
-          + Order No text search
-          + Date filter: Scheduled Date / Order Date toggle
-          + Quick select presets for date ranges
 - v1.3.0: Performance optimization with fragment isolation
-          + Migrated from st.data_editor to st.dataframe with selection_mode="single-row"
-          + Wrapped order list in @st.fragment for isolated reruns
-          + Row selection and pagination now only rerun the list fragment
-          + Removed explicit st.rerun() calls - handled by fragment
-          + Cleaner UX: click row to select instead of checkbox
 - v1.2.0: Added BOM conflict detection and warning
-          + Conflict warning banner at top
-          + 'Conflicts Only' filter checkbox
-          + 'Issues' column in order table showing BOM conflict count
-          + Toggle for checking active BOMs only vs all BOMs
-- v1.1.0: Enhanced search placeholder with help tooltip showing all searchable fields
 """
 
 import logging
@@ -36,6 +25,7 @@ from .queries import OrderQueries
 from .manager import OrderManager
 from .dashboard import render_dashboard
 from .forms import render_create_form
+from .pivot_view import render_pivot_view
 from .dialogs import (
     show_detail_dialog, show_edit_dialog, show_confirm_dialog,
     show_cancel_dialog, show_delete_dialog, show_pdf_dialog,
@@ -56,15 +46,52 @@ def _init_session_state():
     """Initialize session state for orders tab"""
     defaults = {
         'orders_page': 1,
-        'orders_view': 'list',  # 'list' or 'create'
+        'orders_view': 'list',  # 'list', 'create', or 'pivot'
         'orders_conflicts_only': False,
-        'orders_conflict_check_active_only': True,  # Default: check active BOMs only
-        'orders_date_type': 'scheduled',  # Default: filter by scheduled date
+        'orders_conflict_check_active_only': True,
+        'orders_date_type': 'scheduled',
     }
-    # Note: orders_selected_idx removed - st.dataframe handles selection internally
     
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
+
+
+# ==================== View Switcher ====================
+
+def _render_view_switcher() -> str:
+    """Render view switcher tabs for List/Pivot views"""
+    current_view = st.session_state.get('orders_view', 'list')
+    
+    if current_view == 'create':
+        return current_view
+    
+    col1, col2, col3 = st.columns([1, 1, 4])
+    
+    with col1:
+        list_selected = current_view == 'list'
+        if st.button(
+            "📋 List View",
+            type="primary" if list_selected else "secondary",
+            use_container_width=True,
+            key="btn_view_list"
+        ):
+            if not list_selected:
+                st.session_state.orders_view = 'list'
+                st.rerun()
+    
+    with col2:
+        pivot_selected = current_view == 'pivot'
+        if st.button(
+            "📊 Pivot View",
+            type="primary" if pivot_selected else "secondary",
+            use_container_width=True,
+            key="btn_view_pivot"
+        ):
+            if not pivot_selected:
+                st.session_state.orders_view = 'pivot'
+                st.rerun()
+    
+    return current_view
 
 
 # ==================== Filter Bar ====================
@@ -76,38 +103,19 @@ def _get_search_options(_queries: OrderQueries) -> Dict[str, Any]:
 
 
 def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
-    """
-    Render filter bar with multiselect widgets
-    
-    Features:
-    - Multiselect for Status (default: Draft, Confirmed, In Progress)
-    - Multiselect for Type, Priority
-    - Multiselect for Products, BOMs, Brands, Warehouses
-    - Text input for Order No search
-    - Date type toggle and quick select
-    
-    Returns:
-        Dictionary with filter values (lists for multiselect fields)
-    """
+    """Render filter bar with multiselect widgets"""
     filter_options = queries.get_filter_options()
     search_options = _get_search_options(queries)
     
-    # Get current date type from session state
     date_type = st.session_state.get('orders_date_type', 'scheduled')
-    
-    # Get default date range based on date type
     default_from, default_to = get_default_date_range(date_type)
-    
-    # Default statuses (Active = Draft + Confirmed + In Progress)
     default_statuses = ['DRAFT', 'CONFIRMED', 'IN_PROGRESS']
     
     with st.expander("🔍 Filters", expanded=True):
-        # Row 1: Main filters (Status, Type, Priority)
         st.markdown("##### 📋 Status & Type")
         col1, col2, col3 = st.columns([2, 1.5, 1.5])
         
         with col1:
-            # Status multiselect with default selection
             status_list = st.multiselect(
                 "Status",
                 options=filter_options['statuses'],
@@ -117,7 +125,6 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
             )
         
         with col2:
-            # Type multiselect
             order_type_list = st.multiselect(
                 "Type",
                 options=filter_options['order_types'],
@@ -127,7 +134,6 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
             )
         
         with col3:
-            # Priority multiselect
             priority_list = st.multiselect(
                 "Priority",
                 options=filter_options['priorities'],
@@ -136,14 +142,12 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                 help="Select priorities. Empty = All priorities"
             )
         
-        # Row 2: Search filters (Products, BOMs)
         st.markdown("---")
         st.markdown("##### 🔍 Search By")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            # Products multiselect
             products_df = search_options.get('products', pd.DataFrame())
             if not products_df.empty:
                 product_options = {
@@ -163,7 +167,6 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                 product_ids = []
         
         with col2:
-            # BOMs multiselect
             boms_df = search_options.get('boms', pd.DataFrame())
             if not boms_df.empty:
                 bom_options = {
@@ -182,11 +185,9 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                 st.multiselect("BOMs", options=[], key="order_filter_boms_empty")
                 bom_ids = []
         
-        # Row 3: Brands, Warehouses, Order No (all in one row)
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            # Brands multiselect
             brands_df = search_options.get('brands', pd.DataFrame())
             if not brands_df.empty:
                 brand_options = {row['brand_name']: row['id'] for _, row in brands_df.iterrows()}
@@ -194,8 +195,7 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                     "Brands",
                     options=list(brand_options.keys()),
                     default=[],
-                    key="order_filter_brands",
-                    help="Filter by brands"
+                    key="order_filter_brands"
                 )
                 brand_ids = [brand_options[b] for b in selected_brands]
             else:
@@ -203,135 +203,104 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
                 brand_ids = []
         
         with col2:
-            # Source Warehouse multiselect
-            source_wh_df = search_options.get('source_warehouses', pd.DataFrame())
-            if not source_wh_df.empty:
-                source_wh_options = {row['warehouse_name']: row['id'] for _, row in source_wh_df.iterrows()}
+            warehouses_df = search_options.get('warehouses', pd.DataFrame())
+            if not warehouses_df.empty:
+                warehouse_options = {row['name']: row['id'] for _, row in warehouses_df.iterrows()}
                 selected_source_wh = st.multiselect(
                     "Source Warehouse",
-                    options=list(source_wh_options.keys()),
+                    options=list(warehouse_options.keys()),
                     default=[],
-                    key="order_filter_source_wh",
-                    help="Filter by source warehouse"
+                    key="order_filter_source_wh"
                 )
-                source_warehouse_ids = [source_wh_options[w] for w in selected_source_wh]
+                source_warehouse_ids = [warehouse_options[w] for w in selected_source_wh]
             else:
                 st.multiselect("Source Warehouse", options=[], key="order_filter_source_wh_empty")
                 source_warehouse_ids = []
         
         with col3:
-            # Target Warehouse multiselect
-            target_wh_df = search_options.get('target_warehouses', pd.DataFrame())
-            if not target_wh_df.empty:
-                target_wh_options = {row['warehouse_name']: row['id'] for _, row in target_wh_df.iterrows()}
+            if not warehouses_df.empty:
                 selected_target_wh = st.multiselect(
                     "Target Warehouse",
-                    options=list(target_wh_options.keys()),
+                    options=list(warehouse_options.keys()),
                     default=[],
-                    key="order_filter_target_wh",
-                    help="Filter by target warehouse"
+                    key="order_filter_target_wh"
                 )
-                target_warehouse_ids = [target_wh_options[w] for w in selected_target_wh]
+                target_warehouse_ids = [warehouse_options[w] for w in selected_target_wh]
             else:
                 st.multiselect("Target Warehouse", options=[], key="order_filter_target_wh_empty")
                 target_warehouse_ids = []
         
         with col4:
-            # Order No multiselect
-            order_nos = search_options.get('order_nos', pd.DataFrame())
-            if not order_nos.empty:
-                order_no_list = order_nos['order_no'].tolist()
-                selected_order_nos = st.multiselect(
-                    "Order No",
-                    options=order_no_list,
-                    default=[],
-                    key="order_filter_order_nos",
-                    help="Filter by specific order numbers"
-                )
-            else:
-                st.multiselect("Order No", options=[], key="order_filter_order_nos_empty")
-                selected_order_nos = []
+            order_no_search = st.text_input(
+                "Order No",
+                placeholder="MO-2026...",
+                key="order_filter_order_no"
+            )
+            order_nos = [order_no_search.strip()] if order_no_search.strip() else []
         
-        # Row 3: Date filter section
         st.markdown("---")
-        st.markdown("##### 📅 Date Filter")
+        st.markdown("##### 📅 Date Range")
         
-        col1, col2, col3, col4 = st.columns([1.5, 1, 1, 1.5])
+        col1, col2, col3, col4 = st.columns([1, 1.5, 1.5, 2])
         
         with col1:
-            # Date type radio
-            date_type_display = st.radio(
-                "Filter by",
-                options=["Scheduled Date", "Order Date"],
+            date_type_display = st.selectbox(
+                "Filter By",
+                options=['scheduled', 'order'],
+                format_func=lambda x: '📅 Scheduled Date' if x == 'scheduled' else '📋 Order Date',
                 index=0 if date_type == 'scheduled' else 1,
-                key="order_filter_date_type",
-                horizontal=True,
-                help="Scheduled Date = ngày dự kiến sản xuất, Order Date = ngày tạo order"
+                key="order_filter_date_type"
             )
-            new_date_type = 'scheduled' if date_type_display == "Scheduled Date" else 'order'
             
-            # Update session state
-            if new_date_type != st.session_state.get('orders_date_type'):
-                st.session_state['orders_date_type'] = new_date_type
+            if date_type_display != date_type:
+                st.session_state.orders_date_type = date_type_display
+                default_from, default_to = get_default_date_range(date_type_display)
         
         with col2:
             from_date = st.date_input(
-                "From",
+                "From Date",
                 value=default_from,
-                key="order_filter_from"
+                key="order_filter_from_date"
             )
         
         with col3:
             to_date = st.date_input(
-                "To",
+                "To Date",
                 value=default_to,
-                key="order_filter_to"
+                key="order_filter_to_date"
             )
         
         with col4:
-            # Quick select presets
-            presets = get_date_filter_presets(include_future=(new_date_type == 'scheduled'))
+            include_future = date_type_display == 'scheduled'
+            presets = get_date_filter_presets(include_future=include_future)
             preset_names = ["Custom"] + list(presets.keys())
             
-            # Determine default preset based on date type
-            default_preset = "Next 30 Days" if new_date_type == 'scheduled' else "Last 30 Days"
-            default_preset_idx = preset_names.index(default_preset) if default_preset in preset_names else 0
-            
-            selected_preset = st.selectbox(
+            st.selectbox(
                 "Quick Select",
                 options=preset_names,
-                index=default_preset_idx,
-                key="order_filter_preset",
-                help="Choose a preset date range"
+                index=0,
+                key="order_filter_date_preset",
+                help="Quick date range presets"
             )
-            
-            # Apply preset if selected
-            if selected_preset != "Custom" and selected_preset in presets:
-                preset_from, preset_to = presets[selected_preset]
-                from_date = preset_from
-                to_date = preset_to
         
-        # Row 4: Conflict filters
         st.markdown("---")
         col1, col2, col3 = st.columns([1, 1, 2])
         
         with col1:
             conflicts_only = st.checkbox(
-                "🔴 Conflicts Only",
+                "⚠️ Show Conflicts Only",
                 value=st.session_state.get('orders_conflicts_only', False),
-                key="order_filter_conflicts_only",
-                help="Show only orders with BOM conflicts"
+                key="order_filter_conflicts_only"
             )
-            st.session_state['orders_conflicts_only'] = conflicts_only
+            st.session_state.orders_conflicts_only = conflicts_only
         
         with col2:
-            conflict_check_active_only = st.checkbox(
+            conflict_check_active = st.checkbox(
                 "Check Active BOMs Only",
                 value=st.session_state.get('orders_conflict_check_active_only', True),
-                key="order_filter_conflict_check_active",
-                help="Count only ACTIVE BOMs for conflict detection"
+                key="order_filter_conflict_active"
             )
-            st.session_state['orders_conflict_check_active_only'] = conflict_check_active_only
+            st.session_state.orders_conflict_check_active_only = conflict_check_active
     
     return {
         'status': status_list if status_list else None,
@@ -342,65 +311,40 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
         'brand_ids': brand_ids if brand_ids else None,
         'source_warehouse_ids': source_warehouse_ids if source_warehouse_ids else None,
         'target_warehouse_ids': target_warehouse_ids if target_warehouse_ids else None,
-        'order_nos': selected_order_nos if selected_order_nos else None,
+        'order_nos': order_nos if order_nos else None,
         'from_date': from_date,
         'to_date': to_date,
-        'date_type': new_date_type,
+        'date_type': date_type_display,
         'conflicts_only': conflicts_only,
-        'conflict_check_active_only': conflict_check_active_only
+        'conflict_check_active_only': conflict_check_active
     }
 
 
-# ==================== Order List ====================
+# ==================== BOM Conflict Warning ====================
 
 def _render_conflict_warning(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render BOM conflict warning banner if there are conflicts"""
+    """Render BOM conflict warning banner if conflicts exist"""
     conflict_summary = queries.get_bom_conflict_summary(
         active_only=filters.get('conflict_check_active_only', True),
         from_date=filters.get('from_date'),
         to_date=filters.get('to_date')
     )
     
-    conflict_count = conflict_summary['total_conflict_orders']
-    affected_products = conflict_summary['affected_products']
-    
-    if conflict_count > 0:
-        st.warning(
-            f"⚠️ **Warning:** {conflict_count} order(s) have BOM conflicts "
-            f"({affected_products} product(s) affected). "
-            f"Use '🔴 Conflicts Only' filter to review."
-        )
+    if conflict_summary['total_conflict_orders'] > 0:
+        st.warning(f"""
+        ⚠️ **BOM Conflict Alert:** {conflict_summary['total_conflict_orders']} order(s) 
+        affecting {conflict_summary['affected_products']} product(s) have multiple active BOMs.
+        """)
 
 
-def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
-    """
-    Render order list section
-    Delegates to fragment for optimized rerun scope
-    """
-    _fragment_order_list(queries, filters)
-
+# ==================== Order List ====================
 
 @st.fragment
-def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
-    """
-    Fragment: Order list with single-row selection
-    
-    Benefits of fragment isolation:
-    - Row selection only reruns this fragment, not entire page
-    - Pagination only reruns this fragment
-    - Dashboard and filters remain stable
-    
-    Uses st.dataframe with selection_mode="single-row" (Streamlit 1.35+)
-    """
+def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
+    """Render order list table with selection and pagination (Fragment)"""
+    page = st.session_state.get('orders_page', 1)
     page_size = OrderConstants.DEFAULT_PAGE_SIZE
-    page = st.session_state.orders_page
     
-    # Get filter options
-    conflicts_only = filters.get('conflicts_only', False)
-    conflict_check_active_only = filters.get('conflict_check_active_only', True)
-    date_type = filters.get('date_type', 'scheduled')
-    
-    # Get orders with all filter parameters
     orders = queries.get_orders(
         status=filters.get('status'),
         order_type=filters.get('order_type'),
@@ -413,19 +357,12 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         order_nos=filters.get('order_nos'),
         from_date=filters.get('from_date'),
         to_date=filters.get('to_date'),
-        date_type=date_type,
-        conflicts_only=conflicts_only,
-        conflict_check_active_only=conflict_check_active_only,
+        date_type=filters.get('date_type', 'scheduled'),
+        conflicts_only=filters.get('conflicts_only', False),
+        conflict_check_active_only=filters.get('conflict_check_active_only', True),
         page=page,
         page_size=page_size
     )
-    
-    # Check for connection error (returns None)
-    if orders is None:
-        error_msg = queries.get_last_error() or "Cannot connect to database"
-        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
-        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
-        return
     
     total_count = queries.get_orders_count(
         status=filters.get('status'),
@@ -439,94 +376,64 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         order_nos=filters.get('order_nos'),
         from_date=filters.get('from_date'),
         to_date=filters.get('to_date'),
-        date_type=date_type,
-        conflicts_only=conflicts_only,
-        conflict_check_active_only=conflict_check_active_only
+        date_type=filters.get('date_type', 'scheduled'),
+        conflicts_only=filters.get('conflicts_only', False),
+        conflict_check_active_only=filters.get('conflict_check_active_only', True)
     )
     
-    # Check for empty data (returns empty DataFrame)
-    if orders.empty:
-        if conflicts_only:
-            st.success("✅ No orders with BOM conflicts found!")
-        else:
-            st.info("📭 No orders found matching the filters")
+    if orders is None:
+        error_msg = queries.get_last_error() or "Failed to load orders"
+        st.error(f"❌ {error_msg}")
         return
     
-    # Prepare display dataframe (no Select column needed)
-    display_df = orders.copy()
+    if orders.empty:
+        st.info("📋 No orders found matching your filters")
+        return
     
-    display_df['status_display'] = display_df['status'].apply(create_status_indicator)
-    display_df['priority_display'] = display_df['priority'].apply(create_status_indicator)
+    display_df = orders.copy()
+    display_df['product_display'] = display_df.apply(format_product_display, axis=1)
     display_df['progress'] = display_df.apply(
-        lambda x: f"{format_number(x['produced_qty'], 0)}/{format_number(x['planned_qty'], 0)} {x['uom']}",
+        lambda r: f"{format_number(r['produced_qty'], 0)}/{format_number(r['planned_qty'], 0)} {r['uom']}", 
         axis=1
     )
-    display_df['product_display'] = display_df.apply(format_product_display, axis=1)
-    display_df['scheduled'] = display_df['scheduled_date'].apply(
-        lambda x: format_date(x, '%d/%m/%Y') if x else ''
+    display_df['status_display'] = display_df['status'].apply(create_status_indicator)
+    display_df['priority_display'] = display_df['priority'].apply(create_status_indicator)
+    display_df['scheduled_display'] = display_df['scheduled_date'].apply(format_date)
+    display_df['source_wh'] = display_df['warehouse_name'].apply(lambda x: x[:20] + '...' if len(str(x)) > 20 else x)
+    display_df['target_wh'] = display_df['target_warehouse_name'].apply(lambda x: x[:20] + '...' if len(str(x)) > 20 else x)
+    display_df['issues'] = display_df['bom_conflict_count'].apply(
+        lambda x: f"⚠️ {x} BOMs" if x > 1 else "-"
     )
     
-    # Issues column - show BOM conflict count if > 1
-    def format_issues(row):
-        conflict_count = row.get('bom_conflict_count', 1)
-        if conflict_count > 1:
-            return f"🔴 {conflict_count}"
-        return "-"
-    
-    display_df['issues'] = display_df.apply(format_issues, axis=1)
-    
-    # Prepare display columns
-    display_columns = [
-        'order_no', 'product_display', 'progress', 
-        'status_display', 'priority_display', 'issues', 'scheduled',
-        'warehouse_name', 'target_warehouse_name'
-    ]
-    
-    column_labels = {
+    display_columns = {
         'order_no': 'Order No',
         'product_display': 'Product',
         'progress': 'Progress',
         'status_display': 'Status',
         'priority_display': 'Priority',
         'issues': 'Issues',
-        'scheduled': 'Scheduled',
-        'warehouse_name': 'Source',
-        'target_warehouse_name': 'Target'
+        'scheduled_display': 'Scheduled',
+        'source_wh': 'Source',
+        'target_wh': 'Target'
     }
     
-    # Use st.dataframe with selection_mode for cleaner single-row selection
-    # on_select="rerun" triggers fragment-level rerun only (not full page)
-    selection_event = st.dataframe(
-        display_df[display_columns].rename(columns=column_labels),
+    table_df = display_df[list(display_columns.keys())].rename(columns=display_columns)
+    
+    selection = st.dataframe(
+        table_df,
         use_container_width=True,
         hide_index=True,
         selection_mode="single-row",
         on_select="rerun",
-        column_config={
-            'Issues': st.column_config.TextColumn(
-                'Issues',
-                help='🔴 N = Product has N active BOMs (conflict)',
-                width='small'
-            ),
-            'Order No': st.column_config.TextColumn(
-                'Order No',
-                width='medium'
-            ),
-            'Product': st.column_config.TextColumn(
-                'Product',
-                width='large'
-            ),
-        },
         key="orders_table"
     )
     
-    # Get selected row from event
-    selected_rows = selection_event.selection.rows if selection_event.selection else []
-    selected_idx = selected_rows[0] if selected_rows else None
+    selected_rows = selection.selection.rows if selection.selection else []
     
-    # Action buttons - only show when row is selected
-    if selected_idx is not None:
+    if selected_rows:
+        selected_idx = selected_rows[0]
         selected_order = orders.iloc[selected_idx]
+        
         order_id = selected_order['id']
         order_no = selected_order['order_no']
         status = selected_order['status']
@@ -534,7 +441,6 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         
         st.markdown("---")
         
-        # Show selected order info with conflict warning if applicable
         selected_info = f"**Selected:** `{order_no}` | Status: {create_status_indicator(status)} | {selected_order['product_name']}"
         if bom_conflict_count > 1:
             selected_info += f" | ⚠️ **BOM Conflict ({bom_conflict_count} active BOMs)**"
@@ -572,7 +478,6 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     else:
         st.info("💡 Click on a row to select an order and perform actions")
     
-    # Pagination (inside fragment for isolated rerun)
     st.markdown("---")
     total_pages = max(1, (total_count + page_size - 1) // page_size)
     
@@ -581,7 +486,6 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     with col1:
         if st.button("⬅️ Previous", disabled=page <= 1, key="btn_prev_page"):
             st.session_state.orders_page = max(1, page - 1)
-            # No explicit st.rerun() needed - fragment handles it
     
     with col2:
         st.markdown(f"<div style='text-align:center'>Page {page} of {total_pages} | Total: {total_count} orders</div>", unsafe_allow_html=True)
@@ -589,7 +493,6 @@ def _fragment_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     with col3:
         if st.button("Next ➡️", disabled=page >= total_pages, key="btn_next_page"):
             st.session_state.orders_page = page + 1
-            # No explicit st.rerun() needed - fragment handles it
 
 
 # ==================== Action Bar ====================
@@ -616,7 +519,6 @@ def _render_action_bar(queries: OrderQueries, filters: Dict[str, Any]):
 def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
     """Export orders to Excel"""
     with st.spinner("Exporting..."):
-        # Get all orders (no pagination)
         orders = queries.get_orders(
             status=filters.get('status'),
             order_type=filters.get('order_type'),
@@ -638,13 +540,9 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
             st.warning("No orders to export")
             return
         
-        # Prepare export dataframe with full product info
         export_df = orders.copy()
-        
-        # Add formatted product display column
         export_df['product_display'] = export_df.apply(format_product_display, axis=1)
         
-        # Select and rename columns
         export_df = export_df[[
             'order_no', 'order_date', 
             'pt_code', 'legacy_pt_code', 'product_name', 'package_size', 'brand_name',
@@ -655,7 +553,6 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
             'created_by_name'
         ]].copy()
         
-        # Fill empty legacy codes with 'NEW'
         export_df['legacy_pt_code'] = export_df['legacy_pt_code'].fillna('NEW').replace('', 'NEW')
         
         export_df.columns = [
@@ -684,16 +581,11 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
 # ==================== Main Render Function ====================
 
 def render_orders_tab():
-    """
-    Main function to render the Orders tab
-    Called from the main Production page
-    """
+    """Main function to render the Orders tab"""
     _init_session_state()
     
-    # Check for pending dialogs (e.g., confirm/cancel dialog triggered from detail dialog)
     check_pending_dialogs()
     
-    # Show success message if order was just created
     if st.session_state.get('order_created_success'):
         order_no = st.session_state.pop('order_created_success')
         st.success(f"✅ Order **{order_no}** created successfully!")
@@ -707,9 +599,7 @@ def render_orders_tab():
     
     queries = OrderQueries()
     
-    # Check current view
     if st.session_state.orders_view == 'create':
-        # Back button
         if st.button("⬅️ Back to List", key="btn_back_to_list"):
             st.session_state.orders_view = 'list'
             st.rerun()
@@ -717,19 +607,24 @@ def render_orders_tab():
         render_create_form()
         return
     
-    # List view
     st.subheader("📋 Production Orders")
     
-    # Render components
-    # Get conflict check option from session state
-    conflict_check_active_only = st.session_state.get('orders_conflict_check_active_only', True)
-    render_dashboard(conflict_check_active_only=conflict_check_active_only)
-
-    filters = _render_filter_bar(queries)
+    current_view = _render_view_switcher()
     
-    # Render BOM conflict warning banner
-    _render_conflict_warning(queries, filters)
-
-    _render_action_bar(queries, filters)
-
-    _render_order_list(queries, filters)
+    st.markdown("---")
+    
+    if current_view == 'pivot':
+        # Pivot View - already uses fragments internally
+        render_pivot_view()
+    else:
+        # List View
+        conflict_check_active_only = st.session_state.get('orders_conflict_check_active_only', True)
+        render_dashboard(conflict_check_active_only=conflict_check_active_only)
+        
+        filters = _render_filter_bar(queries)
+        
+        _render_conflict_warning(queries, filters)
+        
+        _render_action_bar(queries, filters)
+        
+        _render_order_list(queries, filters)

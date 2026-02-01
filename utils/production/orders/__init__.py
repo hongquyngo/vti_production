@@ -1,9 +1,9 @@
 # utils/production/orders/__init__.py
 """
 Production Orders Module
-Comprehensive order management with validation
+Comprehensive order management with validation and pivot analysis
 
-Version: 2.0.0
+Version: 2.1.0
 
 Components:
 - queries.py: Database queries (OrderQueries)
@@ -13,8 +13,16 @@ Components:
 - forms.py: Create/Edit forms (OrderForms)
 - dialogs.py: Action dialogs
 - dashboard.py: Dashboard metrics
+- pivot_view.py: Pivot analysis view
 - page.py: Main page orchestrator
 - common.py: Utilities and constants
+
+Changes:
+- v2.1.0: Added Pivot View for data analysis
+          + OrderPivotView class for pivot table generation
+          + render_pivot_view() convenience function
+          + Time grouping: Daily, Weekly, Monthly, Quarterly
+          + Multiple row dimensions and value metrics
 """
 
 # Export main classes
@@ -50,6 +58,7 @@ from .dialogs import (
     handle_row_action
 )
 from .dashboard import OrderDashboard, render_dashboard
+from .pivot_view import OrderPivotView, PivotViewConfig, render_pivot_view
 from .page import render_orders_tab
 from .common import (
     OrderConstants,
@@ -73,6 +82,8 @@ __all__ = [
     'OrderValidators',
     'OrderForms',
     'OrderDashboard',
+    'OrderPivotView',
+    'PivotViewConfig',
     
     # Validation
     'ValidationResults',
@@ -101,8 +112,9 @@ __all__ = [
     'check_pending_dialogs',
     'handle_row_action',
     
-    # Dashboard & Page
+    # Dashboard, Pivot & Page
     'render_dashboard',
+    'render_pivot_view',
     'render_orders_tab',
     
     # Common utilities
