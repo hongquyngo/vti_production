@@ -197,7 +197,7 @@ def _render_action_bar(queries: OverviewQueries, filters: Dict[str, Any]):
 
 
 def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, Any]):
-    """Export Production Data to Excel (2 sheets: Export Info + Production Data)"""
+    """Export Production Data to Excel (3 sheets: Export Info + MISA Format + Detail)"""
     with st.spinner("Exporting..."):
         # Get production data (1 row = 1 issue detail)
         df = queries.get_materials_for_export(
@@ -290,6 +290,149 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             'Return Date', 'Material Status', 'Issue %'
         ]
         
+        # ---- MISA Format: Aggregate by MO + actual material code ----
+        # MISA does not allow duplicate material codes per MO,
+        # so we merge batch-level rows into 1 row per unique material per MO
+        
+        def _concat_unique(series):
+            """Concatenate unique non-empty values, sorted"""
+            vals = sorted(set(
+                str(v).strip() for v in series
+                if pd.notna(v) and str(v).strip()
+            ))
+            return ', '.join(vals) if vals else ''
+        
+        misa_df = df.groupby(
+            ['order_no', 'actual_material_id'], sort=False
+        ).agg({
+            # MO Header (first - same for all rows of same MO)
+            'order_date': 'first',
+            'scheduled_date': 'first',
+            'completion_date': 'first',
+            'order_status': 'first',
+            'priority': 'first',
+            'health_status': 'first',
+            # Output Product (first - same for all rows of same MO)
+            'output_pt_code': 'first',
+            'output_legacy_display': 'first',
+            'output_product_name': 'first',
+            'output_package_size': 'first',
+            'output_brand': 'first',
+            'bom_type': 'first',
+            # MO Quantities (first - same for all rows of same MO)
+            'mo_planned_qty': 'first',
+            'mo_uom': 'first',
+            'mo_produced_qty': 'first',
+            'progress_percentage': 'first',
+            # QC (first - same for all rows of same MO)
+            'total_receipts': 'first',
+            'passed_qty': 'first',
+            'failed_qty': 'first',
+            'pending_qty': 'first',
+            'qc_pass_percentage': 'first',
+            # Warehouses
+            'source_warehouse': 'first',
+            'target_warehouse': 'first',
+            # Material Type & Status
+            'material_type': 'first',
+            'material_status': 'first',
+            # Primary Material (reference - first value)
+            'primary_pt_code': 'first',
+            'primary_legacy_display': 'first',
+            'primary_material_name': 'first',
+            'primary_package_size': 'first',
+            'primary_brand': 'first',
+            'primary_required_qty': 'first',
+            'primary_uom': 'first',
+            # Actual Material (same for same actual_material_id)
+            'actual_pt_code': 'first',
+            'actual_legacy_display': 'first',
+            'actual_material_name': 'first',
+            'actual_package_size': 'first',
+            'actual_brand': 'first',
+            # Quantities (SUM - the key aggregation for MISA)
+            'issued_qty': 'sum',
+            'returned_qty': 'sum',
+            'net_qty': 'sum',
+            'issued_uom': 'first',
+            # Earliest issue date for reference
+            'issue_date': 'min',
+            # Concat batch and issue document numbers for traceability
+            'batch_no': _concat_unique,
+            'issue_no': _concat_unique,
+        }).reset_index()
+        
+        # Recalculate issue percentage after aggregation
+        misa_df['issue_percentage'] = misa_df.apply(
+            lambda r: round(r['issued_qty'] / r['primary_required_qty'] * 100, 1)
+            if r['material_type'] == 'PRIMARY' and (r['primary_required_qty'] or 0) > 0
+            else None, axis=1
+        )
+        
+        # Sort for consistent output
+        misa_df = misa_df.sort_values(
+            ['order_no', 'actual_pt_code']
+        ).reset_index(drop=True)
+        
+        # Prepare MISA export dataframe with renamed columns
+        misa_export_df = misa_df[[
+            # MO Header
+            'order_no', 'order_date', 'scheduled_date', 'completion_date',
+            'order_status', 'priority', 'health_status',
+            # Output Product
+            'output_pt_code', 'output_legacy_display', 'output_product_name',
+            'output_package_size', 'output_brand', 'bom_type',
+            # MO Quantities & Progress
+            'mo_planned_qty', 'mo_uom', 'mo_produced_qty', 'progress_percentage',
+            # QC & Receipts
+            'total_receipts', 'passed_qty', 'failed_qty', 'pending_qty', 'qc_pass_percentage',
+            # Warehouses
+            'source_warehouse', 'target_warehouse',
+            # Material Type
+            'material_type',
+            # Primary Material (Requirement)
+            'primary_pt_code', 'primary_legacy_display', 'primary_material_name',
+            'primary_package_size', 'primary_brand', 'primary_required_qty', 'primary_uom',
+            # Actual Material (Issued)
+            'actual_pt_code', 'actual_legacy_display', 'actual_material_name',
+            'actual_package_size', 'actual_brand',
+            # Quantities (aggregated)
+            'issued_qty', 'returned_qty', 'net_qty', 'issued_uom', 'issue_percentage',
+            # Reference
+            'issue_date', 'batch_no', 'issue_no', 'material_status',
+        ]].copy()
+        
+        misa_export_df.columns = [
+            # MO Header
+            'Order No', 'Order Date', 'Scheduled Date', 'Completion Date',
+            'Status', 'Priority', 'Health',
+            # Output Product
+            'Output PT Code', 'Output Legacy Code', 'Output Product Name',
+            'Output Package Size', 'Output Brand', 'BOM Type',
+            # MO Quantities & Progress
+            'Planned Qty', 'UOM', 'Produced Qty', 'Progress %',
+            # QC & Receipts
+            'Receipts', 'QC Passed', 'QC Failed', 'QC Pending', 'QC Pass %',
+            # Warehouses
+            'Source WH', 'Target WH',
+            # Material Type
+            'Material Type',
+            # Primary Material (Requirement)
+            'Primary PT Code', 'Primary Legacy Code', 'Primary Material Name',
+            'Primary Package Size', 'Primary Brand', 'Required Qty', 'Required UOM',
+            # Actual Material (Issued)
+            'Actual PT Code', 'Actual Legacy Code', 'Actual Material Name',
+            'Actual Package Size', 'Actual Brand',
+            # Quantities (aggregated)
+            'Issued Qty', 'Returned Qty', 'Net Qty', 'Issued UOM', 'Issue %',
+            # Reference
+            'Earliest Issue Date', 'Batches', 'Issue Nos', 'Material Status',
+        ]
+        
+        # MISA summary metrics for metadata
+        misa_line_count = len(misa_df)
+        misa_merged_count = len(df) - misa_line_count
+        
         # Create metadata dataframe
         now = get_vietnam_now()
         
@@ -333,7 +476,11 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             ['Export Time', now.strftime('%H:%M:%S')],
             ['Exported By', current_user],
             ['', ''],
-            ['Data Structure', '1 row = 1 material issue detail (PRIMARY or ALTERNATIVE)'],
+            ['Data Structure', 'MISA Format: 1 row per unique material per MO; Detail: 1 row per issue detail'],
+            ['', ''],
+            ['Sheet Descriptions', ''],
+            ['MISA Format', 'Aggregated by MO + actual material code, batches merged - ready for MISA import'],
+            ['Detail', 'Full breakdown by batch (1 row = 1 material issue detail, PRIMARY or ALTERNATIVE)'],
             ['', ''],
             ['Filter Conditions', ''],
             ['Date Preset', date_preset_label],
@@ -345,6 +492,8 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             ['Data Summary', ''],
             ['Total Orders', total_orders],
             ['Total Issue Lines', total_issue_lines],
+            ['MISA Format Lines', misa_line_count],
+            ['Batches Merged', f'{total_issue_lines} detail → {misa_line_count} MISA ({misa_merged_count} rows merged)'],
             ['Primary Material Issues', primary_count],
             ['Alternative Material Issues', alt_count],
             ['Total Issued (Physical)', format_number(total_issued, 2)],
@@ -364,7 +513,7 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             ['Delayed', len(orders_df[orders_df['health_status'] == 'DELAYED'])],
             ['Not Started', len(orders_df[orders_df['health_status'] == 'NOT_STARTED'])],
             ['', ''],
-            ['Column Definitions', ''],
+            ['Column Definitions (both sheets)', ''],
             ['Material Type', 'PRIMARY = primary material issued, ALTERNATIVE = alternative material used'],
             ['Primary PT Code', 'Original required material (from BOM)'],
             ['Actual PT Code', 'Actual material issued (could be primary or alternative)'],
@@ -374,14 +523,21 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             ['Net Qty', 'Net quantity = Issued - Returned (physical units)'],
             ['Issued UOM', 'UOM of ACTUAL material issued'],
             ['Issue %', 'For PRIMARY materials: Issued / Required × 100; NULL for alternatives'],
+            ['', ''],
+            ['MISA Format Specific', ''],
+            ['Aggregation', 'Rows grouped by Order No + Actual Material Code; quantities summed across batches'],
+            ['Batches', 'Comma-separated list of batch numbers from merged rows'],
+            ['Issue Nos', 'Comma-separated list of issue document numbers from merged rows'],
+            ['Earliest Issue Date', 'Earliest issue date among merged rows'],
         ]
         
         metadata_df = pd.DataFrame(metadata, columns=['Field', 'Value'])
         
-        # Export with 2 sheets only
+        # Export with 3 sheets: Export Info + MISA Format + Detail
         excel_data = export_to_excel({
             'Export Info': metadata_df,
-            'Production Data': export_df
+            'MISA Format': misa_export_df,
+            'Detail': export_df
         })
         
         # Filename with timestamp
