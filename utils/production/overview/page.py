@@ -36,6 +36,11 @@ from .common import (
     get_date_presets, get_preset_label, export_to_excel,
     OverviewConstants, HealthStatus, calculate_days_variance, get_variance_display,
     calculate_health_status,
+    # Date type / Pivot helpers
+    DateType, PeriodType, DimensionType, MeasureType,
+    DATE_TYPE_LABELS, PERIOD_LABELS, DIMENSION_LABELS, MEASURE_LABELS,
+    get_date_type_label, get_measures_for_date_type, get_dimensions_for_date_type,
+    format_period_label,
     # Chart helpers
     create_yield_by_product_chart, create_schedule_performance_chart,
     create_material_efficiency_chart, create_health_summary_chart,
@@ -52,6 +57,9 @@ def _init_session_state():
     defaults = {
         'overview_page': 1,
         'overview_date_preset': OverviewConstants.DATE_PRESET_THIS_MONTH,
+        'overview_date_type': DateType.ORDER_DATE.value,
+        'overview_pivot_period': PeriodType.DAY.value,
+        'overview_pivot_dimension': DimensionType.OUTPUT_PRODUCT.value,
     }
     
     for key, value in defaults.items():
@@ -61,13 +69,25 @@ def _init_session_state():
 # ==================== Filter Bar ====================
 
 def _render_filter_bar() -> Dict[str, Any]:
-    """Render filter bar and return selected filters"""
+    """Render filter bar and return selected filters (including date_type)"""
     presets = get_date_presets()
     today = get_vietnam_today()
     
-    col1, col2, col3, col4, col5 = st.columns([1.5, 1, 1, 1, 1.5])
+    col1, col2, col3, col4, col5, col6 = st.columns([1.2, 1.2, 0.8, 0.8, 1, 1.5])
     
     with col1:
+        date_type_options = [dt.value for dt in DateType]
+        date_type = st.selectbox(
+            "🗓️ Date Type",
+            options=date_type_options,
+            format_func=lambda x: get_date_type_label(DateType(x)),
+            index=date_type_options.index(st.session_state.overview_date_type)
+                  if st.session_state.overview_date_type in date_type_options else 0,
+            key="filter_date_type"
+        )
+        st.session_state.overview_date_type = date_type
+    
+    with col2:
         # Include Custom option (not in presets dict)
         preset_options = [
             OverviewConstants.DATE_PRESET_THIS_MONTH,
@@ -85,7 +105,7 @@ def _render_filter_bar() -> Dict[str, Any]:
         )
         st.session_state.overview_date_preset = date_preset
     
-    with col2:
+    with col3:
         if date_preset == OverviewConstants.DATE_PRESET_CUSTOM:
             from_date = st.date_input(
                 "From",
@@ -96,7 +116,7 @@ def _render_filter_bar() -> Dict[str, Any]:
             from_date = presets[date_preset][0]
             st.text_input("From", value=format_date(from_date), disabled=True)
     
-    with col3:
+    with col4:
         if date_preset == OverviewConstants.DATE_PRESET_CUSTOM:
             to_date = st.date_input(
                 "To",
@@ -107,7 +127,7 @@ def _render_filter_bar() -> Dict[str, Any]:
             to_date = presets[date_preset][1]
             st.text_input("To", value=format_date(to_date), disabled=True)
     
-    with col4:
+    with col5:
         status_options = ['All', 'DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']
         status = st.selectbox(
             "📋 Status",
@@ -115,7 +135,7 @@ def _render_filter_bar() -> Dict[str, Any]:
             key="filter_status"
         )
     
-    with col5:
+    with col6:
         search = st.text_input(
             "🔍 Search",
             placeholder="Order No, Product, PT Code...",
@@ -123,6 +143,7 @@ def _render_filter_bar() -> Dict[str, Any]:
         )
     
     return {
+        'date_type': date_type,
         'from_date': from_date,
         'to_date': to_date,
         'status': status if status != 'All' else None,
@@ -204,7 +225,8 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             from_date=filters['from_date'],
             to_date=filters['to_date'],
             status=filters['status'],
-            search=filters['search']
+            search=filters['search'],
+            date_type=filters.get('date_type')
         )
         
         if df is None or df.empty:
@@ -483,6 +505,7 @@ def _export_production_data_excel(queries: OverviewQueries, filters: Dict[str, A
             ['Detail', 'Full breakdown by batch (1 row = 1 material issue detail, PRIMARY or ALTERNATIVE)'],
             ['', ''],
             ['Filter Conditions', ''],
+            ['Date Type', get_date_type_label(DateType(filters.get('date_type', 'order_date')))],
             ['Date Preset', date_preset_label],
             ['From Date', format_date(filters.get('from_date'))],
             ['To Date', format_date(filters.get('to_date'))],
@@ -746,38 +769,286 @@ def _render_production_data_table_with_data(queries: OverviewQueries, filters: D
     return df
 
 
-# ==================== Main Render Function ====================
+# ==================== Pivot View ====================
 
-def render_overview_tab():
+def _render_pivot_controls(filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Render pivot-specific controls and return configuration"""
+    date_type = filters.get('date_type', 'order_date')
+    
+    available_measures = get_measures_for_date_type(date_type)
+    available_dimensions = get_dimensions_for_date_type(date_type)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        period_options = [p.value for p in PeriodType]
+        current_period = st.session_state.get('overview_pivot_period', PeriodType.MONTH.value)
+        period = st.selectbox(
+            "⏱️ Period",
+            options=period_options,
+            format_func=lambda x: PERIOD_LABELS.get(PeriodType(x), x),
+            index=period_options.index(current_period) if current_period in period_options else 0,
+            key="pivot_period"
+        )
+        st.session_state.overview_pivot_period = period
+    
+    with col2:
+        dim_options = [d.value for d in available_dimensions]
+        current_dim = st.session_state.get('overview_pivot_dimension', DimensionType.OUTPUT_PRODUCT.value)
+        if current_dim not in dim_options:
+            current_dim = dim_options[0]
+        dimension = st.selectbox(
+            "📊 Group by",
+            options=dim_options,
+            format_func=lambda x: DIMENSION_LABELS.get(DimensionType(x), x),
+            index=dim_options.index(current_dim) if current_dim in dim_options else 0,
+            key="pivot_dimension"
+        )
+        st.session_state.overview_pivot_dimension = dimension
+    
+    with col3:
+        measure_options = [m.value for m in available_measures]
+        # Default: produced_qty for MO-level, receipt_qty for receipt-level
+        default_measure = 'receipt_qty' if date_type == 'receipt_date' else 'produced_qty'
+        if default_measure not in measure_options:
+            default_measure = measure_options[0]
+        measure = st.selectbox(
+            "📐 Measure",
+            options=measure_options,
+            format_func=lambda x: MEASURE_LABELS.get(MeasureType(x), x),
+            index=measure_options.index(default_measure) if default_measure in measure_options else 0,
+            key="pivot_measure"
+        )
+    
+    return {
+        'period': period,
+        'dimension': dimension,
+        'measure': measure,
+    }
+
+
+def _build_pivot_table(df: pd.DataFrame, measure: str, period_type: str) -> pd.DataFrame:
     """
-    Main function to render the Production Overview tab
-    Single table view with all data combined
+    Convert flat query result (period_key × dimension_key × measures)
+    into a crosstab pivot table with totals.
+    
+    Args:
+        df: Raw query result from get_pivot_data()
+        measure: Column name of the measure to display
+        period_type: PeriodType value for label formatting
+    
+    Returns:
+        Pivot DataFrame with dimensions as rows, periods as columns, + Total column
     """
-    _init_session_state()
+    if df.empty or measure not in df.columns:
+        return pd.DataFrame()
     
-    queries = OverviewQueries()
+    # Create pivot
+    pivot = df.pivot_table(
+        index='dimension_key',
+        columns='period_key',
+        values=measure,
+        aggfunc='sum',
+        fill_value=0
+    )
     
-    # Header
-    st.subheader("📊 Production Overview")
-    st.caption("Monitor production workflow: Orders → Materials → Production → Quality")
+    # Sort columns chronologically (period_key is already sortable: YYYY-MM or YYYY-MM-DD)
+    pivot = pivot.reindex(sorted(pivot.columns), axis=1)
     
-    # Filters
-    filters = _render_filter_bar()
+    # Rename columns with formatted period labels
+    pivot.columns = [format_period_label(col, period_type) for col in pivot.columns]
     
-    # Dashboard KPIs
-    render_dashboard(from_date=filters['from_date'], to_date=filters['to_date'])
+    # Add row total
+    pivot['Total'] = pivot.sum(axis=1)
     
-    st.markdown("---")
+    # Sort by total descending
+    pivot = pivot.sort_values('Total', ascending=False)
     
-    # Get data first for analytics
+    # Add grand total row
+    grand_total = pivot.sum(axis=0)
+    grand_total.name = '📊 Grand Total'
+    pivot = pd.concat([pivot, grand_total.to_frame().T])
+    
+    # For percentage measures, recalculate total as average instead of sum
+    if measure in ('yield_pct', 'pass_rate_pct'):
+        # Recalculate: grand total row should be weighted average, not sum
+        # For simplicity, mark totals as N/A for percentage measures
+        # and show average in the row
+        data_rows = pivot.iloc[:-1]  # exclude grand total
+        if not data_rows.empty:
+            avg_row = data_rows.mean(axis=0).round(1)
+            avg_row.name = '📊 Average'
+            pivot = pd.concat([data_rows, avg_row.to_frame().T])
+    
+    # Round numeric values
+    pivot = pivot.round(1)
+    
+    return pivot
+
+
+def _render_pivot_chart(pivot_df: pd.DataFrame, config: Dict[str, Any]):
+    """Render a bar chart for pivot data"""
+    if not PLOTLY_AVAILABLE or pivot_df.empty:
+        return
+    
+    import plotly.graph_objects as go
+    
+    # Remove grand total / average row for chart
+    chart_df = pivot_df.iloc[:-1].copy()  # exclude last summary row
+    if chart_df.empty:
+        return
+    
+    # Remove Total column for chart
+    if 'Total' in chart_df.columns:
+        chart_df = chart_df.drop(columns=['Total'])
+    
+    # Limit to top 10 dimensions for readability
+    if len(chart_df) > 10:
+        chart_df = chart_df.head(10)
+    
+    fig = go.Figure()
+    
+    for col in chart_df.columns:
+        fig.add_trace(go.Bar(
+            name=col,
+            x=chart_df.index,
+            y=chart_df[col],
+            text=chart_df[col].apply(lambda x: f'{x:,.0f}' if x >= 1 else f'{x:.1f}'),
+            textposition='auto'
+        ))
+    
+    measure_label = MEASURE_LABELS.get(MeasureType(config['measure']), config['measure'])
+    dim_label = DIMENSION_LABELS.get(DimensionType(config['dimension']), config['dimension'])
+    
+    fig.update_layout(
+        title=f'{measure_label} by {dim_label}',
+        barmode='group',
+        height=400,
+        margin=dict(l=20, r=20, t=40, b=80),
+        xaxis_tickangle=-45,
+        showlegend=True,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_pivot_view(queries: OverviewQueries, filters: Dict[str, Any]):
+    """Render the complete Pivot View tab"""
+    
+    # Pivot controls
+    pivot_config = _render_pivot_controls(filters)
+    
+    # Fetch pivot data
+    with st.spinner("Loading pivot data..."):
+        df = queries.get_pivot_data(
+            date_type=filters.get('date_type', 'order_date'),
+            from_date=filters['from_date'],
+            to_date=filters['to_date'],
+            status=filters['status'],
+            period=pivot_config['period'],
+            dimension=pivot_config['dimension'],
+        )
+    
+    if df is None:
+        st.error("❌ Failed to load pivot data. Please check database connection.")
+        return
+    
+    if df.empty:
+        st.info("📭 No data found for selected filters and configuration.")
+        return
+    
+    # Build pivot table
+    measure = pivot_config['measure']
+    period_type = pivot_config['period']
+    pivot_table = _build_pivot_table(df, measure, period_type)
+    
+    if pivot_table.empty:
+        st.warning("Could not build pivot table for selected measure.")
+        return
+    
+    # Summary line
+    measure_label = MEASURE_LABELS.get(MeasureType(measure), measure)
+    dim_label = DIMENSION_LABELS.get(DimensionType(pivot_config['dimension']), pivot_config['dimension'])
+    period_label = PERIOD_LABELS.get(PeriodType(period_type), period_type)
+    
+    num_periods = len(pivot_table.columns) - 1  # exclude Total column
+    num_dimensions = len(pivot_table) - 1  # exclude grand total row
+    
+    st.markdown(f"### 📊 {measure_label} by {dim_label} ({period_label})")
+    st.caption(f"{num_dimensions} groups × {num_periods} periods")
+    
+    # Display pivot table
+    st.dataframe(
+        pivot_table,
+        use_container_width=True,
+        height=min(600, 60 + len(pivot_table) * 35)
+    )
+    
+    # Chart (in expander)
+    with st.expander("📈 Pivot Chart", expanded=True):
+        _render_pivot_chart(pivot_table, pivot_config)
+    
+    # Export pivot
+    col1, col2, col3 = st.columns([1, 1, 2])
+    with col1:
+        if st.button("📥 Export Pivot", key="btn_export_pivot"):
+            try:
+                # Build export metadata
+                now = get_vietnam_now()
+                date_type_display = get_date_type_label(
+                    DateType(filters.get('date_type', 'order_date'))
+                )
+                
+                pivot_meta = pd.DataFrame([
+                    ['Report', 'Production Pivot Analysis'],
+                    ['Export Date', now.strftime('%Y-%m-%d %H:%M:%S')],
+                    ['Date Type', date_type_display],
+                    ['Period', period_label],
+                    ['Group By', dim_label],
+                    ['Measure', measure_label],
+                    ['From', format_date(filters.get('from_date'))],
+                    ['To', format_date(filters.get('to_date'))],
+                    ['Status Filter', filters.get('status') or 'All'],
+                ], columns=['Field', 'Value'])
+                
+                # Reset index name for clean export
+                export_pivot = pivot_table.copy()
+                export_pivot.index.name = dim_label
+                
+                excel_data = export_to_excel({
+                    'Pivot Info': pivot_meta,
+                    'Pivot Table': export_pivot,
+                }, include_index=True)
+                
+                timestamp = now.strftime('%Y%m%d_%H%M%S')
+                st.download_button(
+                    label="💾 Download Pivot Excel",
+                    data=excel_data,
+                    file_name=f"Production_Pivot_{timestamp}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_pivot_excel"
+                )
+            except Exception as e:
+                st.error(f"Export error: {e}")
+
+
+# ==================== Detail View (extracted) ====================
+
+def _render_detail_view(queries: OverviewQueries, filters: Dict[str, Any]):
+    """Render the Detail View tab (original production data table + analytics)"""
+    date_type = filters.get('date_type')
+    
+    # Get data for analytics + table
     df = queries.get_materials_for_export(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
         status=filters['status'],
-        search=filters['search']
+        search=filters['search'],
+        date_type=date_type
     )
     
-    # Analytics section (above table, like original layout)
+    # Analytics section
     if df is not None and not df.empty:
         # Calculate health status for analytics
         df['health_status'] = df.apply(
@@ -790,8 +1061,7 @@ def render_overview_tab():
             axis=1
         )
         
-        # For analytics, we need order-level data (aggregate from issue details)
-        # Group by order to get unique MOs
+        # For analytics, aggregate to order-level from issue details
         orders_df = df.groupby('mo_id').agg({
             'order_no': 'first',
             'order_status': 'first',
@@ -804,14 +1074,14 @@ def render_overview_tab():
             'health_status': 'first'
         }).reset_index()
         
-        # Map columns to match what analytics functions expect
+        # Map columns to match analytics function expectations
         orders_df['product_name'] = orders_df['output_product_name']
         orders_df['planned_qty'] = orders_df['mo_planned_qty']
         orders_df['produced_qty'] = orders_df['mo_produced_qty']
         orders_df['quality_percentage'] = orders_df['qc_pass_percentage']
         orders_df['status'] = orders_df['order_status']
         
-        # Calculate aggregate material_percentage per order (avg of primary issues only)
+        # Calculate aggregate material_percentage per order
         primary_df = df[df['material_type'] == 'PRIMARY'].copy()
         if not primary_df.empty:
             material_pct_by_order = primary_df.groupby('mo_id')['issue_percentage'].mean().reset_index()
@@ -821,11 +1091,44 @@ def render_overview_tab():
             orders_df['material_percentage'] = 0
         
         _render_analytics_section(orders_df)
-        
-        st.markdown("---")
     
     # Action bar
     _render_action_bar(queries, filters)
     
     # Main Production Data table
     _render_production_data_table_with_data(queries, filters, df)
+
+
+# ==================== Main Render Function ====================
+
+def render_overview_tab():
+    """
+    Main function to render the Production Overview tab.
+    Uses tabs for Detail View and Pivot View.
+    """
+    _init_session_state()
+    
+    queries = OverviewQueries()
+    
+    # Header
+    st.subheader("📊 Production Overview")
+    st.caption("Monitor production workflow: Orders → Materials → Production → Quality")
+    
+    # Shared filters (Date Type, Date Range, Status, Search)
+    filters = _render_filter_bar()
+    
+    # Dashboard KPIs
+    render_dashboard(
+        from_date=filters['from_date'],
+        to_date=filters['to_date'],
+        date_type=filters.get('date_type')
+    )
+    
+    # Tabs: Detail View and Pivot View
+    tab_detail, tab_pivot = st.tabs(["📋 Detail View", "📊 Pivot View"])
+    
+    with tab_detail:
+        _render_detail_view(queries, filters)
+    
+    with tab_pivot:
+        _render_pivot_view(queries, filters)

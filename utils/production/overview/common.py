@@ -78,6 +78,48 @@ class HealthStatus(Enum):
     NOT_STARTED = "NOT_STARTED"
 
 
+class DateType(Enum):
+    """Date type for filtering and pivot grouping"""
+    ORDER_DATE = "order_date"
+    SCHEDULED_DATE = "scheduled_date"
+    COMPLETION_DATE = "completion_date"
+    RECEIPT_DATE = "receipt_date"
+
+
+class PeriodType(Enum):
+    """Time period for pivot grouping"""
+    DAY = "day"
+    WEEK = "week"
+    MONTH = "month"
+
+
+class DimensionType(Enum):
+    """Dimension (row) for pivot grouping"""
+    MO_NUMBER = "mo_number"
+    OUTPUT_PRODUCT = "output_product"
+    BRAND = "brand"
+    BOM_TYPE = "bom_type"
+    SOURCE_WAREHOUSE = "source_warehouse"
+    TARGET_WAREHOUSE = "target_warehouse"
+    ORDER_STATUS = "order_status"
+    PRIORITY = "priority"
+    ENTITY = "entity"
+    QC_STATUS = "qc_status"
+
+
+class MeasureType(Enum):
+    """Measure (value) for pivot aggregation"""
+    MO_COUNT = "mo_count"
+    PLANNED_QTY = "planned_qty"
+    PRODUCED_QTY = "produced_qty"
+    RECEIPT_QTY = "receipt_qty"
+    QC_PASSED_QTY = "qc_passed_qty"
+    QC_FAILED_QTY = "qc_failed_qty"
+    QC_PENDING_QTY = "qc_pending_qty"
+    YIELD_PCT = "yield_pct"
+    PASS_RATE_PCT = "pass_rate_pct"
+
+
 # ==================== Timezone Helpers ====================
 
 def get_vietnam_now() -> datetime:
@@ -131,6 +173,138 @@ def get_preset_label(preset: str) -> str:
         OverviewConstants.DATE_PRESET_CUSTOM: "🔧 Custom Range",
     }
     return labels.get(preset, preset)
+
+
+# ==================== Pivot / Date Type Helpers ====================
+
+DATE_TYPE_LABELS = {
+    DateType.ORDER_DATE: "📅 Order Date",
+    DateType.SCHEDULED_DATE: "📆 Scheduled Date",
+    DateType.COMPLETION_DATE: "✅ Completion Date",
+    DateType.RECEIPT_DATE: "📦 Receipt Date",
+}
+
+PERIOD_LABELS = {
+    PeriodType.DAY: "Day",
+    PeriodType.WEEK: "Week",
+    PeriodType.MONTH: "Month",
+}
+
+DIMENSION_LABELS = {
+    DimensionType.MO_NUMBER: "MO Number",
+    DimensionType.OUTPUT_PRODUCT: "Output Product",
+    DimensionType.BRAND: "Brand",
+    DimensionType.BOM_TYPE: "BOM Type",
+    DimensionType.SOURCE_WAREHOUSE: "Source Warehouse",
+    DimensionType.TARGET_WAREHOUSE: "Target Warehouse",
+    DimensionType.ORDER_STATUS: "Order Status",
+    DimensionType.PRIORITY: "Priority",
+    DimensionType.ENTITY: "Entity (Company)",
+    DimensionType.QC_STATUS: "QC Status",
+}
+
+MEASURE_LABELS = {
+    MeasureType.MO_COUNT: "MO Count",
+    MeasureType.PLANNED_QTY: "Planned Qty",
+    MeasureType.PRODUCED_QTY: "Produced Qty",
+    MeasureType.RECEIPT_QTY: "Receipt Qty",
+    MeasureType.QC_PASSED_QTY: "QC Passed Qty",
+    MeasureType.QC_FAILED_QTY: "QC Failed Qty",
+    MeasureType.QC_PENDING_QTY: "QC Pending Qty",
+    MeasureType.YIELD_PCT: "Yield %",
+    MeasureType.PASS_RATE_PCT: "Pass Rate %",
+}
+
+# Measures available per date type category
+MO_LEVEL_MEASURES = [
+    MeasureType.MO_COUNT,
+    MeasureType.PLANNED_QTY,
+    MeasureType.PRODUCED_QTY,
+    MeasureType.YIELD_PCT,
+]
+
+RECEIPT_LEVEL_MEASURES = [
+    MeasureType.MO_COUNT,
+    MeasureType.RECEIPT_QTY,
+    MeasureType.QC_PASSED_QTY,
+    MeasureType.QC_FAILED_QTY,
+    MeasureType.QC_PENDING_QTY,
+    MeasureType.PASS_RATE_PCT,
+]
+
+# Dimensions available per date type
+MO_LEVEL_DIMENSIONS = [
+    DimensionType.MO_NUMBER,
+    DimensionType.OUTPUT_PRODUCT,
+    DimensionType.BRAND,
+    DimensionType.BOM_TYPE,
+    DimensionType.SOURCE_WAREHOUSE,
+    DimensionType.TARGET_WAREHOUSE,
+    DimensionType.ORDER_STATUS,
+    DimensionType.PRIORITY,
+    DimensionType.ENTITY,
+]
+
+RECEIPT_LEVEL_DIMENSIONS = MO_LEVEL_DIMENSIONS + [DimensionType.QC_STATUS]
+
+
+def get_date_type_label(dt: DateType) -> str:
+    """Get display label for date type"""
+    return DATE_TYPE_LABELS.get(dt, str(dt.value))
+
+
+def get_measures_for_date_type(date_type: str) -> List[MeasureType]:
+    """Get available measures for a given date type"""
+    if date_type == DateType.RECEIPT_DATE.value:
+        return RECEIPT_LEVEL_MEASURES
+    return MO_LEVEL_MEASURES
+
+
+def get_dimensions_for_date_type(date_type: str) -> List[DimensionType]:
+    """Get available dimensions for a given date type"""
+    if date_type == DateType.RECEIPT_DATE.value:
+        return RECEIPT_LEVEL_DIMENSIONS
+    return MO_LEVEL_DIMENSIONS
+
+
+def get_date_type_info_note(date_type: str) -> Optional[str]:
+    """Get info note for specific date types"""
+    notes = {
+        DateType.COMPLETION_DATE.value: "ℹ️ Showing only completed orders (orders without completion date are excluded)",
+        DateType.RECEIPT_DATE.value: "ℹ️ Showing orders with production receipts in selected period",
+    }
+    return notes.get(date_type)
+
+
+def format_period_label(period_key: str, period_type: str) -> str:
+    """
+    Format period key into display label
+    
+    Args:
+        period_key: Raw period key from SQL (e.g. '2026-02', '2026-02-03', '2026-01-27')
+        period_type: PeriodType value
+    
+    Returns:
+        Formatted label
+    """
+    from datetime import datetime as dt_cls
+    try:
+        if period_type == PeriodType.MONTH.value:
+            # '2026-02' → 'Feb 2026'
+            d = dt_cls.strptime(period_key, '%Y-%m')
+            return d.strftime('%b %Y')
+        elif period_type == PeriodType.WEEK.value:
+            # '2026-01-27' (Monday) → 'W05 (27 Jan)'
+            d = dt_cls.strptime(period_key, '%Y-%m-%d')
+            week_num = d.isocalendar()[1]
+            return f"W{week_num:02d} ({d.strftime('%d %b')})"
+        elif period_type == PeriodType.DAY.value:
+            # '2026-02-03' → '03 Feb'
+            d = dt_cls.strptime(period_key, '%Y-%m-%d')
+            return d.strftime('%d %b')
+    except (ValueError, TypeError):
+        pass
+    return str(period_key)
 
 
 # ==================== Number Formatting ====================

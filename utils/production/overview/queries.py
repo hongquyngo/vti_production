@@ -76,6 +76,62 @@ class OverviewQueries:
         """Get last connection error message"""
         return self._connection_error
     
+    # ==================== Date Filter Helper ====================
+    
+    def _build_date_filter_clause(self, date_type: Optional[str],
+                                   from_date: Optional[date],
+                                   to_date: Optional[date],
+                                   params: list) -> str:
+        """
+        Build WHERE clause fragment for date filtering based on date type.
+        Mutates params list in-place.
+        
+        Args:
+            date_type: One of 'order_date', 'scheduled_date', 'completion_date', 'receipt_date'
+            from_date: Start date filter
+            to_date: End date filter
+            params: Parameter list to append values to
+            
+        Returns:
+            SQL WHERE clause fragment (starts with ' AND ...')
+        """
+        if not from_date and not to_date:
+            return ""
+        
+        date_type = date_type or 'order_date'
+        
+        # MO-level date columns
+        if date_type in ('order_date', 'scheduled_date', 'completion_date'):
+            col_map = {
+                'order_date': 'mo.order_date',
+                'scheduled_date': 'mo.scheduled_date',
+                'completion_date': 'mo.completion_date',
+            }
+            col = col_map[date_type]
+            clause = ""
+            if from_date:
+                clause += f" AND DATE({col}) >= %s"
+                params.append(from_date)
+            if to_date:
+                clause += f" AND DATE({col}) <= %s"
+                params.append(to_date)
+            return clause
+        
+        # Receipt date: subquery on production_receipts
+        elif date_type == 'receipt_date':
+            sub_parts = []
+            if from_date:
+                sub_parts.append("DATE(pr_f.receipt_date) >= %s")
+                params.append(from_date)
+            if to_date:
+                sub_parts.append("DATE(pr_f.receipt_date) <= %s")
+                params.append(to_date)
+            sub_where = " AND ".join(sub_parts)
+            return (f" AND mo.id IN (SELECT DISTINCT pr_f.manufacturing_order_id"
+                    f" FROM production_receipts pr_f WHERE {sub_where})")
+        
+        return ""
+    
     # ==================== Main Overview Query ====================
     
     def get_production_overview(self,
@@ -85,7 +141,8 @@ class OverviewQueries:
                                 health_filter: Optional[str] = None,
                                 search: Optional[str] = None,
                                 page: int = 1,
-                                page_size: int = 15) -> Optional[pd.DataFrame]:
+                                page_size: int = 15,
+                                date_type: Optional[str] = None) -> Optional[pd.DataFrame]:
         """
         Get production overview with aggregated data
         
@@ -254,14 +311,7 @@ class OverviewQueries:
         """
         
         params = []
-        
-        if from_date:
-            query += " AND DATE(mo.order_date) >= %s"
-            params.append(from_date)
-        
-        if to_date:
-            query += " AND DATE(mo.order_date) <= %s"
-            params.append(to_date)
+        query += self._build_date_filter_clause(date_type, from_date, to_date, params)
         
         if status:
             query += " AND mo.status = %s"
@@ -321,7 +371,8 @@ class OverviewQueries:
                           from_date: Optional[date] = None,
                           to_date: Optional[date] = None,
                           status: Optional[str] = None,
-                          search: Optional[str] = None) -> int:
+                          search: Optional[str] = None,
+                          date_type: Optional[str] = None) -> int:
         """Get total count of orders matching filters"""
         query = """
             SELECT COUNT(*) as total
@@ -331,14 +382,7 @@ class OverviewQueries:
         """
         
         params = []
-        
-        if from_date:
-            query += " AND DATE(mo.order_date) >= %s"
-            params.append(from_date)
-        
-        if to_date:
-            query += " AND DATE(mo.order_date) <= %s"
-            params.append(to_date)
+        query += self._build_date_filter_clause(date_type, from_date, to_date, params)
         
         if status:
             query += " AND mo.status = %s"
@@ -367,7 +411,8 @@ class OverviewQueries:
     
     def get_overview_metrics(self,
                             from_date: Optional[date] = None,
-                            to_date: Optional[date] = None) -> Dict[str, Any]:
+                            to_date: Optional[date] = None,
+                            date_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Get aggregated metrics for dashboard
         
@@ -408,14 +453,7 @@ class OverviewQueries:
         """
         
         params = []
-        
-        if from_date:
-            query += " AND DATE(mo.order_date) >= %s"
-            params.append(from_date)
-        
-        if to_date:
-            query += " AND DATE(mo.order_date) <= %s"
-            params.append(to_date)
+        query += self._build_date_filter_clause(date_type, from_date, to_date, params)
         
         try:
             result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
@@ -654,6 +692,152 @@ class OverviewQueries:
             logger.error(f"Error getting order timeline: {e}")
             return pd.DataFrame()
     
+    # ==================== Pivot Query ====================
+    
+    def get_pivot_data(self,
+                       date_type: str = 'order_date',
+                       from_date: Optional[date] = None,
+                       to_date: Optional[date] = None,
+                       status: Optional[str] = None,
+                       period: str = 'month',
+                       dimension: str = 'output_product') -> Optional[pd.DataFrame]:
+        """
+        Get aggregated data for pivot table.
+        
+        Builds different queries for MO-level vs receipt-level date types:
+        - MO-level: aggregates from manufacturing_orders (planned/produced qty)
+        - Receipt-level: aggregates from production_receipts (receipt/QC qty)
+        
+        Args:
+            date_type: Date column to group by ('order_date', 'scheduled_date', 'completion_date', 'receipt_date')
+            from_date: Start date
+            to_date: End date
+            status: Filter by MO status
+            period: Time grouping ('day', 'week', 'month')
+            dimension: Row grouping dimension
+            
+        Returns:
+            DataFrame with columns: period_key, dimension_key, + measure columns
+        """
+        is_receipt = (date_type == 'receipt_date')
+        
+        # --- Date column for period grouping ---
+        date_col_map = {
+            'order_date': 'mo.order_date',
+            'scheduled_date': 'mo.scheduled_date',
+            'completion_date': 'mo.completion_date',
+            'receipt_date': 'pr.receipt_date',
+        }
+        date_col = date_col_map.get(date_type, 'mo.order_date')
+        
+        # --- Period expression ---
+        if period == 'day':
+            period_expr = f"DATE_FORMAT({date_col}, '%%Y-%%m-%%d')"
+        elif period == 'week':
+            period_expr = f"DATE_FORMAT({date_col} - INTERVAL WEEKDAY({date_col}) DAY, '%%Y-%%m-%%d')"
+        else:  # month
+            period_expr = f"DATE_FORMAT({date_col}, '%%Y-%%m')"
+        
+        # --- Dimension expression ---
+        dim_map = {
+            'mo_number': "mo.order_no",
+            'output_product': "CONCAT(p.pt_code, ' | ', p.name)",
+            'brand': "br.brand_name",
+            'bom_type': "bh.bom_type",
+            'source_warehouse': "w1.name",
+            'target_warehouse': "w2.name",
+            'order_status': "mo.status",
+            'priority': "mo.priority",
+            'entity': "COALESCE(c.english_name, 'N/A')",
+        }
+        if is_receipt:
+            dim_map['qc_status'] = "pr.quality_status"
+        dim_expr = dim_map.get(dimension, "mo.status")
+        
+        # --- Build query ---
+        base_joins = """
+            JOIN products p ON mo.product_id = p.id
+            JOIN brands br ON p.brand_id = br.id
+            JOIN bom_headers bh ON mo.bom_header_id = bh.id
+            JOIN warehouses w1 ON mo.warehouse_id = w1.id
+            JOIN warehouses w2 ON mo.target_warehouse_id = w2.id
+            LEFT JOIN companies c ON mo.entity_id = c.id
+        """
+        
+        if is_receipt:
+            query = f"""
+                SELECT
+                    {period_expr} as period_key,
+                    {dim_expr} as dimension_key,
+                    COUNT(DISTINCT mo.id) as mo_count,
+                    COALESCE(SUM(pr.quantity), 0) as receipt_qty,
+                    COALESCE(SUM(CASE WHEN pr.quality_status = 'PASSED' THEN pr.quantity ELSE 0 END), 0) as qc_passed_qty,
+                    COALESCE(SUM(CASE WHEN pr.quality_status = 'FAILED' THEN pr.quantity ELSE 0 END), 0) as qc_failed_qty,
+                    COALESCE(SUM(CASE WHEN pr.quality_status = 'PENDING' THEN pr.quantity ELSE 0 END), 0) as qc_pending_qty,
+                    CASE WHEN SUM(pr.quantity) > 0
+                        THEN ROUND(SUM(CASE WHEN pr.quality_status = 'PASSED' THEN pr.quantity ELSE 0 END)
+                                   / SUM(pr.quantity) * 100, 1)
+                        ELSE 0 END as pass_rate_pct
+                FROM production_receipts pr
+                JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+                {base_joins}
+                WHERE mo.delete_flag = 0
+            """
+        else:
+            query = f"""
+                SELECT
+                    {period_expr} as period_key,
+                    {dim_expr} as dimension_key,
+                    COUNT(DISTINCT mo.id) as mo_count,
+                    COALESCE(SUM(mo.planned_qty), 0) as planned_qty,
+                    COALESCE(SUM(mo.produced_qty), 0) as produced_qty,
+                    CASE WHEN SUM(mo.planned_qty) > 0
+                        THEN ROUND(SUM(mo.produced_qty) / SUM(mo.planned_qty) * 100, 1)
+                        ELSE 0 END as yield_pct
+                FROM manufacturing_orders mo
+                {base_joins}
+                WHERE mo.delete_flag = 0
+            """
+        
+        # --- Date range filter ---
+        params = []
+        
+        if is_receipt:
+            if from_date:
+                query += " AND DATE(pr.receipt_date) >= %s"
+                params.append(from_date)
+            if to_date:
+                query += " AND DATE(pr.receipt_date) <= %s"
+                params.append(to_date)
+        else:
+            date_col_simple = {
+                'order_date': 'mo.order_date',
+                'scheduled_date': 'mo.scheduled_date',
+                'completion_date': 'mo.completion_date',
+            }.get(date_type, 'mo.order_date')
+            if from_date:
+                query += f" AND DATE({date_col_simple}) >= %s"
+                params.append(from_date)
+            if to_date:
+                query += f" AND DATE({date_col_simple}) <= %s"
+                params.append(to_date)
+        
+        # --- Status filter ---
+        if status:
+            query += " AND mo.status = %s"
+            params.append(status)
+        
+        query += " GROUP BY period_key, dimension_key ORDER BY period_key, dimension_key"
+        
+        try:
+            df = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            self._connection_error = None
+            return df
+        except Exception as e:
+            self._connection_error = f"Pivot query error: {str(e)}"
+            logger.error(f"Error getting pivot data: {e}")
+            return None
+    
     # ==================== Filter Options ====================
     
     def get_filter_options(self) -> Dict[str, List[str]]:
@@ -669,7 +853,8 @@ class OverviewQueries:
                                  from_date: Optional[date] = None,
                                  to_date: Optional[date] = None,
                                  status: Optional[str] = None,
-                                 search: Optional[str] = None) -> pd.DataFrame:
+                                 search: Optional[str] = None,
+                                 date_type: Optional[str] = None) -> pd.DataFrame:
         """
         Get all ACTUAL materials issued for export (1 row = 1 issue detail)
         Shows PRIMARY and ALTERNATIVE materials separately with full traceability
@@ -840,14 +1025,7 @@ class OverviewQueries:
         """
         
         params = []
-        
-        if from_date:
-            query += " AND DATE(mo.order_date) >= %s"
-            params.append(from_date)
-        
-        if to_date:
-            query += " AND DATE(mo.order_date) <= %s"
-            params.append(to_date)
+        query += self._build_date_filter_clause(date_type, from_date, to_date, params)
         
         if status:
             query += " AND mo.status = %s"

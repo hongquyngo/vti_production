@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional
 import streamlit as st
 
 from .queries import OverviewQueries
-from .common import format_number, format_percentage, get_vietnam_today
+from .common import format_number, format_percentage, get_vietnam_today, get_date_type_info_note
 
 logger = logging.getLogger(__name__)
 
@@ -25,29 +25,38 @@ class OverviewDashboard:
         self.queries = OverviewQueries()
     
     def get_metrics(self, from_date: Optional[date] = None,
-                   to_date: Optional[date] = None) -> Dict[str, Any]:
+                   to_date: Optional[date] = None,
+                   date_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Get overview metrics for dashboard
         
         Args:
             from_date: Filter from date
             to_date: Filter to date
+            date_type: Date type for filtering
             
         Returns:
             Dictionary with metrics
         """
-        return self.queries.get_overview_metrics(from_date, to_date)
+        return self.queries.get_overview_metrics(from_date, to_date, date_type=date_type)
     
     def render(self, from_date: Optional[date] = None,
-              to_date: Optional[date] = None):
+              to_date: Optional[date] = None,
+              date_type: Optional[str] = None):
         """
         Render dashboard metrics section
         
         Args:
             from_date: Filter from date
             to_date: Filter to date
+            date_type: Date type for filtering
         """
-        metrics = self.get_metrics(from_date, to_date)
+        # Show info note for non-default date types
+        info_note = get_date_type_info_note(date_type)
+        if info_note:
+            st.info(info_note)
+        
+        metrics = self.get_metrics(from_date, to_date, date_type=date_type)
         
         # Main metrics row
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -145,13 +154,15 @@ class OverviewDashboard:
 
 
 def render_dashboard(from_date: Optional[date] = None,
-                    to_date: Optional[date] = None):
+                    to_date: Optional[date] = None,
+                    date_type: Optional[str] = None):
     """
     Convenience function to render overview dashboard
     
     Args:
         from_date: Filter from date
         to_date: Filter to date
+        date_type: Date type for filtering
     """
     dashboard = OverviewDashboard()
-    dashboard.render(from_date, to_date)
+    dashboard.render(from_date, to_date, date_type=date_type)
