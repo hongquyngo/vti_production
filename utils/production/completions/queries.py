@@ -3,8 +3,9 @@
 Database queries for Completions domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.3.0
+Version: 1.4.0
 Changes:
+- v1.4.0: Added validation queries (check_duplicate_batch_no, get_pending_receipts_count)
 - v1.3.0: Added scheduled_date to receipts query
 - v1.2.0: Added order_date and package_size to receipts query for improved display
 - v1.1.0: Added connection check method
@@ -436,6 +437,70 @@ class CompletionQueries:
         except Exception as e:
             logger.error(f"Error getting warehouses: {e}")
             return pd.DataFrame()
+    
+    # ==================== Validation Queries ====================
+    
+    def check_duplicate_batch_no(self, batch_no: str,
+                                  order_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Check if batch_no already exists in production_receipts.
+        
+        Args:
+            batch_no: Batch number to check
+            order_id: Exclude receipts from this order (same order = expected)
+        
+        Returns:
+            Dict with is_duplicate, count, existing list
+        """
+        query = """
+            SELECT pr.receipt_no, mo.order_no, pr.receipt_date
+            FROM production_receipts pr
+            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            WHERE pr.batch_no = %s
+        """
+        params = [batch_no]
+        
+        if order_id:
+            query += " AND pr.manufacturing_order_id != %s"
+            params.append(order_id)
+        
+        query += " ORDER BY pr.receipt_date DESC LIMIT 5"
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=tuple(params))
+            return {
+                'is_duplicate': not result.empty,
+                'count': len(result),
+                'existing': result.to_dict('records') if not result.empty else []
+            }
+        except Exception as e:
+            logger.error(f"Error checking duplicate batch_no '{batch_no}': {e}")
+            return {'is_duplicate': False, 'count': 0, 'existing': []}
+    
+    def get_pending_receipts_count(self, order_id: int) -> int:
+        """
+        Get count of receipts with PENDING quality status for an order.
+        Used to validate order auto-completion eligibility.
+        
+        Args:
+            order_id: Manufacturing order ID
+            
+        Returns:
+            Number of PENDING receipts
+        """
+        query = """
+            SELECT COUNT(*) as pending_count
+            FROM production_receipts
+            WHERE manufacturing_order_id = %s
+                AND quality_status = 'PENDING'
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=(order_id,))
+            return int(result['pending_count'].iloc[0])
+        except Exception as e:
+            logger.error(f"Error getting pending receipts count for order {order_id}: {e}")
+            return 0
     
     # ==================== Dashboard Metrics ====================
     

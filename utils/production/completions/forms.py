@@ -3,8 +3,15 @@
 Form components for Completions domain
 Production completion form with quantity and quality inputs
 
-Version: 2.1.0
+Version: 3.0.0
 Changes:
+- v3.0.0: Added pre & post validation for completion form
+  - Duplicate batch_no check (warning, non-blocking)
+  - Expiry date in past (warning, non-blocking)
+  - Overproduction above remaining (warning, non-blocking)
+  - Pending QC blocks order auto-completion (blocking)
+  - In-form preview shows warnings before submit
+  - _execute_completion checks again with fresh DB data
 - v2.1.0: Cleaned up unused imports (format_date)
 - v2.0.0: Added st.form() to prevent unnecessary reruns when changing inputs
 - Fixed batch_no generation - now generates ONCE and persists in session state
@@ -157,6 +164,14 @@ class CompletionForms:
         
         st.markdown("---")
         
+        # Pre-check: Pending QC status for this order
+        pending_qc_count = self.queries.get_pending_receipts_count(order_id)
+        if pending_qc_count > 0:
+            st.warning(
+                f"⚠️ **{pending_qc_count} receipt(s) with PENDING quality status.** "
+                f"Order cannot auto-complete until all QC is resolved."
+            )
+        
         # Initialize/reset form data when order changes
         # CRITICAL: This prevents batch_no from regenerating on every rerun
         if st.session_state.get('completion_order_id') != order_id:
@@ -247,6 +262,36 @@ class CompletionForms:
                 status_text = "✅ Will Complete" if will_complete else "🔄 Partial"
                 st.info(f"**Status:** {status_text}")
             
+            # ===== Pre-validation Warnings =====
+            
+            # Warning: overproduction
+            remaining_qty = float(order['remaining_qty'])
+            over_warn = CompletionValidator.check_overproduction_warning(
+                produced_qty, remaining_qty, order['uom']
+            )
+            if over_warn:
+                st.warning(f"⚠️ {over_warn}")
+            
+            # Warning: expiry date in past
+            expiry_warn = CompletionValidator.check_expiry_warning(
+                expired_date, get_vietnam_today()
+            )
+            if expiry_warn:
+                st.warning(f"⚠️ {expiry_warn}")
+            
+            # Block: would auto-complete but has pending QC
+            has_pending_block = False
+            if will_complete:
+                total_pending = pending_qc_count + (1 if quality_status == 'PENDING' else 0)
+                if total_pending > 0:
+                    has_pending_block = True
+                    st.error(
+                        f"🚫 **Cannot complete order:** {total_pending} receipt(s) will have PENDING QC.\n\n"
+                        f"**Options:** Update QC of existing receipts, "
+                        f"change quality status to PASSED/FAILED, "
+                        f"or reduce quantity to keep order IN_PROGRESS."
+                    )
+            
             st.markdown("---")
             
             # Form submit buttons
@@ -296,12 +341,54 @@ class CompletionForms:
                            produced_qty: float, batch_no: str,
                            quality_status: str, expired_date,
                            notes: str):
-        """Execute the production completion"""
-        # Validation
+        """Execute the production completion with pre-validation"""
+        # Validation: batch_no required
         is_valid, error = CompletionValidator.validate_batch_no(batch_no)
         if not is_valid:
             st.warning(f"⚠️ {error}")
             return
+        
+        # Warning: duplicate batch_no (non-blocking)
+        dup_check = self.queries.check_duplicate_batch_no(batch_no, order_id)
+        if dup_check['is_duplicate']:
+            orders_list = ", ".join(
+                r['order_no'] for r in dup_check['existing'][:3]
+            )
+            st.warning(
+                f"⚠️ Batch number **{batch_no}** already exists in "
+                f"{dup_check['count']} other receipt(s) ({orders_list}). "
+                f"Proceeding anyway."
+            )
+        
+        # Warning: expiry date in past (non-blocking)
+        expiry_warn = CompletionValidator.check_expiry_warning(
+            expired_date, get_vietnam_today()
+        )
+        if expiry_warn:
+            st.warning(f"⚠️ {expiry_warn} — proceeding anyway.")
+        
+        # Warning: overproduction (non-blocking)
+        remaining = float(order['remaining_qty'])
+        over_warn = CompletionValidator.check_overproduction_warning(
+            produced_qty, remaining, order['uom']
+        )
+        if over_warn:
+            st.warning(f"⚠️ {over_warn} — proceeding anyway.")
+        
+        # Block: pending QC prevents order auto-completion
+        new_total = float(order.get('produced_qty') or 0) + produced_qty
+        would_complete = new_total >= float(order['planned_qty'])
+        
+        if would_complete:
+            pending_count = self.queries.get_pending_receipts_count(order_id)
+            total_pending = pending_count + (1 if quality_status == 'PENDING' else 0)
+            if total_pending > 0:
+                st.error(
+                    f"🚫 **Cannot complete order:** {total_pending} receipt(s) "
+                    f"will have PENDING quality status.\n\n"
+                    f"Resolve QC for pending receipts or change quality status to PASSED/FAILED."
+                )
+                return
         
         try:
             audit_info = get_user_audit_info()

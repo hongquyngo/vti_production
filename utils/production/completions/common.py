@@ -3,8 +3,9 @@
 Common utilities for Completions domain
 Formatting, validation, UI helpers, and date utilities
 
-Version: 1.1.0
+Version: 1.2.0
 Changes:
+- v1.2.0: Added check_expiry_warning, check_overproduction_warning to CompletionValidator
 - v1.1.0: Removed unused validator methods (validate_produced_qty, can_complete)
 """
 
@@ -284,6 +285,50 @@ class CompletionValidator:
         if not batch_no or not batch_no.strip():
             return False, "Batch number is required"
         return True, None
+    
+    @staticmethod
+    def check_expiry_warning(expiry_date: Union[date, None],
+                              today: Optional[date] = None) -> Optional[str]:
+        """
+        Check if expiry date is in the past.
+        Returns warning message or None.
+        """
+        if expiry_date is None:
+            return None
+        
+        if today is None:
+            today = date.today()
+        
+        if isinstance(expiry_date, datetime):
+            expiry_date = expiry_date.date()
+        
+        if expiry_date < today:
+            days_ago = (today - expiry_date).days
+            return f"Expiry date is {days_ago} day(s) in the past ({expiry_date.strftime('%d/%m/%Y')})"
+        
+        return None
+    
+    @staticmethod
+    def check_overproduction_warning(produced_qty: float,
+                                       remaining_qty: float,
+                                       uom: str = '') -> Optional[str]:
+        """
+        Check if production quantity exceeds remaining planned quantity.
+        Returns warning message or None.
+        """
+        if remaining_qty <= 0:
+            return None
+        
+        if produced_qty > remaining_qty:
+            over_qty = produced_qty - remaining_qty
+            over_pct = (over_qty / remaining_qty) * 100
+            uom_str = f" {uom}" if uom else ""
+            return (
+                f"Over-production: {Decimal(str(over_qty)).quantize(Decimal('0.01'))}{uom_str} "
+                f"above remaining ({over_pct:.0f}% over plan)"
+            )
+        
+        return None
 
 
 # ==================== UI Helpers ====================

@@ -3,8 +3,10 @@
 Completion Manager - Business logic for Production Completions
 Complete production orders with receipt creation and inventory updates
 
-Version: 3.1.0
+Version: 3.2.0
 Changes:
+- v3.2.0: Added pending QC post-validation - order cannot auto-complete
+  if any receipts have PENDING quality status (blocks entire transaction)
 - v3.1.0: Changed validation from "fully issued" to "issued" (issued_qty > 0)
   - Renamed _get_pending_raw_materials → _get_unissued_raw_materials
   - Allows completion when materials are partially issued (practical tolerance)
@@ -126,6 +128,29 @@ class CompletionManager:
                         warehouse_id, expiry_date,
                         group_id, keycloak_id, receipt_id
                     )
+                
+                # ===== POST-VALIDATION: Pending QC blocks order auto-completion =====
+                # If this receipt would cause order to auto-complete,
+                # verify ALL receipts (including this one) have been QC'd.
+                new_total = float(order.get('produced_qty') or 0) + produced_qty
+                would_complete = new_total >= float(order['planned_qty'])
+                
+                if would_complete:
+                    pending_check = text("""
+                        SELECT COUNT(*) as cnt
+                        FROM production_receipts
+                        WHERE manufacturing_order_id = :order_id
+                            AND quality_status = 'PENDING'
+                    """)
+                    pending_result = conn.execute(pending_check, {'order_id': order_id})
+                    pending_count = int(pending_result.fetchone()[0])
+                    
+                    if pending_count > 0:
+                        raise ValueError(
+                            f"Cannot complete order: {pending_count} receipt(s) still have PENDING quality status. "
+                            f"All receipts must pass QC before order can be finalized.\n"
+                            f"Tip: Update quality status of pending receipts, or change this receipt's quality to PASSED/FAILED."
+                        )
                 
                 # Update order produced quantity
                 update_query = text("""
