@@ -318,6 +318,117 @@ class InventoryQualityData:
             logger.error(f"Error loading products: {e}")
             return []
     
+    # ==================== Period Summary ====================
+    
+    @st.cache_data(ttl=300, show_spinner=False)
+    def get_inventory_period_summary(_self, 
+                                      from_date,
+                                      to_date,
+                                      warehouse_id: Optional[int] = None,
+                                      product_search: Optional[str] = None) -> pd.DataFrame:
+        """
+        Get inventory period summary (Tổng hợp tồn kho theo kỳ).
+        
+        Calculates opening balance, stock in, stock out, and closing balance
+        for each product within the specified date range.
+        
+        Logic:
+        - Stock In types: inventory_histories.type LIKE 'stockIn%'
+        - Stock Out types: all other types
+        - Opening = sum(stock_in before period) - sum(stock_out before period)
+        - Closing = Opening + Period Stock In - Period Stock Out
+        
+        Args:
+            from_date: Period start date
+            to_date: Period end date
+            warehouse_id: Filter by warehouse or None for all
+            product_search: Search by product name/code
+        
+        Returns:
+            DataFrame with columns: product_code, product_name, uom, 
+            opening_qty, stock_in_qty, stock_out_qty, closing_qty
+        """
+        try:
+            from datetime import timedelta
+            to_date_next = to_date + timedelta(days=1)
+            
+            query = """
+                SELECT 
+                    ih.product_id,
+                    p.pt_code AS product_code,
+                    p.name AS product_name,
+                    p.uom,
+                    p.package_size,
+                    b.brand_name AS brand,
+                    
+                    ROUND(
+                        COALESCE(SUM(CASE 
+                            WHEN ih.type LIKE :sin_pattern 
+                                 AND ih.created_date < :from_date 
+                            THEN ih.quantity ELSE 0 END), 0)
+                        - COALESCE(SUM(CASE 
+                            WHEN ih.type NOT LIKE :sin_pattern 
+                                 AND ih.created_date < :from_date 
+                            THEN ih.quantity ELSE 0 END), 0)
+                    , 5) AS opening_qty,
+                    
+                    ROUND(COALESCE(SUM(CASE 
+                        WHEN ih.type LIKE :sin_pattern
+                             AND ih.created_date >= :from_date 
+                             AND ih.created_date < :to_date_next
+                        THEN ih.quantity ELSE 0 END), 0), 5) AS stock_in_qty,
+                    
+                    ROUND(COALESCE(SUM(CASE 
+                        WHEN ih.type NOT LIKE :sin_pattern
+                             AND ih.created_date >= :from_date 
+                             AND ih.created_date < :to_date_next
+                        THEN ih.quantity ELSE 0 END), 0), 5) AS stock_out_qty
+                    
+                FROM inventory_histories ih
+                JOIN products p ON ih.product_id = p.id
+                LEFT JOIN brands b ON p.brand_id = b.id
+                WHERE ih.delete_flag = 0
+            """
+            params = {
+                'sin_pattern': 'stockIn%',
+                'from_date': from_date,
+                'to_date_next': to_date_next,
+            }
+            
+            if warehouse_id:
+                query += " AND ih.warehouse_id = :warehouse_id"
+                params['warehouse_id'] = warehouse_id
+            
+            if product_search:
+                query += " AND (p.name LIKE :search OR p.pt_code LIKE :search)"
+                params['search'] = f"%{product_search}%"
+            
+            query += """
+                GROUP BY ih.product_id, p.pt_code, p.name, p.uom, 
+                         p.package_size, b.brand_name
+                ORDER BY p.name
+            """
+            
+            with _self.engine.connect() as conn:
+                df = pd.read_sql(text(query), conn, params=params)
+            
+            if not df.empty:
+                # Calculate closing balance
+                df['closing_qty'] = df['opening_qty'] + df['stock_in_qty'] - df['stock_out_qty']
+                
+                # Filter out rows with no activity (all zeros)
+                df = df[
+                    (df['opening_qty'].abs() > 0.001) | 
+                    (df['stock_in_qty'].abs() > 0.001) | 
+                    (df['stock_out_qty'].abs() > 0.001)
+                ].reset_index(drop=True)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error loading inventory period summary: {e}")
+            return pd.DataFrame()
+    
     # ==================== Export Functions ====================
     
     def get_export_data(self, category: Optional[str] = None,

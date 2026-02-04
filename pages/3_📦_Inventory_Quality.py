@@ -3,25 +3,25 @@
 Inventory Quality Dashboard
 Track and manage Good, Quarantine, and Defective inventory
 
-Version: 1.1.0
+Version: 1.2.0
 Changes:
-- Checkbox selection pattern like Production module
-- Action buttons appear when row selected
-- Detail popup dialog
+- v1.2: Added "Tổng hợp tồn kho" (Inventory Period Summary) tab
+- v1.1: Checkbox selection pattern like Production module
+- v1.1: Action buttons appear when row selected
+- v1.1: Detail popup dialog
 
 Features:
-- Summary metrics cards
-- Unified inventory table with single-row checkbox selection
-- Action buttons (View Details)
-- Detail popup dialog
-- Export to Excel
-- Filter by Category, Warehouse, Product
+- Tab 1: Dashboard - Summary metrics, unified inventory table, detail dialog
+- Tab 2: Tổng hợp tồn kho - Period-based inventory summary report
+  + Period presets (This Month, Last Month, Quarter, Year, Custom)
+  + Opening / Stock In / Stock Out / Closing per product
+  + Export to Excel with formatted header
 """
 
 import streamlit as st
 import logging
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 
 from utils.auth import AuthManager
 from utils.inventory_quality.common import (
@@ -30,7 +30,11 @@ from utils.inventory_quality.common import (
     format_currency,
     format_date,
     format_days,
+    format_report_qty,
     create_excel_download,
+    create_period_summary_excel,
+    get_period_dates,
+    get_vietnam_today,
     safe_get
 )
 from utils.inventory_quality.data import InventoryQualityData
@@ -55,10 +59,16 @@ auth.require_auth()
 
 def _init_session_state():
     """Initialize session state for Inventory Quality page"""
+    today = get_vietnam_today()
     defaults = {
+        # Dashboard tab
         'iq_selected_idx': None,
         'iq_show_detail': False,
         'iq_detail_data': None,
+        # Period summary tab
+        'iq_period_preset': 'this_month',
+        'iq_period_from': today.replace(day=1),
+        'iq_period_to': today,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -82,6 +92,10 @@ def render_header():
             st.session_state['iq_selected_idx'] = None
             st.rerun()
 
+
+# ============================================================================
+# TAB 1: DASHBOARD
+# ============================================================================
 
 # ==================== Summary Cards ====================
 
@@ -447,7 +461,7 @@ def _render_defective_details(item: dict):
         st.text_area("", value=notes, disabled=True, height=80, label_visibility="collapsed")
 
 
-# ==================== Export Section ====================
+# ==================== Dashboard Export ====================
 
 def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int):
     """Render export to Excel section"""
@@ -482,7 +496,236 @@ def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int):
                 logger.error(f"Export error: {e}", exc_info=True)
 
 
-# ==================== Main Application ====================
+# ============================================================================
+# TAB 2: TỔNG HỢP TỒN KHO (Inventory Period Summary)
+# ============================================================================
+
+def _on_period_preset_change():
+    """Callback when period preset changes - update from/to dates"""
+    preset = st.session_state.get('iq_period_preset', 'this_month')
+    if preset != 'custom':
+        from_d, to_d = get_period_dates(preset)
+        st.session_state['iq_period_from'] = from_d
+        st.session_state['iq_period_to'] = to_d
+
+
+def render_period_filters():
+    """
+    Render filters for period inventory summary.
+    
+    Returns:
+        Tuple of (from_date, to_date, warehouse_id, product_search) or (None,...) if invalid
+    """
+    presets = InventoryQualityConstants.PERIOD_PRESETS
+    
+    col1, col2, col3, col4, col5 = st.columns([2, 1.5, 1.5, 2, 2])
+    
+    with col1:
+        preset = st.selectbox(
+            "Report Period",
+            options=list(presets.keys()),
+            format_func=lambda x: presets[x],
+            key="iq_period_preset",
+            on_change=_on_period_preset_change
+        )
+    
+    is_custom = (preset == 'custom')
+    
+    with col2:
+        from_date = st.date_input(
+            "From Date",
+            key="iq_period_from",
+            disabled=not is_custom,
+        )
+    
+    with col3:
+        to_date = st.date_input(
+            "To Date",
+            key="iq_period_to",
+            disabled=not is_custom,
+        )
+    
+    with col4:
+        warehouses = data_loader.get_warehouses()
+        warehouse_options = [{'id': None, 'name': 'All Warehouses'}] + warehouses
+        
+        selected_warehouse = st.selectbox(
+            "Warehouse",
+            options=warehouse_options,
+            format_func=lambda x: x.get('name', 'Unknown'),
+            key="iq_period_warehouse"
+        )
+        warehouse_id = selected_warehouse.get('id') if selected_warehouse else None
+    
+    with col5:
+        product_search = st.text_input(
+            "Search Product",
+            placeholder="Name or PT code...",
+            key="iq_period_product_search"
+        )
+    
+    # Validate dates
+    if from_date > to_date:
+        st.error("⚠️ 'From Date' must be before or equal to 'To Date'")
+        return None, None, None, None
+    
+    return from_date, to_date, warehouse_id, product_search or None
+
+
+def render_period_metrics(df: pd.DataFrame):
+    """Render summary metrics for period report"""
+    if df.empty:
+        return
+    
+    total_opening = df['opening_qty'].sum()
+    total_in = df['stock_in_qty'].sum()
+    total_out = df['stock_out_qty'].sum()
+    total_closing = df['closing_qty'].sum()
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("📦 Products", f"{len(df):,}")
+    with col2:
+        st.metric("📊 Opening", format_quantity(total_opening))
+    with col3:
+        st.metric("📥 Stock In", format_quantity(total_in))
+    with col4:
+        st.metric("📤 Stock Out", format_quantity(total_out))
+    with col5:
+        net = total_in - total_out
+        st.metric(
+            "📊 Closing",
+            format_quantity(total_closing),
+            delta=f"Net: {'+' if net >= 0 else ''}{format_quantity(net)}",
+            delta_color="normal"
+        )
+
+
+def render_period_table(df: pd.DataFrame):
+    """Render period summary data table"""
+    if df.empty:
+        st.info("📭 No inventory movements found for the selected period and filters.")
+        return
+    
+    # Create display DataFrame with formatted quantities
+    display_df = df[[
+        'product_code', 'product_name', 'uom',
+        'opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty'
+    ]].copy()
+    
+    # Format quantity columns - show blank for zero values
+    for col in ['opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty']:
+        display_df[col] = df[col].apply(format_report_qty)
+    
+    # Rename columns for display
+    display_df.columns = [
+        'Product Code', 'Product Name', 'UOM',
+        'Opening', 'Stock In', 'Stock Out', 'Closing'
+    ]
+    
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        height=min(500, 35 * len(display_df) + 38),
+        column_config={
+            'Product Code': st.column_config.TextColumn('Product Code', width='medium'),
+            'Product Name': st.column_config.TextColumn('Product Name', width='large'),
+            'UOM': st.column_config.TextColumn('UOM', width='small'),
+            'Opening': st.column_config.TextColumn('Opening', width='medium'),
+            'Stock In': st.column_config.TextColumn('Stock In', width='medium'),
+            'Stock Out': st.column_config.TextColumn('Stock Out', width='medium'),
+            'Closing': st.column_config.TextColumn('Closing', width='medium'),
+        }
+    )
+
+
+def render_period_export(df: pd.DataFrame, from_date, to_date):
+    """Render export button for period summary"""
+    if df.empty:
+        return
+    
+    # Prepare export DataFrame with proper column names
+    export_df = df[[
+        'product_code', 'product_name', 'uom',
+        'opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty'
+    ]].copy()
+    export_df.columns = [
+        'Product Code', 'Product Name', 'UOM',
+        'Opening (Qty)', 'Stock In (Qty)', 'Stock Out (Qty)', 'Closing (Qty)'
+    ]
+    
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        try:
+            excel_data = create_period_summary_excel(export_df, from_date, to_date)
+            
+            from_str = from_date.strftime('%Y%m%d')
+            to_str = to_date.strftime('%Y%m%d')
+            filename = f"inventory_summary_{from_str}_{to_str}.xlsx"
+            
+            st.download_button(
+                label="📥 Export Excel",
+                data=excel_data,
+                file_name=filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_period_excel"
+            )
+        except Exception as e:
+            st.error(f"Export failed: {str(e)}")
+            logger.error(f"Period export error: {e}", exc_info=True)
+
+
+def render_period_summary():
+    """Main renderer for the Period Summary tab"""
+    st.markdown("### 📋 Inventory Period Summary")
+    st.caption("Opening balance / Stock In / Stock Out / Closing balance by product")
+    st.markdown("---")
+    
+    # Filters
+    result = render_period_filters()
+    if result[0] is None:
+        return
+    
+    from_date, to_date, warehouse_id, product_search = result
+    
+    st.markdown("---")
+    
+    # Report title (centered)
+    st.markdown(
+        f"<h4 style='text-align:center; margin-bottom:2px;'>INVENTORY PERIOD SUMMARY</h4>"
+        f"<p style='text-align:center; color:#666; margin-top:0;'>"
+        f"From {from_date.strftime('%d/%m/%Y')} to {to_date.strftime('%d/%m/%Y')}</p>",
+        unsafe_allow_html=True
+    )
+    
+    # Load data
+    with st.spinner("Loading inventory summary..."):
+        df = data_loader.get_inventory_period_summary(
+            from_date=from_date,
+            to_date=to_date,
+            warehouse_id=warehouse_id,
+            product_search=product_search
+        )
+    
+    # Metrics row
+    render_period_metrics(df)
+    st.markdown("---")
+    
+    # Data table
+    render_period_table(df)
+    
+    # Export
+    if not df.empty:
+        st.markdown("---")
+        render_period_export(df, from_date, to_date)
+
+
+# ============================================================================
+# MAIN APPLICATION
+# ============================================================================
 
 def main():
     """Main application entry point"""
@@ -490,33 +733,39 @@ def main():
         render_header()
         st.markdown("---")
         
-        # Summary Cards
-        render_summary_cards()
-        st.markdown("---")
+        # === Two tabs ===
+        tab_dashboard, tab_period = st.tabs([
+            "📊 Dashboard",
+            "📋 Inventory Summary"
+        ])
         
-        # Filters
-        category, warehouse_id, product_search = render_filters()
-        st.markdown("---")
-        
-        # Load Data
-        with st.spinner("Loading inventory data..."):
-            df = data_loader.get_unified_inventory(
-                category=category if category != 'All' else None,
-                warehouse_id=warehouse_id,
-                product_search=product_search if product_search else None
-            )
-        
-        # Data Table with selection
-        render_data_table(df)
-        
-        # Export Section
-        if not df.empty:
+        # ---- Tab 1: Dashboard (existing functionality) ----
+        with tab_dashboard:
+            render_summary_cards()
             st.markdown("---")
-            render_export_section(df, category, warehouse_id)
+            
+            category, warehouse_id, product_search = render_filters()
+            st.markdown("---")
+            
+            with st.spinner("Loading inventory data..."):
+                df = data_loader.get_unified_inventory(
+                    category=category if category != 'All' else None,
+                    warehouse_id=warehouse_id,
+                    product_search=product_search if product_search else None
+                )
+            
+            render_data_table(df)
+            
+            if not df.empty:
+                st.markdown("---")
+                render_export_section(df, category, warehouse_id)
+            
+            if st.session_state.get('iq_show_detail') and st.session_state.get('iq_detail_data'):
+                show_detail_dialog(st.session_state['iq_detail_data'])
         
-        # Show Detail Dialog if triggered
-        if st.session_state.get('iq_show_detail') and st.session_state.get('iq_detail_data'):
-            show_detail_dialog(st.session_state['iq_detail_data'])
+        # ---- Tab 2: Tổng hợp tồn kho (new) ----
+        with tab_period:
+            render_period_summary()
     
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
@@ -529,7 +778,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Inventory Quality Dashboard v1.1")
+    st.caption("Inventory Quality Dashboard v1.2")
 
 
 if __name__ == "__main__":
