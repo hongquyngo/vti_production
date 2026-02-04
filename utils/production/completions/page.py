@@ -3,8 +3,12 @@
 Main UI orchestrator for Completions domain
 Renders the Completions tab with dashboard, completion form, and receipts list
 
-Version: 2.0.0
+Version: 2.1.0
 Changes:
+- v2.1.0: Post-validation warnings in Receipts List table
+  - Added ⚠️ Alerts column: 🔁 duplicate batch, 📅 expired, 📈 overproduction, ⏳ pending QC
+  - Warning summary bar above table when issues found
+  - Bulk duplicate batch check via single DB query per page load
 - v2.0.0: Help → popover (no full page rerun), @st.fragment for receipts section
   - Removed full-page Help view, replaced with st.popover in action bar
   - Wrapped filters + action bar + receipts list in @st.fragment
@@ -82,76 +86,150 @@ def _format_date_display(dt, fmt: str = '%d-%b-%Y') -> str:
 
 def _render_help_popover():
     """
-    Render simplified help as st.popover — lightweight, no page rerun.
-    Replaces the old full-page Help view.
+    Render full help as st.popover — no page rerun needed.
+    Contains all original help content: validation rules, formulas,
+    quality flow, inventory impact, alerts, and terminology.
     """
     with st.popover("❓ Help", use_container_width=True):
         st.markdown("### 📚 Production Completion Help")
 
-        # Validation Rules
+        # ── 1. Validation Rules ──
         st.markdown("#### 🔒 Validation Rules")
+        st.markdown("Để hoàn thành (complete) một Production Order:")
         st.markdown("""\
-| Điều kiện | Yêu cầu |
-|-----------|---------|
-| Order Status | = `IN_PROGRESS` |
-| Produced Qty | > 0, tối đa 150% remaining |
-| Batch No | Bắt buộc (không trống) |
-| Raw Materials | Tất cả phải được issue (`issued_qty > 0`) |
+| Điều kiện | Yêu cầu | Giải thích |
+|-----------|---------|------------|
+| Order Status | = `IN_PROGRESS` | Chỉ orders đang sản xuất |
+| Produced Qty | > 0 | Số lượng phải là số dương |
+| Max Qty | ≤ Remaining × 1.5 | Cho phép vượt 50% kế hoạch |
+| Batch No | Không trống | Mã batch để truy xuất |
+| Raw Materials | `issued_qty > 0` | NVL chính phải được issue |
+| Pending QC | Không có receipt PENDING | Khi order sẽ auto-complete |\
+""")
 
-> 💡 **PACKAGING** & **CONSUMABLE** không bắt buộc issue.\
+        st.markdown("""\
+> 💡 **Raw Materials:** Chỉ kiểm tra `RAW_MATERIAL` (hoặc NULL).  
+> PACKAGING & CONSUMABLE không bắt buộc.  
+> Cho phép issue thiếu/thừa (sai số cân đo, hao hụt, điều chỉnh công thức).\
 """)
 
         st.markdown("---")
 
-        # Quality → Inventory
-        st.markdown("#### 🔄 Quality Status & Inventory")
+        # ── 2. Alert Warnings (⚠️ column) ──
+        st.markdown("#### ⚠️ Alert Warnings")
+        st.markdown("Cột ⚠️ trong bảng Receipts hiển thị cảnh báo tự động:")
         st.markdown("""\
-| Thay đổi | Inventory |
-|----------|-----------|
-| Tạo mới → **PASSED** | ➕ Tạo `stockInProduction` |
-| Tạo mới → PENDING / FAILED | Không tạo inventory |
-| PENDING/FAILED → **PASSED** | ➕ Thêm vào tồn kho |
-| **PASSED** → PENDING/FAILED | ➖ Xóa khỏi tồn kho (`remain = 0`) |
-| PENDING ↔ FAILED | Không thay đổi |\
+| Icon | Cảnh báo | Mô tả |
+|------|---------|-------|
+| 🔁 | Duplicate Batch | Batch number trùng với order khác |
+| 📅 | Expired | Sản phẩm đã quá hạn sử dụng |
+| 📈 | Overproduction | Yield rate > 100% (sản xuất vượt kế hoạch) |
+| ⏳ | Pending QC | Chưa kiểm tra chất lượng |\
+""")
+
+        st.markdown("""\
+> 🔁 📅 📈 là **warning** (không block).  
+> ⏳ sẽ **block** order auto-complete nếu có receipt PENDING.\
 """)
 
         st.markdown("---")
 
-        # Partial QC
-        st.markdown("#### 🔬 Partial QC")
+        # ── 3. Calculation Formulas ──
+        st.markdown("#### 📐 Calculation Formulas")
         st.markdown("""\
-Hỗ trợ chia receipt thành **PASSED + PENDING + FAILED**.
-
-**Split priority:** PASSED > PENDING > FAILED  
-Original receipt giữ status có priority cao nhất.  
-Tạo receipt mới cho phần còn lại.\
+| Công thức | Cách tính |
+|-----------|-----------|
+| **Progress** | Produced Qty ÷ Planned Qty × 100% |
+| **Remaining** | Planned Qty − Produced Qty |
+| **Max Input** | Remaining × 1.5 |
+| **Yield Rate** | Produced Qty ÷ Planned Qty × 100% |
+| **Pass Rate** | PASSED Qty ÷ Total Qty × 100% |\
 """)
 
-        st.markdown("---")
-
-        # Formulas
-        st.markdown("#### 📐 Công thức")
         st.markdown("""\
-- **Progress** = Produced ÷ Planned × 100%
-- **Remaining** = Planned − Produced
-- **Max Input** = Remaining × 1.5
-- **Yield Rate** = Produced ÷ Planned × 100%
-- **Pass Rate** = PASSED Qty ÷ Total Qty × 100%\
-""")
-
-        st.markdown("---")
-
-        # Yield Indicators
-        st.markdown("#### 📊 Yield Indicators")
-        st.markdown("""\
-| Yield | Indicator |
-|-------|-----------|
+| Yield Rate | Indicator |
+|------------|-----------|
 | ≥ 95% | ✅ Excellent |
 | 85–94% | ⚠️ Acceptable |
 | < 85% | ❌ Below Target |\
 """)
 
-        st.caption("💬 Liên hệ IT nếu cần hỗ trợ thêm")
+        st.markdown("---")
+
+        # ── 4. Quality Status Flow ──
+        st.markdown("#### 🔄 Quality Status Flow")
+        st.markdown("""\
+```
+PENDING (mặc định) → QC Check → PASSED hoặc FAILED
+```\
+""")
+
+        st.markdown("""\
+| Status | Mô tả | Inventory Impact |
+|--------|-------|-----------------|
+| ⏳ PENDING | Chờ kiểm tra chất lượng | ❌ Không cập nhật tồn kho |
+| ✅ PASSED | Đạt yêu cầu | ✅ Cộng vào tồn kho |
+| ❌ FAILED | Không đạt | ❌ Không cập nhật tồn kho |\
+""")
+
+        st.markdown("---")
+
+        # ── 5. Inventory Impact (QC Update) ──
+        st.markdown("#### 📦 Inventory Impact khi cập nhật QC")
+        st.markdown("""\
+| Thay đổi | Inventory Action |
+|----------|-----------------|
+| PENDING → **PASSED** | ➕ Tạo `stockInProduction` |
+| PENDING → FAILED | Không thay đổi |
+| **PASSED** → PENDING | ➖ Xóa khỏi tồn kho (`remain = 0`) |
+| **PASSED** → FAILED | ➖ Xóa khỏi tồn kho (`remain = 0`) |
+| FAILED → **PASSED** | ➕ Tạo `stockInProduction` |
+| FAILED → PENDING | Không thay đổi |\
+""")
+
+        st.markdown("---")
+
+        # ── 6. Partial QC ──
+        st.markdown("#### 🔬 Partial QC (Chia tách receipt)")
+        st.markdown("""\
+| # | Kịch bản | Kết quả |
+|---|----------|---------|
+| 1 | 100% PASSED | Original receipt → PASSED |
+| 2 | 100% PENDING | Original receipt → PENDING |
+| 3 | 100% FAILED | Original receipt → FAILED |
+| 4 | PASSED + FAILED | Split thành 2 receipts |
+| 5 | PASSED + PENDING | Split thành 2 receipts |
+| 6 | PENDING + FAILED | Split thành 2 receipts |
+| 7 | PASSED + PENDING + FAILED | Split thành 3 receipts |\
+""")
+
+        st.markdown("""\
+> **Nguyên tắc split:** Original receipt giữ status priority cao nhất.  
+> Priority: PASSED > PENDING > FAILED.  
+> Tạo receipt mới (có `parent_receipt_id`) cho phần còn lại.\
+""")
+
+        st.markdown("---")
+
+        # ── 7. Terminology ──
+        st.markdown("#### 📖 Thuật ngữ")
+        st.markdown("""\
+| Thuật ngữ | Tiếng Việt | Mô tả |
+|-----------|-----------|-------|
+| MO | Lệnh sản xuất | Lệnh sản xuất từ BOM |
+| PR | Phiếu nhập kho | Ghi nhận thành phẩm |
+| Planned Qty | SL kế hoạch | Mục tiêu sản xuất |
+| Produced Qty | SL đã SX | Tổng từ nhiều receipts |
+| Remaining | SL còn lại | Planned − Produced |
+| Yield Rate | Tỷ lệ hoàn thành | Produced ÷ Planned × 100% |
+| Batch No | Mã lô | Truy xuất nguồn gốc |
+| RAW_MATERIAL | NVL chính | Bắt buộc issue |
+| PACKAGING | Bao bì | Không bắt buộc issue |
+| CONSUMABLE | Vật tư tiêu hao | Không bắt buộc issue |
+| stockInProduction | Nhập kho SX | Loại inventory từ SX |\
+""")
+
+        st.caption("💬 Liên hệ team IT hoặc sử dụng nút 👎 để báo lỗi.")
 
 
 # ==================== Filter Bar ====================
@@ -252,6 +330,88 @@ def _render_receipts_section(queries: CompletionQueries):
     _render_receipts_list(queries, filters)
 
 
+# ==================== Data Warnings ====================
+
+# Warning type definitions: (code, emoji, description)
+_WARNING_TYPES = {
+    'DUP': ('🔁', 'Duplicate batch across orders'),
+    'EXP': ('📅', 'Expired product (past expiry date)'),
+    'OVER': ('📈', 'Overproduction (yield > 100%)'),
+    'QC': ('⏳', 'Pending QC'),
+}
+
+
+def _compute_warnings(receipts: pd.DataFrame,
+                      queries: CompletionQueries) -> pd.Series:
+    """
+    Compute warning flags for each receipt row.
+    Returns a Series of warning strings (emoji codes) aligned with receipts index.
+    
+    Warning types:
+        🔁  Duplicate batch_no across different manufacturing orders
+        📅  Product expired (expired_date < today)
+        📈  Overproduction (order yield_rate > 100%)
+        ⏳  QC still pending
+    """
+    today = pd.Timestamp(get_vietnam_today())
+
+    # Bulk check: which batch_nos are used in multiple orders
+    batch_list = receipts['batch_no'].dropna().tolist()
+    dup_batches = queries.get_duplicate_batch_info(batch_list)
+
+    def _row_warnings(row):
+        warnings = []
+
+        # 1. Duplicate batch (cross-order)
+        if row.get('batch_no') and row['batch_no'] in dup_batches:
+            warnings.append('🔁')
+
+        # 2. Expired
+        if pd.notna(row.get('expired_date')):
+            exp = pd.Timestamp(row['expired_date'])
+            if exp < today:
+                warnings.append('📅')
+
+        # 3. Overproduction
+        if row.get('yield_rate', 0) > 100:
+            warnings.append('📈')
+
+        # 4. QC Pending
+        if row.get('quality_status') == 'PENDING':
+            warnings.append('⏳')
+
+        return ' '.join(warnings)
+
+    return receipts.apply(_row_warnings, axis=1)
+
+
+def _render_warnings_summary(receipts: pd.DataFrame, warnings_col: pd.Series):
+    """
+    Render compact warning summary above the receipts table.
+    Only shown when there are warnings in the current page.
+    """
+    if warnings_col.str.len().sum() == 0:
+        return
+
+    counts = {
+        '🔁': (warnings_col.str.contains('🔁', na=False).sum(), 'duplicate batch'),
+        '📅': (warnings_col.str.contains('📅', na=False).sum(), 'expired'),
+        '📈': (warnings_col.str.contains('📈', na=False).sum(), 'overproduction'),
+        '⏳': (warnings_col.str.contains('⏳', na=False).sum(), 'pending QC'),
+    }
+
+    parts = []
+    for emoji, (count, label) in counts.items():
+        if count > 0:
+            parts.append(f"{emoji} {count} {label}")
+
+    total_affected = (warnings_col.str.len() > 0).sum()
+
+    st.warning(
+        f"**⚠️ {total_affected} receipt(s) have warnings:** {' · '.join(parts)}"
+    )
+
+
 # ==================== Receipts List ====================
 
 def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
@@ -335,12 +495,21 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     st.markdown("---")
     st.markdown("### 📋 Receipts List")
 
+    # Compute warnings for current page data
+    warnings_col = _compute_warnings(receipts, queries)
+
+    # Show summary warning bar if any issues found
+    _render_warnings_summary(receipts, warnings_col)
+
     # Initialize selected index in session state
     if 'completions_selected_idx' not in st.session_state:
         st.session_state.completions_selected_idx = None
 
     # Prepare display
     display_df = receipts.copy()
+
+    # Add warnings column
+    display_df['alerts'] = warnings_col
 
     # Set Select column based on session state (single selection)
     display_df['Select'] = False
@@ -374,10 +543,11 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     # Create editable dataframe with selection
     edited_df = st.data_editor(
         display_df[[
-            'Select', 'receipt_no', 'receipt_date_display', 'order_date_display',
+            'Select', 'alerts', 'receipt_no', 'receipt_date_display', 'order_date_display',
             'scheduled_date_display', 'order_no', 'product_display', 'qty_display',
             'batch_no', 'quality_display', 'yield_display', 'warehouse_name'
         ]].rename(columns={
+            'alerts': '⚠️',
             'receipt_no': 'Receipt No',
             'receipt_date_display': 'Receipt Date',
             'order_date_display': 'Order Date',
@@ -392,13 +562,18 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         }),
         use_container_width=True,
         hide_index=True,
-        disabled=['Receipt No', 'Receipt Date', 'Order Date', 'Scheduled Date', 'Order No',
+        disabled=['⚠️', 'Receipt No', 'Receipt Date', 'Order Date', 'Scheduled Date', 'Order No',
                   'Product', 'Quantity', 'Batch', 'Quality', 'Yield', 'Warehouse'],
         column_config={
             'Select': st.column_config.CheckboxColumn(
                 '✓',
                 help='Select row to perform actions',
                 default=False,
+                width='small'
+            ),
+            '⚠️': st.column_config.TextColumn(
+                '⚠️',
+                help='🔁 Duplicate batch · 📅 Expired · 📈 Overproduction · ⏳ Pending QC',
                 width='small'
             ),
             'Product': st.column_config.TextColumn(

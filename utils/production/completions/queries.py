@@ -502,6 +502,41 @@ class CompletionQueries:
             logger.error(f"Error getting pending receipts count for order {order_id}: {e}")
             return 0
     
+    def get_duplicate_batch_info(self, batch_nos: list) -> Dict[str, int]:
+        """
+        Check which batch_nos appear in multiple manufacturing orders.
+        Efficient bulk query — one call for entire page of data.
+        
+        Args:
+            batch_nos: List of batch numbers to check
+            
+        Returns:
+            Dict {batch_no: order_count} for duplicated batches only
+        """
+        if not batch_nos:
+            return {}
+        
+        # Deduplicate and filter empty
+        unique_batches = list(set(b for b in batch_nos if b))
+        if not unique_batches:
+            return {}
+        
+        placeholders = ','.join(['%s'] * len(unique_batches))
+        query = f"""
+            SELECT batch_no, COUNT(DISTINCT manufacturing_order_id) as order_count
+            FROM production_receipts
+            WHERE batch_no IN ({placeholders})
+            GROUP BY batch_no
+            HAVING COUNT(DISTINCT manufacturing_order_id) > 1
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=tuple(unique_batches))
+            return dict(zip(result['batch_no'], result['order_count']))
+        except Exception as e:
+            logger.error(f"Error checking duplicate batches: {e}")
+            return {}
+    
     # ==================== Dashboard Metrics ====================
     
     def get_completion_metrics(self, from_date: Optional[date] = None,
