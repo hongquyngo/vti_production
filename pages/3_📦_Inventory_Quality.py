@@ -18,6 +18,7 @@ Features:
   + Export to Excel with formatted header
 """
 
+import re
 import streamlit as st
 import logging
 import pandas as pd
@@ -69,6 +70,10 @@ def _init_session_state():
         'iq_period_preset': 'this_month',
         'iq_period_from': today.replace(day=1),
         'iq_period_to': today,
+        # Period selection
+        'iq_period_selected_idx': None,
+        'iq_period_show_detail': False,
+        'iq_period_detail_data': None,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -602,41 +607,61 @@ def render_period_metrics(df: pd.DataFrame):
         )
 
 
-def render_period_table(df: pd.DataFrame):
-    """Render period summary data table"""
+def render_period_table(df: pd.DataFrame, from_date=None, to_date=None, warehouse_id=None):
+    """Render period summary data table with single-row checkbox selection"""
     if df.empty:
         st.info("📭 No inventory movements found for the selected period and filters.")
         return
     
-    # Create display DataFrame with formatted quantities
-    display_df = df[[
-        'product_code', 'legacy_code', 'product_name', 'uom',
-        'opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty'
-    ]].copy()
+    st.markdown(f"**Found {len(df):,} products** | 💡 Tick checkbox to select a product and view transaction details")
     
-    # Append package_size to product name
-    display_df['product_name'] = df.apply(
+    # Prepare display dataframe - reset index for consistent positioning
+    display_df = df.reset_index(drop=True).copy()
+    
+    # Set Select column based on session state (single selection)
+    display_df['Select'] = False
+    if (st.session_state.iq_period_selected_idx is not None 
+            and st.session_state.iq_period_selected_idx < len(display_df)):
+        display_df.loc[st.session_state.iq_period_selected_idx, 'Select'] = True
+    
+    # Format product name with package size
+    display_df['product_name_display'] = display_df.apply(
         lambda r: f"{r['product_name']} ({r['package_size']})" 
         if pd.notna(r.get('package_size')) and str(r.get('package_size', '')).strip() 
         else r['product_name'], axis=1
     )
     
-    # Format quantity columns - show blank for zero values
+    # Format quantity columns for display - show blank for zero values
     for col in ['opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty']:
-        display_df[col] = df[col].apply(format_report_qty)
+        display_df[f'{col}_display'] = display_df[col].apply(format_report_qty)
     
-    # Rename columns for display
-    display_df.columns = [
-        'Product Code', 'Legacy Code', 'Product Name', 'UOM',
-        'Opening', 'Stock In', 'Stock Out', 'Closing'
-    ]
-    
-    st.dataframe(
-        display_df,
+    # Create editable dataframe with selection
+    edited_df = st.data_editor(
+        display_df[[
+            'Select', 'product_code', 'legacy_code', 'product_name_display', 'uom',
+            'opening_qty_display', 'stock_in_qty_display', 'stock_out_qty_display', 'closing_qty_display'
+        ]].rename(columns={
+            'product_code': 'Product Code',
+            'legacy_code': 'Legacy Code',
+            'product_name_display': 'Product Name',
+            'uom': 'UOM',
+            'opening_qty_display': 'Opening',
+            'stock_in_qty_display': 'Stock In',
+            'stock_out_qty_display': 'Stock Out',
+            'closing_qty_display': 'Closing',
+        }),
         use_container_width=True,
         hide_index=True,
         height=min(500, 35 * len(display_df) + 38),
+        disabled=['Product Code', 'Legacy Code', 'Product Name', 'UOM',
+                  'Opening', 'Stock In', 'Stock Out', 'Closing'],
         column_config={
+            'Select': st.column_config.CheckboxColumn(
+                '✓',
+                help='Select product to view transaction details',
+                default=False,
+                width='small'
+            ),
             'Product Code': st.column_config.TextColumn('Product Code', width='medium'),
             'Legacy Code': st.column_config.TextColumn('Legacy Code', width='medium'),
             'Product Name': st.column_config.TextColumn('Product Name', width='large'),
@@ -645,8 +670,244 @@ def render_period_table(df: pd.DataFrame):
             'Stock In': st.column_config.TextColumn('Stock In', width='medium'),
             'Stock Out': st.column_config.TextColumn('Stock Out', width='medium'),
             'Closing': st.column_config.TextColumn('Closing', width='medium'),
-        }
+        },
+        key="iq_period_table_editor"
     )
+    
+    # Handle single selection - find newly selected row
+    selected_indices = edited_df[edited_df['Select'] == True].index.tolist()
+    
+    if selected_indices:
+        # If multiple selected (user clicked new one), keep only the newest
+        if len(selected_indices) > 1:
+            new_selection = [idx for idx in selected_indices 
+                            if idx != st.session_state.iq_period_selected_idx]
+            if new_selection:
+                st.session_state.iq_period_selected_idx = new_selection[0]
+                st.rerun()
+        else:
+            st.session_state.iq_period_selected_idx = selected_indices[0]
+    else:
+        st.session_state.iq_period_selected_idx = None
+    
+    # Action buttons - only show when row is selected
+    if (st.session_state.iq_period_selected_idx is not None 
+            and st.session_state.iq_period_selected_idx < len(display_df)):
+        selected_row = display_df.iloc[st.session_state.iq_period_selected_idx]
+        product_name = selected_row.get('product_name', 'Unknown')
+        product_code = selected_row.get('product_code', '')
+        opening = format_report_qty(selected_row.get('opening_qty', 0))
+        closing = format_report_qty(selected_row.get('closing_qty', 0))
+        
+        st.markdown("---")
+        st.markdown(
+            f"**Selected:** `{product_code}` | {product_name} "
+            f"| Opening: **{opening}** → Closing: **{closing}**"
+        )
+        
+        col1, col2, col3 = st.columns([1, 1, 3])
+        
+        with col1:
+            if st.button("🔍 View Details", type="primary", use_container_width=True, 
+                         key="btn_period_detail"):
+                st.session_state['iq_period_detail_data'] = {
+                    'product_id': int(selected_row['product_id']),
+                    'product_code': product_code,
+                    'legacy_code': selected_row.get('legacy_code', ''),
+                    'product_name': product_name,
+                    'package_size': selected_row.get('package_size', ''),
+                    'brand': selected_row.get('brand', ''),
+                    'uom': selected_row.get('uom', ''),
+                    'opening_qty': float(selected_row.get('opening_qty', 0)),
+                    'stock_in_qty': float(selected_row.get('stock_in_qty', 0)),
+                    'stock_out_qty': float(selected_row.get('stock_out_qty', 0)),
+                    'closing_qty': float(selected_row.get('closing_qty', 0)),
+                    'from_date': from_date,
+                    'to_date': to_date,
+                    'warehouse_id': warehouse_id,
+                }
+                st.session_state['iq_period_show_detail'] = True
+                st.rerun()
+        
+        with col2:
+            if st.button("❌ Deselect", use_container_width=True, key="btn_period_deselect"):
+                st.session_state['iq_period_selected_idx'] = None
+                st.rerun()
+    else:
+        st.info("💡 Tick checkbox to select a product and view transaction details")
+
+
+def _format_txn_type(raw_type: str) -> str:
+    """Format inventory history transaction type for display"""
+    if not raw_type:
+        return '-'
+    display_map = {
+        'stockIn': 'Purchase',
+        'stockInOpeningBalance': 'Opening Balance',
+        'stockInProduction': 'Production Receipt',
+        'stockInProductionReturn': 'Production Return',
+        'stockInWarehouseTransfer': 'WH Transfer In',
+        'stockOutDelivery': 'Delivery',
+        'stockOutProduction': 'Material Issue',
+        'stockOutWarehouseTransfer': 'WH Transfer Out',
+        'stockOutInternalUse': 'Internal Use',
+    }
+    if raw_type in display_map:
+        return display_map[raw_type]
+    # Fallback: camelCase to Title Case with spaces
+    display = raw_type
+    if display.startswith('stockIn'):
+        display = display[7:]
+    elif display.startswith('stockOut'):
+        display = display[8:]
+    if display:
+        display = re.sub(r'([A-Z])', r' \1', display).strip().title()
+    return display or raw_type
+
+
+@st.dialog("📋 Product Period Detail", width="large")
+def show_period_detail_dialog(detail_data: dict):
+    """Show detailed stock in/out transactions for selected product in period"""
+    product_name = detail_data.get('product_name', 'Unknown')
+    product_code = detail_data.get('product_code', '')
+    legacy_code = detail_data.get('legacy_code', '')
+    uom = detail_data.get('uom', '')
+    pkg = detail_data.get('package_size', '')
+    from_date = detail_data.get('from_date')
+    to_date = detail_data.get('to_date')
+    
+    # Header
+    st.markdown(f"### 📦 {product_name}")
+    code_parts = [f"`{product_code}`"]
+    if legacy_code:
+        code_parts.append(f"Legacy: `{legacy_code}`")
+    if pkg:
+        code_parts.append(f"Pkg: {pkg}")
+    code_parts.append(f"UOM: {uom}")
+    st.markdown(" | ".join(code_parts))
+    
+    if from_date and to_date:
+        st.markdown(
+            f"**Period:** {from_date.strftime('%d/%m/%Y')} → {to_date.strftime('%d/%m/%Y')}"
+        )
+    st.markdown("---")
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("📊 Opening", format_quantity(detail_data.get('opening_qty', 0)))
+    with col2:
+        st.metric("📥 Stock In", format_quantity(detail_data.get('stock_in_qty', 0)))
+    with col3:
+        st.metric("📤 Stock Out", format_quantity(detail_data.get('stock_out_qty', 0)))
+    with col4:
+        st.metric("📊 Closing", format_quantity(detail_data.get('closing_qty', 0)))
+    
+    st.markdown("---")
+    
+    # Load detailed transactions
+    st.markdown("#### 📝 Transaction Details")
+    
+    with st.spinner("Loading transactions..."):
+        txn_df = data_loader.get_product_period_detail(
+            product_id=detail_data['product_id'],
+            from_date=from_date,
+            to_date=to_date,
+            warehouse_id=detail_data.get('warehouse_id'),
+        )
+    
+    if txn_df.empty:
+        st.info("No transactions found for this product in the selected period.")
+    else:
+        # Separate Stock In and Stock Out for tabbed view
+        tab_all, tab_in, tab_out = st.tabs([
+            f"📋 All ({len(txn_df)})",
+            f"📥 Stock In ({len(txn_df[txn_df['direction'] == 'Stock In'])})",
+            f"📤 Stock Out ({len(txn_df[txn_df['direction'] == 'Stock Out'])})"
+        ])
+        
+        def _render_txn_table(data: pd.DataFrame):
+            """Render a transaction dataframe"""
+            if data.empty:
+                st.info("No transactions.")
+                return
+            
+            disp = data.copy()
+            
+            # Format date
+            disp['transaction_date'] = pd.to_datetime(
+                disp['transaction_date']
+            ).dt.strftime('%d/%m/%Y %H:%M')
+            
+            # Format direction with icon
+            disp['direction'] = disp['direction'].apply(
+                lambda x: '📥 In' if x == 'Stock In' else '📤 Out'
+            )
+            
+            # Clean up type display
+            disp['transaction_type'] = disp['transaction_type'].apply(_format_txn_type)
+            
+            # Format quantity
+            disp['quantity'] = disp['quantity'].apply(format_quantity)
+            
+            # Fill NaN for display
+            for col in ['reference_no', 'related_order', 'batch_no', 'created_by_name']:
+                if col in disp.columns:
+                    disp[col] = disp[col].fillna('-')
+            
+            # Select & rename columns
+            col_map = {
+                'transaction_date': 'Date',
+                'direction': 'Direction',
+                'transaction_type': 'Type',
+                'reference_no': 'Reference',
+                'related_order': 'MO/Order',
+                'batch_no': 'Batch',
+                'quantity': 'Quantity',
+                'uom': 'UOM',
+                'warehouse_name': 'Warehouse',
+                'created_by_name': 'Created By',
+            }
+            
+            existing = [c for c in col_map if c in disp.columns]
+            disp = disp[existing].rename(columns=col_map)
+            
+            st.dataframe(
+                disp,
+                use_container_width=True,
+                hide_index=True,
+                height=min(400, 35 * len(disp) + 38),
+                column_config={
+                    'Date': st.column_config.TextColumn('Date', width='medium'),
+                    'Direction': st.column_config.TextColumn('Direction', width='small'),
+                    'Type': st.column_config.TextColumn('Type', width='medium'),
+                    'Reference': st.column_config.TextColumn('Reference', width='medium'),
+                    'MO/Order': st.column_config.TextColumn('MO/Order', width='medium'),
+                    'Batch': st.column_config.TextColumn('Batch', width='medium'),
+                    'Quantity': st.column_config.TextColumn('Quantity', width='small'),
+                    'UOM': st.column_config.TextColumn('UOM', width='small'),
+                    'Warehouse': st.column_config.TextColumn('Warehouse', width='medium'),
+                    'Created By': st.column_config.TextColumn('Created By', width='medium'),
+                }
+            )
+        
+        with tab_all:
+            _render_txn_table(txn_df)
+        
+        with tab_in:
+            _render_txn_table(txn_df[txn_df['direction'] == 'Stock In'].reset_index(drop=True))
+        
+        with tab_out:
+            _render_txn_table(txn_df[txn_df['direction'] == 'Stock Out'].reset_index(drop=True))
+    
+    # Close button
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("✖️ Close", use_container_width=True, key="btn_close_period_detail"):
+            st.session_state['iq_period_show_detail'] = False
+            st.session_state['iq_period_detail_data'] = None
+            st.rerun()
 
 
 def render_period_export(df: pd.DataFrame, from_date, to_date):
@@ -730,13 +991,17 @@ def render_period_summary():
     render_period_metrics(df)
     st.markdown("---")
     
-    # Data table
-    render_period_table(df)
+    # Data table with selection
+    render_period_table(df, from_date=from_date, to_date=to_date, warehouse_id=warehouse_id)
     
     # Export
     if not df.empty:
         st.markdown("---")
         render_period_export(df, from_date, to_date)
+    
+    # Detail dialog
+    if st.session_state.get('iq_period_show_detail') and st.session_state.get('iq_period_detail_data'):
+        show_period_detail_dialog(st.session_state['iq_period_detail_data'])
 
 
 # ============================================================================

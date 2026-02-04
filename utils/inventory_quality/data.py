@@ -430,6 +430,155 @@ class InventoryQualityData:
             logger.error(f"Error loading inventory period summary: {e}")
             return pd.DataFrame()
     
+    # ==================== Period Detail ====================
+    
+    @st.cache_data(ttl=300, show_spinner=False)
+    def get_product_period_detail(_self,
+                                   product_id: int,
+                                   from_date,
+                                   to_date,
+                                   warehouse_id: Optional[int] = None) -> pd.DataFrame:
+        """
+        Get detailed stock in/out transactions for a specific product within a period.
+        
+        Joins to source tables to resolve reference numbers:
+        - stockIn           → stock_in_details → arrival_details → purchase_orders (PO number)
+        - stockInProduction → production_receipts (receipt_no) → manufacturing_orders
+        - stockInProductionReturn → material_return_details → material_returns (return_no)
+        - stockOutDelivery  → stock_out_delivery (dn_number) via delivery_id FK
+        - stockOutProduction → material_issue_details → material_issues (issue_no)
+        - stockOutWarehouseTransfer → stock_out_warehouse_transfer (transfer_number)
+        - stockOutInternalUse → stock_out_internal_use (internal_use_number)
+        
+        Args:
+            product_id: Product ID
+            from_date: Period start date
+            to_date: Period end date
+            warehouse_id: Filter by warehouse or None for all
+        
+        Returns:
+            DataFrame with individual transactions including reference_no, related_order
+        """
+        try:
+            from datetime import timedelta
+            to_date_next = to_date + timedelta(days=1)
+            
+            query = """
+                SELECT 
+                    ih.id,
+                    ih.created_date AS transaction_date,
+                    ih.type AS transaction_type,
+                    CASE WHEN ih.type LIKE :sin_pattern 
+                         THEN 'Stock In' ELSE 'Stock Out' END AS direction,
+                    ih.quantity,
+                    p.uom,
+                    ih.batch_no,
+                    wh.name AS warehouse_name,
+                    
+                    -- Reference number: pick the most meaningful doc number
+                    COALESCE(
+                        pr.receipt_no,
+                        mr.return_no,
+                        po.po_number,
+                        a.arrival_note_number,
+                        sod.dn_number,
+                        mi.issue_no,
+                        sowt.warehouse_transfer_number,
+                        soiu.internal_use_number,
+                        CASE WHEN ih.type = 'stockInOpeningBalance' 
+                             THEN 'Opening Balance' ELSE NULL END
+                    ) AS reference_no,
+                    
+                    -- Related manufacturing order (if applicable)
+                    COALESCE(
+                        mo_prod.order_no, 
+                        mo_return.order_no, 
+                        mo_issue.order_no
+                    ) AS related_order,
+                    
+                    -- Created by (employee name)
+                    CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
+                    
+                FROM inventory_histories ih
+                JOIN products p ON ih.product_id = p.id
+                LEFT JOIN warehouses wh ON ih.warehouse_id = wh.id
+                LEFT JOIN employees emp ON ih.created_by = emp.keycloak_id
+                
+                -- === Stock In: Production Receipt ===
+                LEFT JOIN production_receipts pr 
+                    ON ih.action_detail_id = pr.id 
+                   AND ih.type = 'stockInProduction'
+                LEFT JOIN manufacturing_orders mo_prod 
+                    ON pr.manufacturing_order_id = mo_prod.id
+                
+                -- === Stock In: Production Return ===
+                LEFT JOIN material_return_details mrd 
+                    ON ih.action_detail_id = mrd.id 
+                   AND ih.type = 'stockInProductionReturn'
+                LEFT JOIN material_returns mr 
+                    ON mrd.material_return_id = mr.id
+                LEFT JOIN manufacturing_orders mo_return 
+                    ON mr.manufacturing_order_id = mo_return.id
+                
+                -- === Stock In: Purchase (PO traceability) ===
+                LEFT JOIN stock_in_details sid 
+                    ON ih.action_detail_id = sid.id 
+                   AND ih.type = 'stockIn'
+                LEFT JOIN arrival_details ad 
+                    ON sid.arrival_detail_id = ad.id
+                LEFT JOIN arrivals a 
+                    ON ad.arrival_id = a.id
+                LEFT JOIN purchase_orders po 
+                    ON ad.purchase_order_id = po.id
+                
+                -- === Stock Out: Delivery ===
+                LEFT JOIN stock_out_delivery sod 
+                    ON ih.delivery_id = sod.id
+                
+                -- === Stock Out: Production (Material Issue) ===
+                LEFT JOIN material_issue_details mid_out 
+                    ON ih.action_detail_id = mid_out.id 
+                   AND ih.type = 'stockOutProduction'
+                LEFT JOIN material_issues mi 
+                    ON mid_out.material_issue_id = mi.id
+                LEFT JOIN manufacturing_orders mo_issue 
+                    ON mi.manufacturing_order_id = mo_issue.id
+                
+                -- === Stock Out: Warehouse Transfer ===
+                LEFT JOIN stock_out_warehouse_transfer sowt 
+                    ON ih.warehouse_transfer_stock_out_id = sowt.id
+                
+                -- === Stock Out: Internal Use ===
+                LEFT JOIN stock_out_internal_use soiu 
+                    ON ih.internal_stock_out_id = soiu.id
+                
+                WHERE ih.product_id = :product_id
+                  AND ih.delete_flag = 0
+                  AND ih.created_date >= :from_date
+                  AND ih.created_date < :to_date_next
+            """
+            params = {
+                'sin_pattern': 'stockIn%',
+                'product_id': product_id,
+                'from_date': from_date,
+                'to_date_next': to_date_next,
+            }
+            
+            if warehouse_id:
+                query += " AND ih.warehouse_id = :warehouse_id"
+                params['warehouse_id'] = warehouse_id
+            
+            query += " ORDER BY ih.created_date, ih.id"
+            
+            with _self.engine.connect() as conn:
+                df = pd.read_sql(text(query), conn, params=params)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error loading product period detail: {e}")
+            return pd.DataFrame()
+    
     # ==================== Export Functions ====================
     
     def get_export_data(self, category: Optional[str] = None,
