@@ -933,6 +933,7 @@ def _render_pivot_chart(pivot_df: pd.DataFrame, config: Dict[str, Any]):
     st.plotly_chart(fig, use_container_width=True)
 
 
+@st.fragment
 def _render_pivot_view(queries: OverviewQueries, filters: Dict[str, Any]):
     """Render the complete Pivot View tab"""
     
@@ -1035,6 +1036,7 @@ def _render_pivot_view(queries: OverviewQueries, filters: Dict[str, Any]):
 
 # ==================== Detail View (extracted) ====================
 
+@st.fragment
 def _render_detail_view(queries: OverviewQueries, filters: Dict[str, Any]):
     """Render the Detail View tab (original production data table + analytics)"""
     date_type = filters.get('date_type')
@@ -1110,9 +1112,56 @@ def render_overview_tab():
     
     queries = OverviewQueries()
     
-    # Header
-    st.subheader("📊 Production Overview")
-    st.caption("Monitor production workflow: Orders → Materials → Production → Quality")
+    # Header with help
+    hdr_col, help_col = st.columns([6, 1])
+    with hdr_col:
+        st.subheader("📊 Production Overview")
+        st.caption("Monitor production workflow: Orders → Materials → Production → Quality")
+    with help_col:
+        with st.popover("❓ Help", use_container_width=True):
+            st.markdown("""
+**📖 How to use Production Overview**
+
+**🗓️ Date Type** — controls which date is used to filter & group:
+- **Order Date**: When MO was created (for production planning)
+- **Scheduled Date**: When MO is due (for deadline tracking)
+- **Completion Date**: When MO was closed — only shows completed orders
+- **Receipt Date**: When output was received/QC'd — for **accounting & MISA**
+
+---
+
+**📊 Pivot View Measures**
+
+*MO-level (Order / Scheduled / Completion Date):*
+| Measure | Meaning |
+|---|---|
+| **MO Count** | Number of Manufacturing Orders |
+| **Planned Qty** | Target production quantity |
+| **Produced Qty** | Total output from all receipts (**includes** PASSED + FAILED + PENDING QC) |
+| **Yield %** | Produced ÷ Planned × 100 |
+
+*Receipt-level (Receipt Date):*
+| Measure | Meaning |
+|---|---|
+| **Receipt Qty** | Total received quantity (all QC statuses) |
+| **QC Passed Qty** | Only PASSED receipts → **stocked into inventory** |
+| **QC Failed Qty** | Failed QC — **not** in inventory |
+| **QC Pending Qty** | Awaiting QC inspection |
+| **Pass Rate %** | Passed ÷ Total receipts × 100 |
+
+---
+
+**⚠️ Produced Qty vs QC Passed Qty**
+- `Produced Qty` = everything produced (PASSED + FAILED + PENDING)
+- `QC Passed Qty` = only QC-approved → actual stock in
+- To see actual inventory intake, use **Receipt Date** + **QC Passed Qty**
+
+---
+
+**📋 Detail View** — 1 row = 1 material issue detail (batch-level)
+**📊 Pivot View** — aggregated cross-tab by time period × dimension
+**📥 MISA Export** — aggregated by MO + material code (in Detail View → Export)
+""")
     
     # Shared filters (Date Type, Date Range, Status, Search)
     filters = _render_filter_bar()
