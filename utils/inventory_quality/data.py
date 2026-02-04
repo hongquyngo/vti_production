@@ -356,6 +356,7 @@ class InventoryQualityData:
                 SELECT 
                     ih.product_id,
                     p.pt_code AS product_code,
+                    p.legacy_pt_code AS legacy_code,
                     p.name AS product_name,
                     p.uom,
                     p.package_size,
@@ -404,7 +405,7 @@ class InventoryQualityData:
                 params['search'] = f"%{product_search}%"
             
             query += """
-                GROUP BY ih.product_id, p.pt_code, p.name, p.uom, 
+                GROUP BY ih.product_id, p.pt_code, p.legacy_pt_code, p.name, p.uom, 
                          p.package_size, b.brand_name
                 ORDER BY p.name
             """

@@ -610,7 +610,7 @@ def render_period_table(df: pd.DataFrame):
     
     # Create display DataFrame with formatted quantities
     display_df = df[[
-        'product_code', 'product_name', 'uom',
+        'product_code', 'legacy_code', 'product_name', 'uom',
         'opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty'
     ]].copy()
     
@@ -620,7 +620,7 @@ def render_period_table(df: pd.DataFrame):
     
     # Rename columns for display
     display_df.columns = [
-        'Product Code', 'Product Name', 'UOM',
+        'Product Code', 'Legacy Code', 'Product Name', 'UOM',
         'Opening', 'Stock In', 'Stock Out', 'Closing'
     ]
     
@@ -631,6 +631,7 @@ def render_period_table(df: pd.DataFrame):
         height=min(500, 35 * len(display_df) + 38),
         column_config={
             'Product Code': st.column_config.TextColumn('Product Code', width='medium'),
+            'Legacy Code': st.column_config.TextColumn('Legacy Code', width='medium'),
             'Product Name': st.column_config.TextColumn('Product Name', width='large'),
             'UOM': st.column_config.TextColumn('UOM', width='small'),
             'Opening': st.column_config.TextColumn('Opening', width='medium'),
@@ -648,11 +649,11 @@ def render_period_export(df: pd.DataFrame, from_date, to_date):
     
     # Prepare export DataFrame with proper column names
     export_df = df[[
-        'product_code', 'product_name', 'uom',
+        'product_code', 'legacy_code', 'product_name', 'uom',
         'opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty'
     ]].copy()
     export_df.columns = [
-        'Product Code', 'Product Name', 'UOM',
+        'Product Code', 'Legacy Code', 'Product Name', 'UOM',
         'Opening (Qty)', 'Stock In (Qty)', 'Stock Out (Qty)', 'Closing (Qty)'
     ]
     
