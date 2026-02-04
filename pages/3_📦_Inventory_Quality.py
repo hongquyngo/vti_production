@@ -614,6 +614,13 @@ def render_period_table(df: pd.DataFrame):
         'opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty'
     ]].copy()
     
+    # Append package_size to product name
+    display_df['product_name'] = df.apply(
+        lambda r: f"{r['product_name']} ({r['package_size']})" 
+        if pd.notna(r.get('package_size')) and str(r.get('package_size', '')).strip() 
+        else r['product_name'], axis=1
+    )
+    
     # Format quantity columns - show blank for zero values
     for col in ['opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty']:
         display_df[col] = df[col].apply(format_report_qty)
@@ -652,6 +659,14 @@ def render_period_export(df: pd.DataFrame, from_date, to_date):
         'product_code', 'legacy_code', 'product_name', 'uom',
         'opening_qty', 'stock_in_qty', 'stock_out_qty', 'closing_qty'
     ]].copy()
+    
+    # Append package_size to product name
+    export_df['product_name'] = df.apply(
+        lambda r: f"{r['product_name']} ({r['package_size']})" 
+        if pd.notna(r.get('package_size')) and str(r.get('package_size', '')).strip() 
+        else r['product_name'], axis=1
+    )
+    
     export_df.columns = [
         'Product Code', 'Legacy Code', 'Product Name', 'UOM',
         'Opening (Qty)', 'Stock In (Qty)', 'Stock Out (Qty)', 'Closing (Qty)'
