@@ -185,7 +185,7 @@ def render_filters():
     with col3:
         product_search = st.text_input(
             "Search Product",
-            placeholder="Enter product name or PT code...",
+            placeholder="Name, PT code, Legacy code, Pkg size...",
             key="iq_product_search"
         )
     
@@ -266,7 +266,7 @@ def render_data_table(df: pd.DataFrame):
             'days_display': 'Age',
             'value_display': 'Value'
         }),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         height=450,
         disabled=['Category', 'Product', 'Pkg Size', 'PT Code', 'Batch', 'Quantity', 'Warehouse', 'Source', 'Age', 'Value'],
@@ -565,7 +565,7 @@ def render_period_filters():
     with col5:
         product_search = st.text_input(
             "Search Product",
-            placeholder="Name or PT code...",
+            placeholder="Name, PT code, Legacy code, Pkg size...",
             key="iq_period_product_search"
         )
     
@@ -650,7 +650,7 @@ def render_period_table(df: pd.DataFrame, from_date=None, to_date=None, warehous
             'stock_out_qty_display': 'Stock Out',
             'closing_qty_display': 'Closing',
         }),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         height=min(500, 35 * len(display_df) + 38),
         disabled=['Product Code', 'Legacy Code', 'Product Name', 'UOM',
@@ -765,6 +765,202 @@ def _format_txn_type(raw_type: str) -> str:
     return display or raw_type
 
 
+def _render_reference_detail(detail: dict):
+    """Render reference document detail based on doc_type"""
+    doc_type = detail.get('doc_type', 'Unknown')
+    
+    # Note for unsupported types
+    if detail.get('_note'):
+        st.info(detail['_note'])
+        return
+    
+    renderer_map = {
+        'Purchase': _render_ref_purchase,
+        'Production Receipt': _render_ref_production_receipt,
+        'Material Return': _render_ref_material_return,
+        'Material Issue': _render_ref_material_issue,
+        'Delivery': _render_ref_delivery,
+        'Warehouse Transfer': _render_ref_warehouse_transfer,
+        'Internal Use': _render_ref_internal_use,
+        'Opening Balance': _render_ref_opening_balance,
+    }
+    
+    renderer = renderer_map.get(doc_type)
+    if renderer:
+        with st.expander(f"📄 {doc_type} Detail", expanded=True):
+            renderer(detail)
+    else:
+        st.info(f"Detail view not available for type: {doc_type}")
+
+
+def _render_ref_purchase(d: dict):
+    """Render Purchase (PO → Arrival → Stock In) detail"""
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**📋 Purchase Order**")
+        st.markdown(f"PO Number: `{d.get('po_number', '-')}`")
+        st.markdown(f"PO Date: {format_date(d.get('po_date'))}")
+        st.markdown(f"PO Type: {d.get('po_type', '-')}")
+        if d.get('external_ref_number'):
+            st.markdown(f"External Ref: `{d['external_ref_number']}`")
+    with col2:
+        st.markdown("**📦 Arrival**")
+        st.markdown(f"Arrival Note: `{d.get('arrival_note_number', '-')}`")
+        st.markdown(f"Arrival Date: {format_date(d.get('arrival_date'))}")
+        st.markdown(f"Status: {d.get('arrival_status', '-')}")
+        st.markdown(f"Ship Method: {d.get('ship_method', '-')}")
+    with col3:
+        st.markdown("**💰 Cost & Vendor**")
+        st.markdown(f"Vendor: {d.get('vendor_name', '-')}")
+        landed = d.get('landed_cost')
+        cur = d.get('landed_cost_currency', '')
+        st.markdown(f"Landed Cost: {format_currency(landed) if landed else '-'} {cur}")
+        st.markdown(f"Arrival Qty: {format_quantity(d.get('arrival_quantity'))}")
+        st.markdown(f"Stocked In: {format_quantity(d.get('stocked_in_qty'))}")
+
+
+def _render_ref_production_receipt(d: dict):
+    """Render Production Receipt detail"""
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**📋 Receipt**")
+        st.markdown(f"Receipt No: `{d.get('receipt_no', '-')}`")
+        st.markdown(f"Receipt Date: {format_date(d.get('receipt_date'))}")
+        st.markdown(f"QC Status: {d.get('quality_status', '-')}")
+        if d.get('defect_type'):
+            st.markdown(f"Defect Type: {d['defect_type']}")
+    with col2:
+        st.markdown("**📦 Product**")
+        st.markdown(f"Batch: `{d.get('batch_no', '-')}`")
+        st.markdown(f"Quantity: {format_quantity(d.get('quantity'))} {d.get('uom', '')}")
+        st.markdown(f"Expiry: {format_date(d.get('expired_date'))}")
+        st.markdown(f"Warehouse: {d.get('warehouse_name', '-')}")
+    with col3:
+        st.markdown("**🏭 Manufacturing Order**")
+        st.markdown(f"MO: `{d.get('mo_number', '-')}`")
+        st.markdown(f"MO Status: {d.get('mo_status', '-')}")
+        st.markdown(f"Planned Qty: {format_quantity(d.get('planned_qty'))}")
+        st.markdown(f"Produced Qty: {format_quantity(d.get('produced_qty'))}")
+        if d.get('bom_name'):
+            st.markdown(f"BOM: {d['bom_name']}")
+    if d.get('notes'):
+        st.markdown(f"**Notes:** {d['notes']}")
+
+
+def _render_ref_material_return(d: dict):
+    """Render Material Return detail"""
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**📋 Return**")
+        st.markdown(f"Return No: `{d.get('return_no', '-')}`")
+        st.markdown(f"Return Date: {format_date(d.get('return_date'))}")
+        st.markdown(f"Status: {d.get('status', '-')}")
+        st.markdown(f"Reason: {d.get('reason', '-')}")
+    with col2:
+        st.markdown("**📦 Material**")
+        st.markdown(f"Material: {d.get('material_name', '-')}")
+        st.markdown(f"Batch: `{d.get('batch_no', '-')}`")
+        st.markdown(f"Quantity: {format_quantity(d.get('quantity'))} {d.get('uom', '')}")
+        st.markdown(f"Condition: {d.get('condition', '-')}")
+    with col3:
+        st.markdown("**🔗 References**")
+        st.markdown(f"MO: `{d.get('mo_number', '-')}`")
+        st.markdown(f"Original Issue: `{d.get('original_issue_no', '-')}`")
+        st.markdown(f"Warehouse: {d.get('warehouse_name', '-')}")
+        if d.get('returned_by_name') and d['returned_by_name'].strip():
+            st.markdown(f"Returned By: {d['returned_by_name']}")
+
+
+def _render_ref_material_issue(d: dict):
+    """Render Material Issue detail"""
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**📋 Issue**")
+        st.markdown(f"Issue No: `{d.get('issue_no', '-')}`")
+        st.markdown(f"Issue Date: {format_date(d.get('issue_date'))}")
+        st.markdown(f"Status: {d.get('status', '-')}")
+    with col2:
+        st.markdown("**📦 Material**")
+        st.markdown(f"Material: {d.get('material_name', '-')}")
+        st.markdown(f"PT Code: `{d.get('pt_code', '-')}`")
+        st.markdown(f"Batch: `{d.get('batch_no', '-')}`")
+        st.markdown(f"Quantity: {format_quantity(d.get('quantity'))} {d.get('uom', '')}")
+        if d.get('is_alternative'):
+            st.markdown(f"⚠️ Alternative for: {d.get('original_material_name', '-')}")
+    with col3:
+        st.markdown("**🏭 Manufacturing**")
+        st.markdown(f"MO: `{d.get('mo_number', '-')}`")
+        st.markdown(f"MO Status: {d.get('mo_status', '-')}")
+        st.markdown(f"Warehouse: {d.get('warehouse_name', '-')}")
+        if d.get('issued_by_name') and d['issued_by_name'].strip():
+            st.markdown(f"Issued By: {d['issued_by_name']}")
+    if d.get('notes'):
+        st.markdown(f"**Notes:** {d['notes']}")
+
+
+def _render_ref_delivery(d: dict):
+    """Render Delivery detail"""
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**📋 Delivery Note**")
+        st.markdown(f"DN Number: `{d.get('dn_number', '-')}`")
+        st.markdown(f"Status: {d.get('status', '-')}")
+        st.markdown(f"Shipment: {d.get('shipment_status', '-')}")
+    with col2:
+        st.markdown("**📅 Dates**")
+        st.markdown(f"Dispatch: {format_date(d.get('dispatch_date'))}")
+        st.markdown(f"Delivered: {format_date(d.get('date_delivered'))}")
+        st.markdown(f"Method: {d.get('delivery_method', '-')}")
+    with col3:
+        st.markdown("**🏢 Parties**")
+        st.markdown(f"Buyer: {d.get('buyer_name', '-')}")
+        st.markdown(f"Seller: {d.get('seller_name', '-')}")
+        if d.get('carrier_name'):
+            st.markdown(f"Carrier: {d['carrier_name']}")
+        st.markdown(f"Warehouse: {d.get('warehouse_name', '-')}")
+
+
+def _render_ref_warehouse_transfer(d: dict):
+    """Render Warehouse Transfer detail"""
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**📋 Transfer**")
+        st.markdown(f"Transfer No: `{d.get('warehouse_transfer_number', '-')}`")
+        st.markdown(f"Date: {format_date(d.get('created_date'))}")
+        finished = '✅ Yes' if d.get('is_finished') else '⏳ No'
+        st.markdown(f"Finished: {finished}")
+    with col2:
+        st.markdown("**🏢 Info**")
+        st.markdown(f"Company: {d.get('company_name', '-')}")
+        st.markdown(f"Warehouse: {d.get('warehouse_name', '-')}")
+        st.markdown(f"Created By: {d.get('created_by_name', '-')}")
+
+
+def _render_ref_internal_use(d: dict):
+    """Render Internal Use detail"""
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**📋 Internal Use**")
+        st.markdown(f"Number: `{d.get('internal_use_number', '-')}`")
+        st.markdown(f"Date: {format_date(d.get('created_date'))}")
+    with col2:
+        st.markdown("**🏢 Info**")
+        st.markdown(f"Company: {d.get('company_name', '-')}")
+        st.markdown(f"Requester: {d.get('requester_name', '-')}")
+        st.markdown(f"Warehouse: {d.get('warehouse_name', '-')}")
+
+
+def _render_ref_opening_balance(d: dict):
+    """Render Opening Balance detail"""
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Date:** {format_date(d.get('created_date'))}")
+        st.markdown(f"**Quantity:** {format_quantity(d.get('quantity'))} {d.get('uom', '')}")
+    with col2:
+        st.markdown(f"**Batch:** `{d.get('batch_no', '-')}`")
+        st.markdown(f"**Warehouse:** {d.get('warehouse_name', '-')}")
+
+
 @st.dialog("📋 Product Period Detail", width="large")
 def show_period_detail_dialog(detail_data: dict):
     """Show detailed stock in/out transactions for selected product in period"""
@@ -874,7 +1070,7 @@ def show_period_detail_dialog(detail_data: dict):
             
             st.dataframe(
                 disp,
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
                 height=min(400, 35 * len(disp) + 38),
                 column_config={
@@ -899,6 +1095,41 @@ def show_period_detail_dialog(detail_data: dict):
         
         with tab_out:
             _render_txn_table(txn_df[txn_df['direction'] == 'Stock Out'].reset_index(drop=True))
+        
+        # ---- Reference Detail Section ----
+        st.markdown("---")
+        st.markdown("#### 🔎 Reference Document Detail")
+        st.caption("Select a transaction to view its source document")
+        
+        # Build selectbox options from txn_df
+        txn_labels = ["-- Select a transaction --"]
+        for idx, row in txn_df.iterrows():
+            ref = row.get('reference_no', '-') or '-'
+            txn_type_display = _format_txn_type(row.get('transaction_type', ''))
+            txn_date = pd.to_datetime(row['transaction_date']).strftime('%d/%m/%Y') if pd.notna(row.get('transaction_date')) else ''
+            direction = '📥' if row.get('direction') == 'Stock In' else '📤'
+            txn_labels.append(f"{direction} {txn_date} | {txn_type_display} | {ref}")
+        
+        selected_idx = st.selectbox(
+            "Transaction",
+            options=range(len(txn_labels)),
+            format_func=lambda i: txn_labels[i],
+            key="iq_ref_detail_select",
+            label_visibility="collapsed"
+        )
+        
+        if selected_idx > 0:
+            row_data = txn_df.iloc[selected_idx - 1]
+            ih_id = int(row_data['id'])
+            txn_type = row_data.get('transaction_type', '')
+            
+            with st.spinner("Loading reference detail..."):
+                ref_detail = data_loader.get_reference_detail(ih_id, txn_type)
+            
+            if ref_detail:
+                _render_reference_detail(ref_detail)
+            else:
+                st.info("No additional detail available for this transaction.")
     
     # Close button
     st.markdown("---")

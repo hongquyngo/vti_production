@@ -58,7 +58,7 @@ class InventoryQualityData:
                 params['warehouse_id'] = warehouse_id
             
             if product_search:
-                query += " AND (product_name LIKE :search OR pt_code LIKE :search OR package_size LIKE :search)"
+                query += " AND (product_name LIKE :search OR pt_code LIKE :search OR legacy_pt_code LIKE :search OR package_size LIKE :search)"
                 params['search'] = f"%{product_search}%"
             
             query += " ORDER BY category, product_name, batch_number"
@@ -401,7 +401,7 @@ class InventoryQualityData:
                 params['warehouse_id'] = warehouse_id
             
             if product_search:
-                query += " AND (p.name LIKE :search OR p.pt_code LIKE :search)"
+                query += " AND (p.name LIKE :search OR p.pt_code LIKE :search OR p.legacy_pt_code LIKE :search OR p.package_size LIKE :search)"
                 params['search'] = f"%{product_search}%"
             
             query += """
@@ -578,6 +578,309 @@ class InventoryQualityData:
         except Exception as e:
             logger.error(f"Error loading product period detail: {e}")
             return pd.DataFrame()
+    
+    # ==================== Reference Detail ====================
+    
+    def get_reference_detail(self, ih_id: int, transaction_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Get detailed reference document info for a specific inventory history record.
+        Routes to the appropriate query based on transaction_type.
+        
+        Args:
+            ih_id: inventory_histories.id
+            transaction_type: ih.type value (e.g. 'stockIn', 'stockInProduction', etc.)
+        
+        Returns:
+            Dict with reference detail fields, or None
+        """
+        try:
+            query_map = {
+                'stockIn': self._ref_query_purchase,
+                'stockInProduction': self._ref_query_production_receipt,
+                'stockInProductionReturn': self._ref_query_material_return,
+                'stockInOpeningBalance': self._ref_query_opening_balance,
+                'stockOutProduction': self._ref_query_material_issue,
+                'stockOutDelivery': self._ref_query_delivery,
+                'stockOutWarehouseTransfer': self._ref_query_warehouse_transfer,
+                'stockOutInternalUse': self._ref_query_internal_use,
+            }
+            
+            query_func = query_map.get(transaction_type)
+            if not query_func:
+                return {'_type': transaction_type, '_note': 'Detail not available for this transaction type'}
+            
+            return query_func(ih_id)
+            
+        except Exception as e:
+            logger.error(f"Error loading reference detail: {e}", exc_info=True)
+            return None
+    
+    def _ref_query_purchase(self, ih_id: int) -> Optional[Dict[str, Any]]:
+        """Purchase stock-in detail: PO → Arrival → Stock In"""
+        query = """
+            SELECT 
+                'Purchase' AS doc_type,
+                po.po_number,
+                po.po_date,
+                po.po_type,
+                po.external_ref_number,
+                seller.name AS vendor_name,
+                a.arrival_note_number,
+                a.arrival_date,
+                a.status AS arrival_status,
+                a.landed_cost,
+                lc_cur.code AS landed_cost_currency,
+                a.ship_method,
+                ad.arrival_quantity,
+                sid.quantity AS stocked_in_qty,
+                sid.batch_no,
+                sid.exp_date,
+                wh.name AS warehouse_name,
+                CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
+            FROM inventory_histories ih
+            JOIN stock_in_details sid ON ih.action_detail_id = sid.id
+            LEFT JOIN arrival_details ad ON sid.arrival_detail_id = ad.id
+            LEFT JOIN arrivals a ON ad.arrival_id = a.id
+            LEFT JOIN currencies lc_cur ON a.landed_cost_currency_id = lc_cur.id
+            LEFT JOIN purchase_orders po ON ad.purchase_order_id = po.id
+            LEFT JOIN companies seller ON po.seller_company_id = seller.id
+            LEFT JOIN warehouses wh ON ih.warehouse_id = wh.id
+            LEFT JOIN employees emp ON ih.created_by = emp.keycloak_id
+            WHERE ih.id = :ih_id
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {'ih_id': ih_id})
+            row = result.fetchone()
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
+    
+    def _ref_query_production_receipt(self, ih_id: int) -> Optional[Dict[str, Any]]:
+        """Production receipt detail"""
+        query = """
+            SELECT 
+                'Production Receipt' AS doc_type,
+                pr.receipt_no,
+                pr.receipt_date,
+                pr.quality_status,
+                pr.defect_type,
+                pr.batch_no,
+                pr.quantity,
+                pr.uom,
+                pr.expired_date,
+                pr.notes,
+                p.name AS product_name,
+                p.pt_code,
+                mo.order_no AS mo_number,
+                mo.planned_qty,
+                mo.produced_qty,
+                mo.status AS mo_status,
+                bh.bom_name,
+                wh.name AS warehouse_name,
+                CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
+            FROM inventory_histories ih
+            JOIN production_receipts pr ON ih.action_detail_id = pr.id
+            JOIN products p ON pr.product_id = p.id
+            LEFT JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            LEFT JOIN bom_headers bh ON mo.bom_header_id = bh.id
+            LEFT JOIN warehouses wh ON pr.warehouse_id = wh.id
+            LEFT JOIN employees emp ON ih.created_by = emp.keycloak_id
+            WHERE ih.id = :ih_id
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {'ih_id': ih_id})
+            row = result.fetchone()
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
+    
+    def _ref_query_material_return(self, ih_id: int) -> Optional[Dict[str, Any]]:
+        """Material return detail"""
+        query = """
+            SELECT 
+                'Material Return' AS doc_type,
+                mr.return_no,
+                mr.return_date,
+                mr.status,
+                mr.reason,
+                mrd.batch_no,
+                mrd.quantity,
+                mrd.uom,
+                mrd.condition,
+                mrd.expired_date,
+                p.name AS material_name,
+                p.pt_code,
+                mo.order_no AS mo_number,
+                mi.issue_no AS original_issue_no,
+                wh.name AS warehouse_name,
+                CONCAT(ret_emp.first_name, ' ', ret_emp.last_name) AS returned_by_name,
+                CONCAT(rec_emp.first_name, ' ', rec_emp.last_name) AS received_by_name
+            FROM inventory_histories ih
+            JOIN material_return_details mrd ON ih.action_detail_id = mrd.id
+            JOIN material_returns mr ON mrd.material_return_id = mr.id
+            JOIN products p ON mrd.material_id = p.id
+            LEFT JOIN manufacturing_orders mo ON mr.manufacturing_order_id = mo.id
+            LEFT JOIN material_issues mi ON mr.material_issue_id = mi.id
+            LEFT JOIN warehouses wh ON mr.warehouse_id = wh.id
+            LEFT JOIN employees ret_emp ON mr.returned_by = ret_emp.id
+            LEFT JOIN employees rec_emp ON mr.received_by = rec_emp.id
+            WHERE ih.id = :ih_id
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {'ih_id': ih_id})
+            row = result.fetchone()
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
+    
+    def _ref_query_opening_balance(self, ih_id: int) -> Optional[Dict[str, Any]]:
+        """Opening balance detail"""
+        query = """
+            SELECT 
+                'Opening Balance' AS doc_type,
+                ih.created_date,
+                ih.quantity,
+                ih.batch_no,
+                p.name AS product_name,
+                p.uom,
+                wh.name AS warehouse_name,
+                CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
+            FROM inventory_histories ih
+            JOIN products p ON ih.product_id = p.id
+            LEFT JOIN warehouses wh ON ih.warehouse_id = wh.id
+            LEFT JOIN employees emp ON ih.created_by = emp.keycloak_id
+            WHERE ih.id = :ih_id
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {'ih_id': ih_id})
+            row = result.fetchone()
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
+    
+    def _ref_query_material_issue(self, ih_id: int) -> Optional[Dict[str, Any]]:
+        """Material issue (stock out for production) detail"""
+        query = """
+            SELECT 
+                'Material Issue' AS doc_type,
+                mi.issue_no,
+                mi.issue_date,
+                mi.status,
+                mi.notes,
+                mid_out.batch_no,
+                mid_out.quantity,
+                mid_out.uom,
+                mid_out.expired_date,
+                mid_out.is_alternative,
+                p.name AS material_name,
+                p.pt_code,
+                orig_p.name AS original_material_name,
+                mo.order_no AS mo_number,
+                mo.status AS mo_status,
+                wh.name AS warehouse_name,
+                CONCAT(issued_emp.first_name, ' ', issued_emp.last_name) AS issued_by_name,
+                CONCAT(recv_emp.first_name, ' ', recv_emp.last_name) AS received_by_name
+            FROM inventory_histories ih
+            JOIN material_issue_details mid_out ON ih.action_detail_id = mid_out.id
+            JOIN material_issues mi ON mid_out.material_issue_id = mi.id
+            JOIN products p ON mid_out.material_id = p.id
+            LEFT JOIN products orig_p ON mid_out.original_material_id = orig_p.id
+            LEFT JOIN manufacturing_orders mo ON mi.manufacturing_order_id = mo.id
+            LEFT JOIN warehouses wh ON mi.warehouse_id = wh.id
+            LEFT JOIN employees issued_emp ON mi.issued_by = issued_emp.id
+            LEFT JOIN employees recv_emp ON mi.received_by = recv_emp.id
+            WHERE ih.id = :ih_id
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {'ih_id': ih_id})
+            row = result.fetchone()
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
+    
+    def _ref_query_delivery(self, ih_id: int) -> Optional[Dict[str, Any]]:
+        """Delivery (stock out) detail"""
+        query = """
+            SELECT 
+                'Delivery' AS doc_type,
+                sod.dn_number,
+                sod.dispatch_date,
+                sod.date_delivered,
+                sod.shipment_status,
+                sod.delivery_method,
+                sod.status,
+                sod.referencepl,
+                buyer.name AS buyer_name,
+                seller.name AS seller_name,
+                carrier.name AS carrier_name,
+                wh.name AS warehouse_name,
+                CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
+            FROM inventory_histories ih
+            LEFT JOIN stock_out_delivery sod ON ih.delivery_id = sod.id
+            LEFT JOIN companies buyer ON sod.buyer_company_id = buyer.id
+            LEFT JOIN companies seller ON sod.seller_company_id = seller.id
+            LEFT JOIN companies carrier ON sod.carrier_id = carrier.id
+            LEFT JOIN warehouses wh ON sod.warehouse_id = wh.id
+            LEFT JOIN employees emp ON ih.created_by = emp.keycloak_id
+            WHERE ih.id = :ih_id
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {'ih_id': ih_id})
+            row = result.fetchone()
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
+    
+    def _ref_query_warehouse_transfer(self, ih_id: int) -> Optional[Dict[str, Any]]:
+        """Warehouse transfer detail"""
+        query = """
+            SELECT 
+                'Warehouse Transfer' AS doc_type,
+                sowt.warehouse_transfer_number,
+                sowt.created_date,
+                sowt.finish AS is_finished,
+                c.name AS company_name,
+                wh.name AS warehouse_name,
+                CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
+            FROM inventory_histories ih
+            JOIN stock_out_warehouse_transfer sowt ON ih.warehouse_transfer_stock_out_id = sowt.id
+            LEFT JOIN companies c ON sowt.company_id = c.id
+            LEFT JOIN warehouses wh ON ih.warehouse_id = wh.id
+            LEFT JOIN employees emp ON ih.created_by = emp.keycloak_id
+            WHERE ih.id = :ih_id
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {'ih_id': ih_id})
+            row = result.fetchone()
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
+    
+    def _ref_query_internal_use(self, ih_id: int) -> Optional[Dict[str, Any]]:
+        """Internal use detail"""
+        query = """
+            SELECT 
+                'Internal Use' AS doc_type,
+                soiu.internal_use_number,
+                soiu.created_date,
+                c.name AS company_name,
+                CONCAT(req.first_name, ' ', req.last_name) AS requester_name,
+                wh.name AS warehouse_name,
+                CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
+            FROM inventory_histories ih
+            JOIN stock_out_internal_use soiu ON ih.internal_stock_out_id = soiu.id
+            LEFT JOIN companies c ON soiu.company_id = c.id
+            LEFT JOIN employees req ON soiu.requester_id = req.id
+            LEFT JOIN warehouses wh ON ih.warehouse_id = wh.id
+            LEFT JOIN employees emp ON ih.created_by = emp.keycloak_id
+            WHERE ih.id = :ih_id
+        """
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {'ih_id': ih_id})
+            row = result.fetchone()
+        if row:
+            return dict(zip(result.keys(), row))
+        return None
     
     # ==================== Export Functions ====================
     
