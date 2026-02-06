@@ -624,7 +624,7 @@ class InventoryQualityData:
                 po.po_date,
                 po.po_type,
                 po.external_ref_number,
-                seller.name AS vendor_name,
+                seller.english_name AS vendor_name,
                 a.arrival_note_number,
                 a.arrival_date,
                 a.status AS arrival_status,
@@ -810,9 +810,9 @@ class InventoryQualityData:
                 sod.delivery_method,
                 sod.status,
                 sod.referencepl,
-                buyer.name AS buyer_name,
-                seller.name AS seller_name,
-                carrier.name AS carrier_name,
+                buyer.english_name AS buyer_name,
+                seller.english_name AS seller_name,
+                carrier.english_name AS carrier_name,
                 wh.name AS warehouse_name,
                 CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
             FROM inventory_histories ih
@@ -839,7 +839,7 @@ class InventoryQualityData:
                 sowt.warehouse_transfer_number,
                 sowt.created_date,
                 sowt.finish AS is_finished,
-                c.name AS company_name,
+                c.english_name AS company_name,
                 wh.name AS warehouse_name,
                 CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
             FROM inventory_histories ih
@@ -863,7 +863,7 @@ class InventoryQualityData:
                 'Internal Use' AS doc_type,
                 soiu.internal_use_number,
                 soiu.created_date,
-                c.name AS company_name,
+                c.english_name AS company_name,
                 CONCAT(req.first_name, ' ', req.last_name) AS requester_name,
                 wh.name AS warehouse_name,
                 CONCAT(emp.first_name, ' ', emp.last_name) AS created_by_name
