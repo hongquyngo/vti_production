@@ -765,7 +765,7 @@ def _format_txn_type(raw_type: str) -> str:
     return display or raw_type
 
 
-def _render_reference_detail(detail: dict):
+def _render_reference_detail(detail: dict, lines: pd.DataFrame = None):
     """Render reference document detail based on doc_type"""
     doc_type = detail.get('doc_type', 'Unknown')
     
@@ -789,6 +789,16 @@ def _render_reference_detail(detail: dict):
     if renderer:
         with st.expander(f"📄 {doc_type} Detail", expanded=True):
             renderer(detail)
+            # Show line items if available
+            if lines is not None and not lines.empty:
+                st.markdown("---")
+                st.markdown(f"**📋 Document Lines** ({len(lines)} items)")
+                st.dataframe(
+                    lines,
+                    width='stretch',
+                    hide_index=True,
+                    height=min(300, 35 * len(lines) + 38),
+                )
     else:
         st.info(f"Detail view not available for type: {doc_type}")
 
@@ -1125,9 +1135,10 @@ def show_period_detail_dialog(detail_data: dict):
             
             with st.spinner("Loading reference detail..."):
                 ref_detail = data_loader.get_reference_detail(ih_id, txn_type)
+                ref_lines = data_loader.get_reference_lines(ih_id, txn_type)
             
             if ref_detail:
-                _render_reference_detail(ref_detail)
+                _render_reference_detail(ref_detail, ref_lines)
             else:
                 st.info("No additional detail available for this transaction.")
     

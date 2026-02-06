@@ -882,6 +882,154 @@ class InventoryQualityData:
             return dict(zip(result.keys(), row))
         return None
     
+    # ==================== Reference Document Lines ====================
+    
+    def get_reference_lines(self, ih_id: int, transaction_type: str) -> pd.DataFrame:
+        """
+        Get all line items of the parent document for a given inventory history record.
+        E.g. for a Purchase stock-in, returns all items in the same Arrival.
+        """
+        try:
+            query_map = {
+                'stockIn': self._ref_lines_purchase,
+                'stockInProduction': self._ref_lines_production_receipt,
+                'stockInProductionReturn': self._ref_lines_material_return,
+                'stockOutProduction': self._ref_lines_material_issue,
+                'stockOutDelivery': self._ref_lines_delivery,
+            }
+            query_func = query_map.get(transaction_type)
+            if not query_func:
+                return pd.DataFrame()
+            return query_func(ih_id)
+        except Exception as e:
+            logger.error(f"Error loading reference lines: {e}", exc_info=True)
+            return pd.DataFrame()
+    
+    def _ref_lines_purchase(self, ih_id: int) -> pd.DataFrame:
+        """All arrival detail lines for the same arrival"""
+        query = """
+            SELECT 
+                p.pt_code AS 'PT Code',
+                p.name AS 'Product',
+                p.package_size AS 'Pkg Size',
+                po.po_number AS 'PO Number',
+                ad.arrival_quantity AS 'Arrival Qty',
+                ad.stocked_in AS 'Stocked In',
+                ad.landed_cost AS 'Landed Cost',
+                ad.import_tax AS 'Import Tax'
+            FROM arrival_details ad
+            JOIN products p ON ad.product_id = p.id
+            LEFT JOIN purchase_orders po ON ad.purchase_order_id = po.id
+            WHERE ad.arrival_id = (
+                SELECT ad2.arrival_id 
+                FROM inventory_histories ih
+                JOIN stock_in_details sid ON ih.action_detail_id = sid.id
+                JOIN arrival_details ad2 ON sid.arrival_detail_id = ad2.id
+                WHERE ih.id = :ih_id
+            )
+            AND COALESCE(ad.delete_flag, 0) = 0
+            ORDER BY p.name
+        """
+        with self.engine.connect() as conn:
+            return pd.read_sql(text(query), conn, params={'ih_id': ih_id})
+    
+    def _ref_lines_material_issue(self, ih_id: int) -> pd.DataFrame:
+        """All material issue detail lines for the same issue"""
+        query = """
+            SELECT 
+                p.pt_code AS 'PT Code',
+                p.name AS 'Material',
+                mid_all.batch_no AS 'Batch',
+                mid_all.quantity AS 'Quantity',
+                mid_all.uom AS 'UOM',
+                DATE_FORMAT(mid_all.expired_date, '%%d/%%m/%%Y') AS 'Expiry',
+                CASE WHEN mid_all.is_alternative = 1 
+                     THEN CONCAT('⚠️ Alt for: ', orig_p.name) 
+                     ELSE '' END AS 'Note'
+            FROM material_issue_details mid_all
+            JOIN products p ON mid_all.material_id = p.id
+            LEFT JOIN products orig_p ON mid_all.original_material_id = orig_p.id
+            WHERE mid_all.material_issue_id = (
+                SELECT mid2.material_issue_id
+                FROM inventory_histories ih
+                JOIN material_issue_details mid2 ON ih.action_detail_id = mid2.id
+                WHERE ih.id = :ih_id
+            )
+            ORDER BY p.name, mid_all.batch_no
+        """
+        with self.engine.connect() as conn:
+            return pd.read_sql(text(query), conn, params={'ih_id': ih_id})
+    
+    def _ref_lines_material_return(self, ih_id: int) -> pd.DataFrame:
+        """All material return detail lines for the same return"""
+        query = """
+            SELECT 
+                p.pt_code AS 'PT Code',
+                p.name AS 'Material',
+                mrd_all.batch_no AS 'Batch',
+                mrd_all.quantity AS 'Quantity',
+                mrd_all.uom AS 'UOM',
+                mrd_all.condition AS 'Condition',
+                DATE_FORMAT(mrd_all.expired_date, '%%d/%%m/%%Y') AS 'Expiry'
+            FROM material_return_details mrd_all
+            JOIN products p ON mrd_all.material_id = p.id
+            WHERE mrd_all.material_return_id = (
+                SELECT mrd2.material_return_id
+                FROM inventory_histories ih
+                JOIN material_return_details mrd2 ON ih.action_detail_id = mrd2.id
+                WHERE ih.id = :ih_id
+            )
+            ORDER BY p.name, mrd_all.batch_no
+        """
+        with self.engine.connect() as conn:
+            return pd.read_sql(text(query), conn, params={'ih_id': ih_id})
+    
+    def _ref_lines_production_receipt(self, ih_id: int) -> pd.DataFrame:
+        """All production receipts from the same MO"""
+        query = """
+            SELECT 
+                pr_all.receipt_no AS 'Receipt No',
+                DATE_FORMAT(pr_all.receipt_date, '%%d/%%m/%%Y %%H:%%i') AS 'Receipt Date',
+                pr_all.batch_no AS 'Batch',
+                pr_all.quantity AS 'Quantity',
+                pr_all.uom AS 'UOM',
+                pr_all.quality_status AS 'QC Status',
+                COALESCE(pr_all.defect_type, '') AS 'Defect Type',
+                DATE_FORMAT(pr_all.expired_date, '%%d/%%m/%%Y') AS 'Expiry'
+            FROM production_receipts pr_all
+            WHERE pr_all.manufacturing_order_id = (
+                SELECT pr2.manufacturing_order_id
+                FROM inventory_histories ih
+                JOIN production_receipts pr2 ON ih.action_detail_id = pr2.id
+                WHERE ih.id = :ih_id
+            )
+            ORDER BY pr_all.receipt_date
+        """
+        with self.engine.connect() as conn:
+            return pd.read_sql(text(query), conn, params={'ih_id': ih_id})
+    
+    def _ref_lines_delivery(self, ih_id: int) -> pd.DataFrame:
+        """All inventory history lines for the same delivery"""
+        query = """
+            SELECT 
+                p.pt_code AS 'PT Code',
+                p.name AS 'Product',
+                ih_all.batch_no AS 'Batch',
+                ih_all.quantity AS 'Quantity',
+                p.uom AS 'UOM',
+                wh.name AS 'Warehouse'
+            FROM inventory_histories ih_all
+            JOIN products p ON ih_all.product_id = p.id
+            LEFT JOIN warehouses wh ON ih_all.warehouse_id = wh.id
+            WHERE ih_all.delivery_id = (
+                SELECT ih2.delivery_id FROM inventory_histories ih2 WHERE ih2.id = :ih_id
+            )
+            AND ih_all.delete_flag = 0
+            ORDER BY p.name, ih_all.batch_no
+        """
+        with self.engine.connect() as conn:
+            return pd.read_sql(text(query), conn, params={'ih_id': ih_id})
+    
     # ==================== Export Functions ====================
     
     def get_export_data(self, category: Optional[str] = None,
