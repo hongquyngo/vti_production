@@ -105,9 +105,10 @@ def render_header():
 # ==================== Summary Cards ====================
 
 def render_summary_cards():
-    """Render summary metric cards"""
+    """Render summary metric cards in 2 rows: Quantity + Value"""
     metrics = data_loader.get_summary_metrics()
     
+    # === Row 1: Quantity metrics (4 columns) ===
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -137,13 +138,85 @@ def render_summary_cards():
         )
     
     with col4:
-        defective_value = metrics.get('DEFECTIVE', {}).get('value', 0)
-        quarantine_value = metrics.get('QUARANTINE', {}).get('value', 0)
-        at_risk = defective_value + quarantine_value
+        total = metrics.get('TOTAL', {})
         st.metric(
-            label="💰 Value at Risk",
-            value=format_currency(at_risk),
-            delta="Defective + Quarantine",
+            label="📦 Total Items",
+            value=f"{total.get('count', 0):,} items",
+            delta=f"{format_quantity(total.get('quantity', 0))} units",
+            delta_color="off"
+        )
+    
+    # === Row 2: Value metrics with expiry breakdown ===
+    # Near expiry threshold selector
+    threshold_col, spacer = st.columns([2, 8])
+    with threshold_col:
+        near_expiry_days = st.selectbox(
+            "Near Expiry Threshold",
+            options=[30, 60, 90, 180],
+            index=2,  # default 90 days
+            format_func=lambda x: f"⏱️ {x} days",
+            key="iq_near_expiry_days",
+            label_visibility="collapsed"
+        )
+    
+    # Load expiry metrics
+    expiry = data_loader.get_expiry_metrics(near_expiry_days=near_expiry_days)
+    
+    expired = expiry.get('expired', {})
+    near_exp = expiry.get('near_expiry', {})
+    total_value = expiry.get('total_value', 0)
+    
+    defective_value = metrics.get('DEFECTIVE', {}).get('value', 0)
+    quarantine_value = metrics.get('QUARANTINE', {}).get('value', 0)
+    good_value = metrics.get('GOOD', {}).get('value', 0)
+    
+    # Healthy good value = good value - expired - near expiry
+    healthy_good_value = good_value - expired.get('value', 0) - near_exp.get('value', 0)
+    
+    # Value at Risk = Expired + Near Expiry + Defective + Quarantine
+    at_risk_value = (expired.get('value', 0) + near_exp.get('value', 0) 
+                     + defective_value + quarantine_value)
+    
+    vc1, vc2, vc3, vc4, vc5 = st.columns(5)
+    
+    with vc1:
+        st.metric(
+            label="💰 Total Inventory Value",
+            value=format_currency(total_value),
+            delta=f"{expiry.get('total_count', 0):,} items",
+            delta_color="off"
+        )
+    
+    with vc2:
+        pct_healthy = (healthy_good_value / total_value * 100) if total_value > 0 else 0
+        st.metric(
+            label="📗 Healthy Good Value",
+            value=format_currency(healthy_good_value),
+            delta=f"{pct_healthy:.1f}% of total",
+            delta_color="off"
+        )
+    
+    with vc3:
+        st.metric(
+            label=f"🟡 Near Expiry (≤{near_expiry_days}d)",
+            value=format_currency(near_exp.get('value', 0)),
+            delta=f"{near_exp.get('count', 0):,} items",
+            delta_color="off"
+        )
+    
+    with vc4:
+        st.metric(
+            label="🔴 Expired",
+            value=format_currency(expired.get('value', 0)),
+            delta=f"{expired.get('count', 0):,} items",
+            delta_color="inverse"
+        )
+    
+    with vc5:
+        st.metric(
+            label="⚠️ Total Value at Risk",
+            value=format_currency(at_risk_value),
+            delta="Expired + Near Expiry + Defect + QC",
             delta_color="off"
         )
 

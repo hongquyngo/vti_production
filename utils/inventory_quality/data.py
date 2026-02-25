@@ -128,6 +128,112 @@ class InventoryQualityData:
                 'TOTAL': {'count': 0, 'quantity': 0, 'value': 0}
             }
     
+    @st.cache_data(ttl=300, show_spinner=False)
+    def get_expiry_metrics(_self, near_expiry_days: int = 90) -> Dict[str, Any]:
+        """
+        Get expiry-related value metrics for dashboard.
+        
+        Breaks down GOOD inventory value by expiry status:
+        - expired: expiry_date < today
+        - near_expiry: expiry_date between today and today + N days
+        - healthy: not expired and not near expiry
+        
+        Args:
+            near_expiry_days: Number of days threshold for near-expiry warning
+        
+        Returns:
+            Dict with expired/near_expiry/healthy counts and values
+        """
+        try:
+            query = """
+                SELECT 
+                    -- Expired items (GOOD category, past expiry date)
+                    SUM(CASE 
+                        WHEN category = 'GOOD' 
+                             AND expiry_date IS NOT NULL 
+                             AND expiry_date < CURDATE()
+                        THEN 1 ELSE 0 END) AS expired_count,
+                    SUM(CASE 
+                        WHEN category = 'GOOD' 
+                             AND expiry_date IS NOT NULL 
+                             AND expiry_date < CURDATE()
+                        THEN COALESCE(inventory_value_usd, 0) ELSE 0 END) AS expired_value,
+                    SUM(CASE 
+                        WHEN category = 'GOOD' 
+                             AND expiry_date IS NOT NULL 
+                             AND expiry_date < CURDATE()
+                        THEN quantity ELSE 0 END) AS expired_qty,
+                    
+                    -- Near expiry items (GOOD, expiry within N days from today)
+                    SUM(CASE 
+                        WHEN category = 'GOOD' 
+                             AND expiry_date IS NOT NULL 
+                             AND expiry_date >= CURDATE()
+                             AND expiry_date <= DATE_ADD(CURDATE(), INTERVAL :near_days DAY)
+                        THEN 1 ELSE 0 END) AS near_expiry_count,
+                    SUM(CASE 
+                        WHEN category = 'GOOD' 
+                             AND expiry_date IS NOT NULL 
+                             AND expiry_date >= CURDATE()
+                             AND expiry_date <= DATE_ADD(CURDATE(), INTERVAL :near_days DAY)
+                        THEN COALESCE(inventory_value_usd, 0) ELSE 0 END) AS near_expiry_value,
+                    SUM(CASE 
+                        WHEN category = 'GOOD' 
+                             AND expiry_date IS NOT NULL 
+                             AND expiry_date >= CURDATE()
+                             AND expiry_date <= DATE_ADD(CURDATE(), INTERVAL :near_days DAY)
+                        THEN quantity ELSE 0 END) AS near_expiry_qty,
+                    
+                    -- Total value (all categories)
+                    SUM(COALESCE(inventory_value_usd, 0)) AS total_value,
+                    COUNT(*) AS total_count
+                    
+                FROM inventory_quality_unified_view
+            """
+            
+            with _self.engine.connect() as conn:
+                result = conn.execute(text(query), {'near_days': near_expiry_days})
+                row = result.fetchone()
+            
+            if row:
+                expired_value = float(row[1] or 0)
+                near_expiry_value = float(row[4] or 0)
+                total_value = float(row[6] or 0)
+                
+                return {
+                    'expired': {
+                        'count': int(row[0] or 0),
+                        'value': expired_value,
+                        'quantity': float(row[2] or 0),
+                    },
+                    'near_expiry': {
+                        'count': int(row[3] or 0),
+                        'value': near_expiry_value,
+                        'quantity': float(row[5] or 0),
+                    },
+                    'total_value': total_value,
+                    'total_count': int(row[7] or 0),
+                    'near_expiry_days': near_expiry_days,
+                }
+            
+            return {
+                'expired': {'count': 0, 'value': 0, 'quantity': 0},
+                'near_expiry': {'count': 0, 'value': 0, 'quantity': 0},
+                'total_value': 0,
+                'total_count': 0,
+                'near_expiry_days': near_expiry_days,
+            }
+            
+        except Exception as e:
+            logger.error(f"Error loading expiry metrics: {e}")
+            return {
+                'expired': {'count': 0, 'value': 0, 'quantity': 0},
+                'near_expiry': {'count': 0, 'value': 0, 'quantity': 0},
+                'total_value': 0,
+                'total_count': 0,
+                'near_expiry_days': near_expiry_days,
+            }
+    
     # ==================== Detail Data Loading ====================
     
     def get_good_item_detail(self, inventory_history_id: int) -> Optional[Dict[str, Any]]:
