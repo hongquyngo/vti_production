@@ -21,7 +21,10 @@ Features:
 import re
 import streamlit as st
 import logging
+import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime, date, timedelta
 
 from utils.auth import AuthManager
@@ -68,6 +71,8 @@ def _init_session_state():
         'iq_detail_data': None,
         'iq_entity_filter': [],
         'iq_expiry_filter': 'All',
+        'iq_brand_filter': [],
+        'iq_age_filter': 'All',
         # Period summary tab
         'iq_period_preset': 'this_month',
         'iq_period_from': today.replace(day=1),
@@ -323,20 +328,52 @@ def render_filters():
             st.session_state['iq_warehouse_select'] = {'id': None, 'name': 'All Warehouses'}
             st.session_state['iq_entity_filter'] = []
             st.session_state['iq_expiry_filter'] = 'All'
+            st.session_state['iq_brand_filter'] = []
+            st.session_state['iq_age_filter'] = 'All'
             st.session_state['iq_product_search'] = ''
             st.session_state['iq_selected_idx'] = None
             st.rerun()
     
-    # Row 2: Search
-    search_col, _ = st.columns([4, 5])
-    with search_col:
+    # Row 2: Brand, Age, Search
+    col_brand, col_age, col_search = st.columns([2.5, 2, 4.5])
+    
+    with col_brand:
+        brands = data_loader.get_brands()
+        brand_options = {b['name']: b['name'] for b in brands}
+        
+        selected_brands = st.multiselect(
+            "Brand",
+            options=list(brand_options.keys()),
+            placeholder="All Brands",
+            key="iq_brand_filter"
+        )
+    
+    with col_age:
+        age_options = ['All', '≥30 days', '≥60 days', '≥90 days', '≥180 days', '≥365 days']
+        age_display = {
+            'All': '⏳ All Ages',
+            '≥30 days': '🟡 ≥ 30 days',
+            '≥60 days': '🟠 ≥ 60 days',
+            '≥90 days': '🔶 ≥ 90 days',
+            '≥180 days': '🔴 ≥ 180 days',
+            '≥365 days': '⛔ ≥ 1 year',
+        }
+        
+        selected_age = st.selectbox(
+            "Warehouse Age",
+            options=age_options,
+            format_func=lambda x: age_display.get(x, x),
+            key="iq_age_filter"
+        )
+    
+    with col_search:
         product_search = st.text_input(
             "Search Product",
             placeholder="Name, PT code, Legacy code, Pkg size...",
             key="iq_product_search"
         )
     
-    return selected_category, warehouse_id, product_search, entity_ids, selected_expiry
+    return selected_category, warehouse_id, product_search, entity_ids, selected_expiry, selected_brands, selected_age
 
 
 # ==================== Category Indicator ====================
@@ -378,10 +415,10 @@ def render_data_table(df: pd.DataFrame):
     display_df['qty_display'] = display_df.apply(
         lambda x: f"{format_quantity(x['quantity'])} {x.get('uom', '')}", axis=1
     )
-    display_df['value_display'] = display_df['inventory_value_usd'].apply(
-        lambda x: format_currency(x) if pd.notna(x) else '-'
-    )
-    display_df['days_display'] = display_df['days_in_warehouse'].apply(format_days)
+    
+    # Keep numeric columns for proper sorting
+    display_df['value_numeric'] = pd.to_numeric(display_df['inventory_value_usd'], errors='coerce').fillna(0)
+    display_df['days_numeric'] = pd.to_numeric(display_df['days_in_warehouse'], errors='coerce').fillna(0).astype(int)
     
     # Handle package_size - fill empty with '-'
     display_df['package_size_display'] = display_df['package_size'].fillna('-').replace('', '-')
@@ -404,7 +441,7 @@ def render_data_table(df: pd.DataFrame):
     edited_df = st.data_editor(
         display_df[[
             'Select', 'category_display', 'product_name', 'package_size_display', 'pt_code', 'batch_number',
-            'expiry_display', 'qty_display', 'warehouse_name', 'entity_display', 'source_type', 'days_display', 'value_display'
+            'expiry_display', 'qty_display', 'warehouse_name', 'entity_display', 'source_type', 'days_numeric', 'value_numeric'
         ]].rename(columns={
             'category_display': 'Category',
             'product_name': 'Product',
@@ -416,8 +453,8 @@ def render_data_table(df: pd.DataFrame):
             'warehouse_name': 'Warehouse',
             'entity_display': 'Entity',
             'source_type': 'Source',
-            'days_display': 'Age',
-            'value_display': 'Value'
+            'days_numeric': 'Age',
+            'value_numeric': 'Value'
         }),
         width='stretch',
         hide_index=True,
@@ -440,8 +477,8 @@ def render_data_table(df: pd.DataFrame):
             'Warehouse': st.column_config.TextColumn('Warehouse', width='medium'),
             'Entity': st.column_config.TextColumn('Entity', width='medium'),
             'Source': st.column_config.TextColumn('Source', width='medium'),
-            'Age': st.column_config.TextColumn('Age', width='small'),
-            'Value': st.column_config.TextColumn('Value', width='small')
+            'Age': st.column_config.NumberColumn('Age', format='%d days', width='small'),
+            'Value': st.column_config.NumberColumn('Value', format='$ %.2f', width='small')
         },
         key="iq_table_editor"
     )
@@ -1404,6 +1441,426 @@ def render_period_summary():
 
 
 # ============================================================================
+# TAB 3: ANALYTICS - Inventory Quality Analysis
+# ============================================================================
+
+# Color palette
+_COLORS = {
+    'primary': '#4472C4',
+    'secondary': '#ED7D31',
+    'accent': '#A5A5A5',
+    'good': '#28a745',
+    'warning': '#ffc107',
+    'danger': '#dc3545',
+    'info': '#17a2b8',
+}
+
+_AGING_COLORS = {
+    '0-30 days': '#28a745',
+    '31-60 days': '#7bc67e',
+    '61-90 days': '#ffc107',
+    '91-180 days': '#fd7e14',
+    '181-365 days': '#dc3545',
+    'Over 1 year': '#8b0000',
+}
+
+_EXPIRY_COLORS = {
+    'Expired': '#dc3545',
+    'Expiring Soon (≤30d)': '#fd7e14',
+    'Expiring (31-90d)': '#ffc107',
+    'Good (91-180d)': '#7bc67e',
+    'Fresh (>180d)': '#28a745',
+    'No Expiry': '#a5a5a5',
+}
+
+_CATEGORY_COLORS = {
+    'GOOD': '#28a745',
+    'QUARANTINE': '#ffc107',
+    'DEFECTIVE': '#dc3545',
+}
+
+
+def _plotly_layout_defaults(fig, height=400):
+    """Apply consistent layout defaults to plotly figures"""
+    fig.update_layout(
+        height=height,
+        margin=dict(l=20, r=20, t=40, b=20),
+        font=dict(size=12),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=-0.25,
+            xanchor='center',
+            x=0.5,
+            font=dict(size=10),
+        ),
+    )
+    return fig
+
+
+def render_analytics():
+    """Main renderer for the Analytics tab"""
+    st.markdown("### 📊 Inventory Quality Analytics")
+    st.caption("Visual analysis of inventory by brand, entity, warehouse, aging, and expiry")
+    st.markdown("---")
+    
+    # Load full data (no filters — analytics shows everything)
+    with st.spinner("Loading analytics data..."):
+        df = data_loader.get_unified_inventory()
+    
+    if df.empty:
+        st.info("📭 No inventory data available for analysis.")
+        return
+    
+    # Prep numeric columns
+    df['value'] = pd.to_numeric(df.get('inventory_value_usd'), errors='coerce').fillna(0)
+    df['days'] = pd.to_numeric(df.get('days_in_warehouse'), errors='coerce').fillna(0)
+    df['qty'] = pd.to_numeric(df.get('quantity'), errors='coerce').fillna(0)
+    df['brand'] = df['brand'].fillna('(No Brand)')
+    df['owning_company_name'] = df.get('owning_company_name', pd.Series(dtype=str)).fillna('Unknown')
+    df['warehouse_name'] = df['warehouse_name'].fillna('Unknown')
+    
+    # Assign aging bucket
+    df['age_bucket'] = pd.cut(
+        df['days'],
+        bins=[-1, 30, 60, 90, 180, 365, float('inf')],
+        labels=['0-30 days', '31-60 days', '61-90 days', '91-180 days', '181-365 days', 'Over 1 year']
+    )
+    
+    # Assign expiry bucket
+    today = get_vietnam_today()
+    expiry_dates = pd.to_datetime(df.get('expiry_date'), errors='coerce')
+    conditions = [
+        expiry_dates.isna(),
+        expiry_dates.dt.date < today,
+        expiry_dates.dt.date <= today + timedelta(days=30),
+        expiry_dates.dt.date <= today + timedelta(days=90),
+        expiry_dates.dt.date <= today + timedelta(days=180),
+        expiry_dates.dt.date > today + timedelta(days=180),
+    ]
+    choices = ['No Expiry', 'Expired', 'Expiring Soon (≤30d)', 'Expiring (31-90d)', 'Good (91-180d)', 'Fresh (>180d)']
+    df['expiry_bucket'] = np.select(conditions, choices, default='No Expiry')
+    
+    # ============================================================
+    # KPI SUMMARY ROW
+    # ============================================================
+    total_value = df['value'].sum()
+    total_items = len(df)
+    total_qty = df['qty'].sum()
+    n_brands = df['brand'].nunique()
+    n_entities = df['owning_company_name'].nunique()
+    n_warehouses = df['warehouse_name'].nunique()
+    
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("💰 Total Value", format_currency(total_value))
+    k2.metric("📦 Items", f"{total_items:,}")
+    k3.metric("📊 Quantity", format_quantity(total_qty))
+    k4.metric("🏷️ Brands", f"{n_brands:,}")
+    k5.metric("🏢 Entities", f"{n_entities:,}")
+    k6.metric("🏭 Warehouses", f"{n_warehouses:,}")
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # ROW 1: Category + Expiry Status
+    # ============================================================
+    r1c1, r1c2 = st.columns(2)
+    
+    with r1c1:
+        st.markdown("##### 📦 Inventory by Category")
+        cat_df = df.groupby('category').agg(
+            items=('category', 'size'),
+            value=('value', 'sum'),
+            qty=('qty', 'sum')
+        ).reset_index()
+        cat_df['category_label'] = cat_df['category'].map({
+            'GOOD': '📗 Good', 'QUARANTINE': '📙 Quarantine', 'DEFECTIVE': '📕 Defective'
+        })
+        
+        fig_cat = go.Figure()
+        fig_cat.add_trace(go.Bar(
+            y=cat_df['category_label'],
+            x=cat_df['value'],
+            orientation='h',
+            marker_color=[_CATEGORY_COLORS.get(c, '#999') for c in cat_df['category']],
+            text=[format_currency(v) for v in cat_df['value']],
+            textposition='auto',
+            hovertemplate='%{y}<br>Value: %{text}<br>Items: %{customdata[0]:,}<extra></extra>',
+            customdata=cat_df[['items']].values,
+        ))
+        fig_cat = _plotly_layout_defaults(fig_cat, height=250)
+        fig_cat.update_layout(
+            xaxis_title='Value (USD)', yaxis_title='',
+            showlegend=False,
+        )
+        st.plotly_chart(fig_cat, use_container_width=True)
+    
+    with r1c2:
+        st.markdown("##### 📅 Expiry Status Breakdown")
+        expiry_order = ['Expired', 'Expiring Soon (≤30d)', 'Expiring (31-90d)', 'Good (91-180d)', 'Fresh (>180d)', 'No Expiry']
+        exp_df = df.groupby('expiry_bucket').agg(
+            items=('expiry_bucket', 'size'),
+            value=('value', 'sum')
+        ).reindex(expiry_order).dropna(subset=['items']).reset_index()
+        exp_df.columns = ['status', 'items', 'value']
+        exp_df['items'] = exp_df['items'].astype(int)
+        
+        fig_exp = px.pie(
+            exp_df, values='value', names='status',
+            color='status',
+            color_discrete_map=_EXPIRY_COLORS,
+            hole=0.45,
+        )
+        fig_exp.update_traces(
+            textinfo='percent+label',
+            textposition='outside',
+            hovertemplate='%{label}<br>Value: $%{value:,.2f}<br>%{percent}<extra></extra>',
+        )
+        fig_exp = _plotly_layout_defaults(fig_exp, height=350)
+        fig_exp.update_layout(showlegend=False)
+        st.plotly_chart(fig_exp, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # ROW 2: Brand + Entity
+    # ============================================================
+    r2c1, r2c2 = st.columns(2)
+    
+    with r2c1:
+        st.markdown("##### 🏷️ Top Brands by Value")
+        brand_df = df.groupby('brand').agg(
+            items=('brand', 'size'),
+            value=('value', 'sum'),
+        ).sort_values('value', ascending=False).reset_index()
+        
+        # Show top 15, group rest as 'Others'
+        if len(brand_df) > 15:
+            top = brand_df.head(15)
+            others_val = brand_df.iloc[15:]['value'].sum()
+            others_items = brand_df.iloc[15:]['items'].sum()
+            others_row = pd.DataFrame([{'brand': f'Others ({len(brand_df) - 15})', 'items': others_items, 'value': others_val}])
+            brand_df = pd.concat([top, others_row], ignore_index=True)
+        else:
+            brand_df = brand_df
+        
+        fig_brand = go.Figure()
+        fig_brand.add_trace(go.Bar(
+            y=brand_df['brand'],
+            x=brand_df['value'],
+            orientation='h',
+            marker_color=_COLORS['primary'],
+            text=[format_currency(v) for v in brand_df['value']],
+            textposition='outside',
+            hovertemplate='%{y}<br>Value: %{text}<br>Items: %{customdata[0]:,}<extra></extra>',
+            customdata=brand_df[['items']].values,
+        ))
+        chart_height = max(350, len(brand_df) * 28 + 60)
+        fig_brand = _plotly_layout_defaults(fig_brand, height=chart_height)
+        fig_brand.update_layout(
+            xaxis_title='Value (USD)', yaxis_title='',
+            yaxis=dict(autorange='reversed'),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_brand, use_container_width=True)
+    
+    with r2c2:
+        st.markdown("##### 🏢 Value by Owning Entity")
+        entity_df = df.groupby('owning_company_name').agg(
+            items=('owning_company_name', 'size'),
+            value=('value', 'sum'),
+        ).sort_values('value', ascending=False).reset_index()
+        
+        fig_entity = px.pie(
+            entity_df, values='value', names='owning_company_name',
+            hole=0.45,
+            color_discrete_sequence=px.colors.qualitative.Set2,
+        )
+        fig_entity.update_traces(
+            textinfo='percent+label',
+            textposition='outside',
+            hovertemplate='%{label}<br>Value: $%{value:,.2f}<br>%{percent}<extra></extra>',
+        )
+        fig_entity = _plotly_layout_defaults(fig_entity, height=max(350, len(entity_df) * 28 + 60))
+        fig_entity.update_layout(showlegend=False)
+        st.plotly_chart(fig_entity, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # ROW 3: Warehouse
+    # ============================================================
+    st.markdown("##### 🏭 Inventory by Warehouse")
+    
+    wh_df = df.groupby('warehouse_name').agg(
+        items=('warehouse_name', 'size'),
+        value=('value', 'sum'),
+        qty=('qty', 'sum'),
+    ).sort_values('value', ascending=False).reset_index()
+    
+    # Stacked bar by category per warehouse
+    wh_cat_df = df.groupby(['warehouse_name', 'category']).agg(
+        value=('value', 'sum')
+    ).reset_index()
+    
+    fig_wh = go.Figure()
+    for cat in ['GOOD', 'QUARANTINE', 'DEFECTIVE']:
+        cat_data = wh_cat_df[wh_cat_df['category'] == cat]
+        # Ensure all warehouses present
+        cat_data = wh_df[['warehouse_name']].merge(cat_data, on='warehouse_name', how='left').fillna(0)
+        label = {'GOOD': '📗 Good', 'QUARANTINE': '📙 Quarantine', 'DEFECTIVE': '📕 Defective'}
+        fig_wh.add_trace(go.Bar(
+            x=cat_data['warehouse_name'],
+            y=cat_data['value'],
+            name=label.get(cat, cat),
+            marker_color=_CATEGORY_COLORS.get(cat, '#999'),
+            hovertemplate='%{x}<br>' + label.get(cat, cat) + '<br>Value: $%{y:,.2f}<extra></extra>',
+        ))
+    
+    fig_wh.update_layout(barmode='stack')
+    fig_wh = _plotly_layout_defaults(fig_wh, height=400)
+    fig_wh.update_layout(
+        xaxis_title='', yaxis_title='Value (USD)',
+        xaxis_tickangle=-30,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+    )
+    st.plotly_chart(fig_wh, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # ROW 4: Aging + Aging Value Heatmap
+    # ============================================================
+    r4c1, r4c2 = st.columns(2)
+    
+    with r4c1:
+        st.markdown("##### ⏳ Aging Distribution (Items)")
+        age_order = ['0-30 days', '31-60 days', '61-90 days', '91-180 days', '181-365 days', 'Over 1 year']
+        age_df = df.groupby('age_bucket', observed=False).agg(
+            items=('age_bucket', 'size'),
+            value=('value', 'sum'),
+        ).reindex(age_order).fillna(0).reset_index()
+        age_df.columns = ['bucket', 'items', 'value']
+        age_df['items'] = age_df['items'].astype(int)
+        
+        fig_age = go.Figure()
+        fig_age.add_trace(go.Bar(
+            x=age_df['bucket'],
+            y=age_df['items'],
+            marker_color=[_AGING_COLORS.get(b, '#999') for b in age_df['bucket']],
+            text=age_df['items'],
+            textposition='outside',
+            hovertemplate='%{x}<br>Items: %{y:,}<br>Value: $%{customdata[0]:,.2f}<extra></extra>',
+            customdata=age_df[['value']].values,
+        ))
+        fig_age = _plotly_layout_defaults(fig_age, height=380)
+        fig_age.update_layout(
+            xaxis_title='', yaxis_title='Items',
+            showlegend=False,
+        )
+        st.plotly_chart(fig_age, use_container_width=True)
+    
+    with r4c2:
+        st.markdown("##### 💰 Aging Distribution (Value)")
+        fig_age_v = go.Figure()
+        fig_age_v.add_trace(go.Bar(
+            x=age_df['bucket'],
+            y=age_df['value'],
+            marker_color=[_AGING_COLORS.get(b, '#999') for b in age_df['bucket']],
+            text=[format_currency(v) for v in age_df['value']],
+            textposition='outside',
+            hovertemplate='%{x}<br>Value: %{text}<br>Items: %{customdata[0]:,}<extra></extra>',
+            customdata=age_df[['items']].values,
+        ))
+        fig_age_v = _plotly_layout_defaults(fig_age_v, height=380)
+        fig_age_v.update_layout(
+            xaxis_title='', yaxis_title='Value (USD)',
+            showlegend=False,
+        )
+        st.plotly_chart(fig_age_v, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # ROW 5: Aging × Brand Heatmap
+    # ============================================================
+    st.markdown("##### 🔥 Value Heatmap: Brand × Warehouse Age")
+    
+    # Top 15 brands by value for readable heatmap
+    top_brands = df.groupby('brand')['value'].sum().nlargest(15).index.tolist()
+    heat_df = df[df['brand'].isin(top_brands)].copy()
+    
+    pivot = heat_df.pivot_table(
+        values='value', index='brand', columns='age_bucket',
+        aggfunc='sum', fill_value=0, observed=False
+    )
+    # Reorder columns
+    age_cols = [c for c in age_order if c in pivot.columns]
+    pivot = pivot[age_cols]
+    # Sort by total value descending
+    pivot['_total'] = pivot.sum(axis=1)
+    pivot = pivot.sort_values('_total', ascending=True).drop('_total', axis=1)
+    
+    fig_heat = go.Figure(data=go.Heatmap(
+        z=pivot.values,
+        x=pivot.columns.tolist(),
+        y=pivot.index.tolist(),
+        colorscale='YlOrRd',
+        text=[[format_currency(v) if v > 0 else '' for v in row] for row in pivot.values],
+        texttemplate='%{text}',
+        textfont=dict(size=10),
+        hovertemplate='Brand: %{y}<br>Age: %{x}<br>Value: $%{z:,.2f}<extra></extra>',
+        colorbar=dict(title='USD'),
+    ))
+    heatmap_height = max(400, len(pivot) * 32 + 80)
+    fig_heat = _plotly_layout_defaults(fig_heat, height=heatmap_height)
+    fig_heat.update_layout(
+        xaxis_title='Warehouse Age',
+        yaxis_title='',
+        showlegend=False,
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # ROW 6: Expiry × Brand Heatmap
+    # ============================================================
+    st.markdown("##### 🔥 Value Heatmap: Brand × Expiry Status")
+    
+    pivot_exp = heat_df.pivot_table(
+        values='value', index='brand', columns='expiry_bucket',
+        aggfunc='sum', fill_value=0
+    )
+    expiry_col_order = [c for c in expiry_order if c in pivot_exp.columns]
+    pivot_exp = pivot_exp[expiry_col_order]
+    pivot_exp['_total'] = pivot_exp.sum(axis=1)
+    pivot_exp = pivot_exp.sort_values('_total', ascending=True).drop('_total', axis=1)
+    
+    fig_heat_exp = go.Figure(data=go.Heatmap(
+        z=pivot_exp.values,
+        x=pivot_exp.columns.tolist(),
+        y=pivot_exp.index.tolist(),
+        colorscale='YlOrRd',
+        text=[[format_currency(v) if v > 0 else '' for v in row] for row in pivot_exp.values],
+        texttemplate='%{text}',
+        textfont=dict(size=10),
+        hovertemplate='Brand: %{y}<br>Expiry: %{x}<br>Value: $%{z:,.2f}<extra></extra>',
+        colorbar=dict(title='USD'),
+    ))
+    heatmap_exp_height = max(400, len(pivot_exp) * 32 + 80)
+    fig_heat_exp = _plotly_layout_defaults(fig_heat_exp, height=heatmap_exp_height)
+    fig_heat_exp.update_layout(
+        xaxis_title='Expiry Status',
+        yaxis_title='',
+        showlegend=False,
+    )
+    st.plotly_chart(fig_heat_exp, use_container_width=True)
+
+
+# ============================================================================
 # MAIN APPLICATION
 # ============================================================================
 
@@ -1413,15 +1870,16 @@ def main():
         render_header()
         st.markdown("---")
         
-        # === Two tabs ===
-        tab_dashboard, tab_period = st.tabs([
+        # === Three tabs ===
+        tab_dashboard, tab_period, tab_analytics = st.tabs([
             "📊 Dashboard",
-            "📋 Inventory Summary"
+            "📋 Inventory Summary",
+            "📈 Analytics"
         ])
         
         # ---- Tab 1: Dashboard (existing functionality) ----
         with tab_dashboard:
-            category, warehouse_id, product_search, entity_ids, expiry_filter = render_filters()
+            category, warehouse_id, product_search, entity_ids, expiry_filter, brand_filter, age_filter = render_filters()
             st.markdown("---")
             
             with st.spinner("Loading inventory data..."):
@@ -1431,6 +1889,21 @@ def main():
                     product_search=product_search if product_search else None,
                     entity_ids=entity_ids
                 )
+            
+            # Apply brand filter client-side
+            if brand_filter and not df.empty and 'brand' in df.columns:
+                df = df[df['brand'].isin(brand_filter)].reset_index(drop=True)
+            
+            # Apply age filter client-side (cumulative threshold)
+            if age_filter != 'All' and not df.empty and 'days_in_warehouse' in df.columns:
+                days = pd.to_numeric(df['days_in_warehouse'], errors='coerce')
+                threshold_map = {
+                    '≥30 days': 30, '≥60 days': 60, '≥90 days': 90,
+                    '≥180 days': 180, '≥365 days': 365,
+                }
+                threshold = threshold_map.get(age_filter)
+                if threshold is not None:
+                    df = df[days >= threshold].reset_index(drop=True)
             
             # Apply expiry status filter client-side
             if expiry_filter != 'All' and not df.empty and 'expiry_date' in df.columns:
@@ -1460,9 +1933,13 @@ def main():
             if st.session_state.get('iq_show_detail') and st.session_state.get('iq_detail_data'):
                 show_detail_dialog(st.session_state['iq_detail_data'])
         
-        # ---- Tab 2: Tổng hợp tồn kho (new) ----
+        # ---- Tab 2: Tổng hợp tồn kho ----
         with tab_period:
             render_period_summary()
+        
+        # ---- Tab 3: Analytics ----
+        with tab_analytics:
+            render_analytics()
     
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")

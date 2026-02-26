@@ -453,6 +453,25 @@ class InventoryQualityData:
             logger.error(f"Error loading owning entities: {e}")
             return []
     
+    @st.cache_data(ttl=600, show_spinner=False)
+    def get_brands(_self) -> List[Dict[str, Any]]:
+        """Get list of distinct brands from inventory for filter"""
+        try:
+            query = """
+                SELECT DISTINCT brand AS name
+                FROM inventory_quality_unified_view
+                WHERE brand IS NOT NULL AND brand != ''
+                ORDER BY brand
+            """
+            
+            with _self.engine.connect() as conn:
+                result = conn.execute(text(query))
+                return [dict(zip(result.keys(), row)) for row in result.fetchall()]
+            
+        except Exception as e:
+            logger.error(f"Error loading brands: {e}")
+            return []
+    
     # ==================== Period Summary ====================
     
     @st.cache_data(ttl=300, show_spinner=False)
