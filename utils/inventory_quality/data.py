@@ -30,7 +30,8 @@ class InventoryQualityData:
     def get_unified_inventory(_self, 
                               category: Optional[str] = None,
                               warehouse_id: Optional[int] = None,
-                              product_search: Optional[str] = None) -> pd.DataFrame:
+                              product_search: Optional[str] = None,
+                              entity_ids: Optional[tuple] = None) -> pd.DataFrame:
         """
         Get unified inventory data from all categories
         
@@ -38,6 +39,7 @@ class InventoryQualityData:
             category: Filter by category (GOOD, QUARANTINE, DEFECTIVE) or None for all
             warehouse_id: Filter by warehouse ID or None for all
             product_search: Search string for product name/code
+            entity_ids: Tuple of owning company IDs to filter (for st.cache_data hashability)
         
         Returns:
             DataFrame with unified inventory data
@@ -60,6 +62,12 @@ class InventoryQualityData:
             if product_search:
                 query += " AND (product_name LIKE :search OR pt_code LIKE :search OR legacy_pt_code LIKE :search OR package_size LIKE :search)"
                 params['search'] = f"%{product_search}%"
+            
+            if entity_ids:
+                placeholders = ', '.join([f':eid_{i}' for i in range(len(entity_ids))])
+                query += f" AND owning_company_id IN ({placeholders})"
+                for i, eid in enumerate(entity_ids):
+                    params[f'eid_{i}'] = eid
             
             query += " ORDER BY category, product_name, batch_number"
             
@@ -422,6 +430,27 @@ class InventoryQualityData:
             
         except Exception as e:
             logger.error(f"Error loading products: {e}")
+            return []
+    
+    @st.cache_data(ttl=600, show_spinner=False)
+    def get_owning_entities(_self) -> List[Dict[str, Any]]:
+        """Get list of distinct owning entities from inventory for filter"""
+        try:
+            query = """
+                SELECT DISTINCT 
+                    owning_company_id AS id,
+                    owning_company_name AS name
+                FROM inventory_quality_unified_view
+                WHERE owning_company_id IS NOT NULL
+                ORDER BY owning_company_name
+            """
+            
+            with _self.engine.connect() as conn:
+                result = conn.execute(text(query))
+                return [dict(zip(result.keys(), row)) for row in result.fetchall()]
+            
+        except Exception as e:
+            logger.error(f"Error loading owning entities: {e}")
             return []
     
     # ==================== Period Summary ====================
@@ -1139,18 +1168,21 @@ class InventoryQualityData:
     # ==================== Export Functions ====================
     
     def get_export_data(self, category: Optional[str] = None,
-                        warehouse_id: Optional[int] = None) -> pd.DataFrame:
+                        warehouse_id: Optional[int] = None,
+                        entity_ids: Optional[tuple] = None) -> pd.DataFrame:
         """
         Get data formatted for Excel export
         
         Args:
             category: Filter by category or None for all
             warehouse_id: Filter by warehouse or None for all
+            entity_ids: Tuple of owning company IDs to filter
         
         Returns:
             DataFrame formatted for export
         """
-        df = self.get_unified_inventory(category=category, warehouse_id=warehouse_id)
+        df = self.get_unified_inventory(category=category, warehouse_id=warehouse_id,
+                                         entity_ids=entity_ids)
         
         if df.empty:
             return df
@@ -1176,6 +1208,7 @@ class InventoryQualityData:
             'po_number': 'PO Number',
             'vendor_name': 'Vendor',
             'related_order_no': 'Related Order',
+            'owning_company_name': 'Owning Entity',
             'notes': 'Notes'
         }
         

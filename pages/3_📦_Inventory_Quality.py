@@ -22,7 +22,7 @@ import re
 import streamlit as st
 import logging
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from utils.auth import AuthManager
 from utils.inventory_quality.common import (
@@ -66,6 +66,8 @@ def _init_session_state():
         'iq_selected_idx': None,
         'iq_show_detail': False,
         'iq_detail_data': None,
+        'iq_entity_filter': [],
+        'iq_expiry_filter': 'All',
         # Period summary tab
         'iq_period_preset': 'this_month',
         'iq_period_from': today.replace(day=1),
@@ -104,45 +106,67 @@ def render_header():
 
 # ==================== Summary Cards ====================
 
-def render_summary_cards():
-    """Render summary metric cards in 2 rows: Quantity + Value"""
-    metrics = data_loader.get_summary_metrics()
+def render_summary_cards(df: pd.DataFrame):
+    """Render summary metric cards in 2 rows, computed from filtered DataFrame"""
+    if df.empty:
+        st.info("📭 No data to display metrics.")
+        return
+    
+    # Compute category metrics from filtered df
+    good_df = df[df['category'] == 'GOOD']
+    quarantine_df = df[df['category'] == 'QUARANTINE']
+    defective_df = df[df['category'] == 'DEFECTIVE']
+    
+    good = {
+        'count': len(good_df),
+        'quantity': good_df['quantity'].sum() if not good_df.empty else 0,
+        'value': good_df['inventory_value_usd'].fillna(0).sum() if not good_df.empty else 0,
+    }
+    quarantine = {
+        'count': len(quarantine_df),
+        'quantity': quarantine_df['quantity'].sum() if not quarantine_df.empty else 0,
+        'value': quarantine_df['inventory_value_usd'].fillna(0).sum() if not quarantine_df.empty else 0,
+    }
+    defective = {
+        'count': len(defective_df),
+        'quantity': defective_df['quantity'].sum() if not defective_df.empty else 0,
+        'value': defective_df['inventory_value_usd'].fillna(0).sum() if not defective_df.empty else 0,
+    }
+    total_count = len(df)
+    total_quantity = df['quantity'].sum()
+    total_value = df['inventory_value_usd'].fillna(0).sum()
     
     # === Row 1: Quantity metrics (4 columns) ===
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        good = metrics.get('GOOD', {})
         st.metric(
             label="📗 Good Stock",
-            value=f"{good.get('count', 0):,} items",
-            delta=f"{format_quantity(good.get('quantity', 0))} units"
+            value=f"{good['count']:,} items",
+            delta=f"{format_quantity(good['quantity'])} units"
         )
     
     with col2:
-        quarantine = metrics.get('QUARANTINE', {})
         st.metric(
             label="📙 Quarantine (Pending QC)",
-            value=f"{quarantine.get('count', 0):,} items",
-            delta=f"{format_quantity(quarantine.get('quantity', 0))} units",
+            value=f"{quarantine['count']:,} items",
+            delta=f"{format_quantity(quarantine['quantity'])} units",
             delta_color="off"
         )
     
     with col3:
-        defective = metrics.get('DEFECTIVE', {})
         st.metric(
             label="📕 Defective",
-            value=f"{defective.get('count', 0):,} items",
-            delta=f"{format_quantity(defective.get('quantity', 0))} units",
+            value=f"{defective['count']:,} items",
+            delta=f"{format_quantity(defective['quantity'])} units",
             delta_color="inverse"
         )
     
     with col4:
-        total = metrics.get('TOTAL', {})
         st.metric(
             label="📦 Total Items",
-            value=f"{total.get('count', 0):,} items",
-            delta=f"{format_quantity(total.get('quantity', 0))} units",
+            value=f"{total_count:,} items",
+            delta=f"{format_quantity(total_quantity)} units",
             delta_color="off"
         )
     
@@ -159,23 +183,29 @@ def render_summary_cards():
             label_visibility="collapsed"
         )
     
-    # Load expiry metrics
-    expiry = data_loader.get_expiry_metrics(near_expiry_days=near_expiry_days)
+    # Compute expiry metrics from filtered GOOD df
+    today = get_vietnam_today()
+    near_expiry_cutoff = today + timedelta(days=near_expiry_days)
     
-    expired = expiry.get('expired', {})
-    near_exp = expiry.get('near_expiry', {})
-    total_value = expiry.get('total_value', 0)
-    
-    defective_value = metrics.get('DEFECTIVE', {}).get('value', 0)
-    quarantine_value = metrics.get('QUARANTINE', {}).get('value', 0)
-    good_value = metrics.get('GOOD', {}).get('value', 0)
+    if not good_df.empty and 'expiry_date' in good_df.columns:
+        expiry_dates = pd.to_datetime(good_df['expiry_date'], errors='coerce')
+        has_expiry = expiry_dates.notna()
+        
+        expired_mask = has_expiry & (expiry_dates.dt.date < today)
+        near_mask = has_expiry & (expiry_dates.dt.date >= today) & (expiry_dates.dt.date <= near_expiry_cutoff)
+        
+        expired_count = expired_mask.sum()
+        expired_value = good_df.loc[expired_mask, 'inventory_value_usd'].fillna(0).sum()
+        near_count = near_mask.sum()
+        near_value = good_df.loc[near_mask, 'inventory_value_usd'].fillna(0).sum()
+    else:
+        expired_count = expired_value = near_count = near_value = 0
     
     # Healthy good value = good value - expired - near expiry
-    healthy_good_value = good_value - expired.get('value', 0) - near_exp.get('value', 0)
+    healthy_good_value = good['value'] - expired_value - near_value
     
     # Value at Risk = Expired + Near Expiry + Defective + Quarantine
-    at_risk_value = (expired.get('value', 0) + near_exp.get('value', 0) 
-                     + defective_value + quarantine_value)
+    at_risk_value = expired_value + near_value + defective['value'] + quarantine['value']
     
     vc1, vc2, vc3, vc4, vc5 = st.columns(5)
     
@@ -183,7 +213,7 @@ def render_summary_cards():
         st.metric(
             label="💰 Total Inventory Value",
             value=format_currency(total_value),
-            delta=f"{expiry.get('total_count', 0):,} items",
+            delta=f"{total_count:,} items",
             delta_color="off"
         )
     
@@ -199,16 +229,16 @@ def render_summary_cards():
     with vc3:
         st.metric(
             label=f"🟡 Near Expiry (≤{near_expiry_days}d)",
-            value=format_currency(near_exp.get('value', 0)),
-            delta=f"{near_exp.get('count', 0):,} items",
+            value=format_currency(near_value),
+            delta=f"{near_count:,} items",
             delta_color="off"
         )
     
     with vc4:
         st.metric(
             label="🔴 Expired",
-            value=format_currency(expired.get('value', 0)),
-            delta=f"{expired.get('count', 0):,} items",
+            value=format_currency(expired_value),
+            delta=f"{expired_count:,} items",
             delta_color="inverse"
         )
     
@@ -224,8 +254,8 @@ def render_summary_cards():
 # ==================== Filters ====================
 
 def render_filters():
-    """Render filter controls"""
-    col1, col2, col3, col4 = st.columns([2, 2, 3, 2])
+    """Render filter controls including owning entity and expiry status"""
+    col1, col2, col3, col4, col5 = st.columns([1.5, 2, 2, 2, 1.5])
     
     with col1:
         category_options = ['All', 'GOOD', 'QUARANTINE', 'DEFECTIVE']
@@ -256,23 +286,57 @@ def render_filters():
         warehouse_id = selected_warehouse.get('id') if selected_warehouse else None
     
     with col3:
+        entities = data_loader.get_owning_entities()
+        entity_options = {e['id']: e['name'] for e in entities}
+        
+        selected_entity_ids = st.multiselect(
+            "Owning Entity",
+            options=list(entity_options.keys()),
+            format_func=lambda x: entity_options.get(x, 'Unknown'),
+            placeholder="All Entities",
+            key="iq_entity_filter"
+        )
+        entity_ids = tuple(selected_entity_ids) if selected_entity_ids else None
+    
+    with col4:
+        expiry_options = ['All', 'Expired', 'Near Expiry', 'OK', 'No Expiry']
+        expiry_display = {
+            'All': '📅 All Expiry Status',
+            'Expired': '🔴 Expired',
+            'Near Expiry': '🟡 Expiring Soon (≤90d)',
+            'OK': '🟢 OK (>90d)',
+            'No Expiry': '⚪ No Expiry Date',
+        }
+        
+        selected_expiry = st.selectbox(
+            "Expiry Status",
+            options=expiry_options,
+            format_func=lambda x: expiry_display.get(x, x),
+            key="iq_expiry_filter"
+        )
+    
+    with col5:
+        st.write("")  # Spacer
+        st.write("")
+        if st.button("🔄 Clear Filters", use_container_width=True):
+            st.session_state['iq_category_filter'] = 'All'
+            st.session_state['iq_warehouse_select'] = {'id': None, 'name': 'All Warehouses'}
+            st.session_state['iq_entity_filter'] = []
+            st.session_state['iq_expiry_filter'] = 'All'
+            st.session_state['iq_product_search'] = ''
+            st.session_state['iq_selected_idx'] = None
+            st.rerun()
+    
+    # Row 2: Search
+    search_col, _ = st.columns([4, 5])
+    with search_col:
         product_search = st.text_input(
             "Search Product",
             placeholder="Name, PT code, Legacy code, Pkg size...",
             key="iq_product_search"
         )
     
-    with col4:
-        st.write("")  # Spacer
-        st.write("")
-        if st.button("🔄 Clear Filters", use_container_width=True):
-            st.session_state['iq_category_filter'] = 'All'
-            st.session_state['iq_warehouse_select'] = {'id': None, 'name': 'All Warehouses'}
-            st.session_state['iq_product_search'] = ''
-            st.session_state['iq_selected_idx'] = None
-            st.rerun()
-    
-    return selected_category, warehouse_id, product_search
+    return selected_category, warehouse_id, product_search, entity_ids, selected_expiry
 
 
 # ==================== Category Indicator ====================
@@ -322,19 +386,35 @@ def render_data_table(df: pd.DataFrame):
     # Handle package_size - fill empty with '-'
     display_df['package_size_display'] = display_df['package_size'].fillna('-').replace('', '-')
     
+    # Handle owning_company_name - fill empty
+    if 'owning_company_name' in display_df.columns:
+        display_df['entity_display'] = display_df['owning_company_name'].fillna('-')
+    else:
+        display_df['entity_display'] = '-'
+    
+    # Format expiry date for display
+    if 'expiry_date' in display_df.columns:
+        display_df['expiry_display'] = pd.to_datetime(
+            display_df['expiry_date'], errors='coerce'
+        ).dt.strftime('%d/%m/%Y').fillna('-')
+    else:
+        display_df['expiry_display'] = '-'
+    
     # Create editable dataframe with selection
     edited_df = st.data_editor(
         display_df[[
             'Select', 'category_display', 'product_name', 'package_size_display', 'pt_code', 'batch_number',
-            'qty_display', 'warehouse_name', 'source_type', 'days_display', 'value_display'
+            'expiry_display', 'qty_display', 'warehouse_name', 'entity_display', 'source_type', 'days_display', 'value_display'
         ]].rename(columns={
             'category_display': 'Category',
             'product_name': 'Product',
             'package_size_display': 'Pkg Size',
             'pt_code': 'PT Code',
             'batch_number': 'Batch',
+            'expiry_display': 'Expiry',
             'qty_display': 'Quantity',
             'warehouse_name': 'Warehouse',
+            'entity_display': 'Entity',
             'source_type': 'Source',
             'days_display': 'Age',
             'value_display': 'Value'
@@ -342,7 +422,7 @@ def render_data_table(df: pd.DataFrame):
         width='stretch',
         hide_index=True,
         height=450,
-        disabled=['Category', 'Product', 'Pkg Size', 'PT Code', 'Batch', 'Quantity', 'Warehouse', 'Source', 'Age', 'Value'],
+        disabled=['Category', 'Product', 'Pkg Size', 'PT Code', 'Batch', 'Expiry', 'Quantity', 'Warehouse', 'Entity', 'Source', 'Age', 'Value'],
         column_config={
             'Select': st.column_config.CheckboxColumn(
                 '✓',
@@ -355,8 +435,10 @@ def render_data_table(df: pd.DataFrame):
             'Pkg Size': st.column_config.TextColumn('Pkg Size', width='small'),
             'PT Code': st.column_config.TextColumn('PT Code', width='medium'),
             'Batch': st.column_config.TextColumn('Batch', width='medium'),
+            'Expiry': st.column_config.TextColumn('Expiry', width='medium'),
             'Quantity': st.column_config.TextColumn('Qty', width='small'),
             'Warehouse': st.column_config.TextColumn('Warehouse', width='medium'),
+            'Entity': st.column_config.TextColumn('Entity', width='medium'),
             'Source': st.column_config.TextColumn('Source', width='medium'),
             'Age': st.column_config.TextColumn('Age', width='small'),
             'Value': st.column_config.TextColumn('Value', width='small')
@@ -454,6 +536,7 @@ def show_detail_dialog(item: dict):
     with col2:
         st.markdown(f"**Source:** {safe_get(item, 'source_type', '-')}")
         st.markdown(f"**Age Category:** {safe_get(item, 'age_category', '-')}")
+        st.markdown(f"**Owning Entity:** {safe_get(item, 'owning_company_name', '-')}")
     
     st.markdown("---")
     
@@ -541,7 +624,7 @@ def _render_defective_details(item: dict):
 
 # ==================== Dashboard Export ====================
 
-def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int):
+def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int, entity_ids: tuple = None):
     """Render export to Excel section"""
     col1, col2 = st.columns([1, 4])
     
@@ -550,7 +633,8 @@ def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int):
             try:
                 export_df = data_loader.get_export_data(
                     category=category if category != 'All' else None,
-                    warehouse_id=warehouse_id
+                    warehouse_id=warehouse_id,
+                    entity_ids=entity_ids
                 )
                 
                 if not export_df.empty:
@@ -1337,24 +1421,41 @@ def main():
         
         # ---- Tab 1: Dashboard (existing functionality) ----
         with tab_dashboard:
-            render_summary_cards()
-            st.markdown("---")
-            
-            category, warehouse_id, product_search = render_filters()
+            category, warehouse_id, product_search, entity_ids, expiry_filter = render_filters()
             st.markdown("---")
             
             with st.spinner("Loading inventory data..."):
                 df = data_loader.get_unified_inventory(
                     category=category if category != 'All' else None,
                     warehouse_id=warehouse_id,
-                    product_search=product_search if product_search else None
+                    product_search=product_search if product_search else None,
+                    entity_ids=entity_ids
                 )
+            
+            # Apply expiry status filter client-side
+            if expiry_filter != 'All' and not df.empty and 'expiry_date' in df.columns:
+                today = get_vietnam_today()
+                expiry_dates = pd.to_datetime(df['expiry_date'], errors='coerce')
+                
+                if expiry_filter == 'Expired':
+                    df = df[expiry_dates.dt.date < today].reset_index(drop=True)
+                elif expiry_filter == 'Near Expiry':
+                    near_cutoff = today + timedelta(days=90)
+                    df = df[(expiry_dates.dt.date >= today) & (expiry_dates.dt.date <= near_cutoff)].reset_index(drop=True)
+                elif expiry_filter == 'OK':
+                    near_cutoff = today + timedelta(days=90)
+                    df = df[expiry_dates.dt.date > near_cutoff].reset_index(drop=True)
+                elif expiry_filter == 'No Expiry':
+                    df = df[expiry_dates.isna()].reset_index(drop=True)
+            
+            render_summary_cards(df)
+            st.markdown("---")
             
             render_data_table(df)
             
             if not df.empty:
                 st.markdown("---")
-                render_export_section(df, category, warehouse_id)
+                render_export_section(df, category, warehouse_id, entity_ids)
             
             if st.session_state.get('iq_show_detail') and st.session_state.get('iq_detail_data'):
                 show_detail_dialog(st.session_state['iq_detail_data'])
@@ -1374,7 +1475,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Inventory Quality Dashboard v1.2")
+    st.caption("Inventory Quality Dashboard v1.3")
 
 
 if __name__ == "__main__":
