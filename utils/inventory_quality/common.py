@@ -8,7 +8,7 @@ Version: 1.0.0
 
 import logging
 from calendar import monthrange
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Union, Any
 from io import BytesIO
@@ -39,6 +39,18 @@ class InventoryQualityConstants:
     MAX_PAGE_SIZE = 500
     QUANTITY_DECIMALS = 4
     CURRENCY_DECIMALS = 2
+    
+    # Database server timezone (MySQL server runs in UTC)
+    DB_UTC_OFFSET_HOURS = 0  # UTC
+    
+    # Timezone options for UI (offset in hours from UTC)
+    TIMEZONE_OPTIONS = {
+        'Asia/Ho_Chi_Minh (UTC+7)': 7,
+        'Asia/Singapore (UTC+8)': 8,
+        'Asia/Tokyo (UTC+9)': 9,
+        'UTC': 0,
+    }
+    DEFAULT_TIMEZONE = 'Asia/Ho_Chi_Minh (UTC+7)'
     
     # Categories
     CATEGORY_GOOD = 'GOOD'
@@ -99,7 +111,7 @@ class InventoryQualityConstants:
     }
 
 
-# ==================== Timezone Helpers ====================
+# ==================== Timezone & Date-Range Helpers ====================
 
 def get_vietnam_now() -> datetime:
     """Get current datetime in Vietnam timezone (UTC+7)"""
@@ -113,6 +125,43 @@ def get_vietnam_today() -> date:
     if VN_TIMEZONE:
         return datetime.now(VN_TIMEZONE).date()
     return date.today()
+
+
+def local_range_to_utc(
+    from_date: date,
+    from_time: time,
+    to_date: date,
+    to_time: time,
+    utc_offset_hours: int = 7,
+) -> tuple:
+    """
+    Convert local date+time range to UTC datetime range for DB queries.
+    
+    The DB stores created_date as DATETIME in UTC (MySQL server timezone = UTC).
+    This function converts user-selected local boundaries to UTC so that 
+    comparisons are correct:
+        ih.created_date >= :from_utc AND ih.created_date < :to_utc
+    
+    Args:
+        from_date: Start date (local)
+        from_time: Start time (local), e.g. time(0,0) for midnight
+        to_date: End date (local)
+        to_time: End time (local), e.g. time(23,59,59) for end of day
+        utc_offset_hours: Local timezone offset from UTC (default 7 for VN)
+    
+    Returns:
+        Tuple of (from_utc: datetime, to_utc: datetime) 
+        to_utc is EXCLUSIVE upper bound (use < not <=)
+    """
+    from_local = datetime.combine(from_date, from_time)
+    # to_time is inclusive end → add 1 second for exclusive upper bound
+    to_local = datetime.combine(to_date, to_time) + timedelta(seconds=1)
+    
+    offset = timedelta(hours=utc_offset_hours)
+    from_utc = from_local - offset
+    to_utc = to_local - offset
+    
+    return from_utc, to_utc
 
 
 # ==================== Formatting Helpers ====================

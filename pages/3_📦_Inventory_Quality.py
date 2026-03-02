@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time, timedelta
 
 from utils.auth import AuthManager
 from utils.inventory_quality.common import (
@@ -39,6 +39,7 @@ from utils.inventory_quality.common import (
     create_period_summary_excel,
     get_period_dates,
     get_vietnam_today,
+    local_range_to_utc,
     safe_get
 )
 from utils.inventory_quality.data import InventoryQualityData
@@ -77,6 +78,9 @@ def _init_session_state():
         'iq_period_preset': 'this_month',
         'iq_period_from': today.replace(day=1),
         'iq_period_to': today,
+        'iq_period_from_time': time(0, 0),
+        'iq_period_to_time': time(23, 59, 59),
+        'iq_period_timezone': InventoryQualityConstants.DEFAULT_TIMEZONE,
         # Period selection
         'iq_period_selected_idx': None,
         'iq_period_show_detail': False,
@@ -711,13 +715,19 @@ def _on_period_preset_change():
 def render_period_filters():
     """
     Render filters for period inventory summary.
+    Includes date, time, and timezone selection.
     
     Returns:
-        Tuple of (from_date, to_date, warehouse_id, product_search) or (None,...) if invalid
+        Tuple of (from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search)
+        or (None, ...) if invalid.
+        from_utc/to_utc are UTC datetimes for DB queries.
+        from_date/to_date/tz_label are kept for display purposes.
     """
     presets = InventoryQualityConstants.PERIOD_PRESETS
+    tz_options = InventoryQualityConstants.TIMEZONE_OPTIONS
     
-    col1, col2, col3, col4, col5 = st.columns([2, 1.5, 1.5, 2, 2])
+    # === Row 1: Period preset, Date range, Time range, Timezone ===
+    col1, col2, col3, col4, col5, col6 = st.columns([1.8, 1.2, 1, 1.2, 1, 1.5])
     
     with col1:
         preset = st.selectbox(
@@ -738,13 +748,37 @@ def render_period_filters():
         )
     
     with col3:
+        from_time = st.time_input(
+            "From Time",
+            key="iq_period_from_time",
+            step=timedelta(minutes=30),
+        )
+    
+    with col4:
         to_date = st.date_input(
             "To Date",
             key="iq_period_to",
             disabled=not is_custom,
         )
     
-    with col4:
+    with col5:
+        to_time = st.time_input(
+            "To Time",
+            key="iq_period_to_time",
+            step=timedelta(minutes=30),
+        )
+    
+    with col6:
+        tz_label = st.selectbox(
+            "Timezone",
+            options=list(tz_options.keys()),
+            key="iq_period_timezone",
+        )
+    
+    # === Row 2: Warehouse & Product Search ===
+    col_w, col_s = st.columns([1, 1])
+    
+    with col_w:
         warehouses = data_loader.get_warehouses()
         warehouse_options = [{'id': None, 'name': 'All Warehouses'}] + warehouses
         
@@ -756,7 +790,7 @@ def render_period_filters():
         )
         warehouse_id = selected_warehouse.get('id') if selected_warehouse else None
     
-    with col5:
+    with col_s:
         product_search = st.text_input(
             "Search Product",
             placeholder="Name, PT code, Legacy code, Pkg size...",
@@ -766,9 +800,17 @@ def render_period_filters():
     # Validate dates
     if from_date > to_date:
         st.error("⚠️ 'From Date' must be before or equal to 'To Date'")
-        return None, None, None, None
+        return None, None, None, None, None, None, None
     
-    return from_date, to_date, warehouse_id, product_search or None
+    if from_date == to_date and from_time > to_time:
+        st.error("⚠️ 'From Time' must be before 'To Time' on the same date")
+        return None, None, None, None, None, None, None
+    
+    # Convert local date+time to UTC range for DB queries
+    utc_offset = tz_options[tz_label]
+    from_utc, to_utc = local_range_to_utc(from_date, from_time, to_date, to_time, utc_offset)
+    
+    return from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search or None
 
 
 def render_period_metrics(df: pd.DataFrame):
@@ -801,7 +843,8 @@ def render_period_metrics(df: pd.DataFrame):
         )
 
 
-def render_period_table(df: pd.DataFrame, from_date=None, to_date=None, warehouse_id=None):
+def render_period_table(df: pd.DataFrame, from_utc=None, to_utc=None, 
+                        from_date=None, to_date=None, tz_label=None, warehouse_id=None):
     """Render period summary data table with single-row checkbox selection"""
     if df.empty:
         st.info("📭 No inventory movements found for the selected period and filters.")
@@ -916,8 +959,11 @@ def render_period_table(df: pd.DataFrame, from_date=None, to_date=None, warehous
                     'stock_in_qty': float(selected_row.get('stock_in_qty', 0)),
                     'stock_out_qty': float(selected_row.get('stock_out_qty', 0)),
                     'closing_qty': float(selected_row.get('closing_qty', 0)),
+                    'from_utc': from_utc,
+                    'to_utc': to_utc,
                     'from_date': from_date,
                     'to_date': to_date,
+                    'tz_label': tz_label,
                     'warehouse_id': warehouse_id,
                 }
                 st.session_state['iq_period_show_detail'] = True
@@ -1175,6 +1221,9 @@ def show_period_detail_dialog(detail_data: dict):
     pkg = detail_data.get('package_size', '')
     from_date = detail_data.get('from_date')
     to_date = detail_data.get('to_date')
+    from_utc = detail_data.get('from_utc')
+    to_utc = detail_data.get('to_utc')
+    tz_label = detail_data.get('tz_label', '')
     
     # Header
     st.markdown(f"### 📦 {product_name}")
@@ -1187,8 +1236,10 @@ def show_period_detail_dialog(detail_data: dict):
     st.markdown(" | ".join(code_parts))
     
     if from_date and to_date:
+        tz_short = tz_label.split('(')[-1].rstrip(')') if tz_label and '(' in tz_label else tz_label
         st.markdown(
             f"**Period:** {from_date.strftime('%d/%m/%Y')} → {to_date.strftime('%d/%m/%Y')}"
+            f" ({tz_short})" if tz_short else ""
         )
     st.markdown("---")
     
@@ -1211,8 +1262,8 @@ def show_period_detail_dialog(detail_data: dict):
     with st.spinner("Loading transactions..."):
         txn_df = data_loader.get_product_period_detail(
             product_id=detail_data['product_id'],
-            from_date=from_date,
-            to_date=to_date,
+            from_date_utc=from_utc,
+            to_date_utc=to_utc,
             warehouse_id=detail_data.get('warehouse_id'),
         )
     
@@ -1402,23 +1453,28 @@ def render_period_summary():
     if result[0] is None:
         return
     
-    from_date, to_date, warehouse_id, product_search = result
+    from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search = result
     
     st.markdown("---")
     
-    # Report title (centered)
+    # Report title (centered) - show local dates + timezone
+    from_time_str = st.session_state.get('iq_period_from_time', time(0, 0)).strftime('%H:%M')
+    to_time_str = st.session_state.get('iq_period_to_time', time(23, 59, 59)).strftime('%H:%M')
+    tz_short = tz_label.split('(')[-1].rstrip(')') if '(' in tz_label else tz_label
+    
     st.markdown(
         f"<h4 style='text-align:center; margin-bottom:2px;'>INVENTORY PERIOD SUMMARY</h4>"
         f"<p style='text-align:center; color:#666; margin-top:0;'>"
-        f"From {from_date.strftime('%d/%m/%Y')} to {to_date.strftime('%d/%m/%Y')}</p>",
+        f"From {from_date.strftime('%d/%m/%Y')} {from_time_str} "
+        f"to {to_date.strftime('%d/%m/%Y')} {to_time_str} ({tz_short})</p>",
         unsafe_allow_html=True
     )
     
-    # Load data
+    # Load data - pass UTC datetimes
     with st.spinner("Loading inventory summary..."):
         df = data_loader.get_inventory_period_summary(
-            from_date=from_date,
-            to_date=to_date,
+            from_date_utc=from_utc,
+            to_date_utc=to_utc,
             warehouse_id=warehouse_id,
             product_search=product_search
         )
@@ -1427,8 +1483,10 @@ def render_period_summary():
     render_period_metrics(df)
     st.markdown("---")
     
-    # Data table with selection
-    render_period_table(df, from_date=from_date, to_date=to_date, warehouse_id=warehouse_id)
+    # Data table with selection - pass UTC datetimes for detail drilldown
+    render_period_table(df, from_utc=from_utc, to_utc=to_utc, 
+                        from_date=from_date, to_date=to_date,
+                        tz_label=tz_label, warehouse_id=warehouse_id)
     
     # Export
     if not df.empty:
