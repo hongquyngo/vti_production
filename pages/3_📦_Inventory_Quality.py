@@ -796,7 +796,7 @@ def render_period_filters():
         entity_options = {e['id']: e['name'] for e in entities}
         
         selected_entity_ids = st.multiselect(
-            "Legal Entity",
+            "Owning Entity",
             options=list(entity_options.keys()),
             format_func=lambda x: entity_options.get(x, 'Unknown'),
             placeholder="All Entities",
