@@ -1194,17 +1194,24 @@ def _render_ref_delivery(d: dict):
 
 def _render_ref_warehouse_transfer(d: dict):
     """Render Warehouse Transfer detail"""
-    col1, col2 = st.columns(2)
+    direction = d.get('transfer_direction', '')
+    direction_icon = '📥' if direction == 'Stock In' else '📤'
+    
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown("**📋 Transfer**")
         st.markdown(f"Transfer No: `{d.get('warehouse_transfer_number', '-')}`")
         st.markdown(f"Date: {format_date(d.get('created_date'))}")
-        finished = '✅ Yes' if d.get('is_finished') else '⏳ No'
-        st.markdown(f"Finished: {finished}")
+        finished = '✅ Completed' if d.get('is_finished') else '⏳ In Progress'
+        st.markdown(f"Status: {finished}")
     with col2:
-        st.markdown("**🏢 Info**")
+        st.markdown("**🏢 Warehouses**")
+        st.markdown(f"From: **{d.get('from_warehouse', '-')}**")
+        st.markdown(f"To: **{d.get('to_warehouse', '-')}**")
+        st.markdown(f"Direction: {direction_icon} {direction}")
+    with col3:
+        st.markdown("**👤 Info**")
         st.markdown(f"Company: {d.get('company_name', '-')}")
-        st.markdown(f"Warehouse: {d.get('warehouse_name', '-')}")
         st.markdown(f"Created By: {d.get('created_by_name', '-')}")
 
 
