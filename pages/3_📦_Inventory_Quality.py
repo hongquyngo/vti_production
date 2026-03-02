@@ -715,10 +715,11 @@ def _on_period_preset_change():
 def render_period_filters():
     """
     Render filters for period inventory summary.
-    Includes date, time, and timezone selection.
+    Includes date, time, timezone selection, and movement type filters.
     
     Returns:
-        Tuple of (from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search)
+        Tuple of (from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, 
+                  product_search, filter_stock_in, filter_stock_out)
         or (None, ...) if invalid.
         from_utc/to_utc are UTC datetimes for DB queries.
         from_date/to_date/tz_label are kept for display purposes.
@@ -775,8 +776,8 @@ def render_period_filters():
             key="iq_period_timezone",
         )
     
-    # === Row 2: Warehouse & Product Search ===
-    col_w, col_s = st.columns([1, 1])
+    # === Row 2: Warehouse, Product Search, Movement filters ===
+    col_w, col_s, col_si, col_so = st.columns([2, 3, 0.8, 0.8])
     
     with col_w:
         warehouses = data_loader.get_warehouses()
@@ -797,20 +798,26 @@ def render_period_filters():
             key="iq_period_product_search"
         )
     
+    with col_si:
+        filter_stock_in = st.checkbox("📥 Stock In", key="iq_period_filter_si")
+    
+    with col_so:
+        filter_stock_out = st.checkbox("📤 Stock Out", key="iq_period_filter_so")
+    
     # Validate dates
     if from_date > to_date:
         st.error("⚠️ 'From Date' must be before or equal to 'To Date'")
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None
     
     if from_date == to_date and from_time > to_time:
         st.error("⚠️ 'From Time' must be before 'To Time' on the same date")
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None
     
     # Convert local date+time to UTC range for DB queries
     utc_offset = tz_options[tz_label]
     from_utc, to_utc = local_range_to_utc(from_date, from_time, to_date, to_time, utc_offset)
     
-    return from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search or None
+    return from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search or None, filter_stock_in, filter_stock_out
 
 
 def render_period_metrics(df: pd.DataFrame):
@@ -1453,7 +1460,7 @@ def render_period_summary():
     if result[0] is None:
         return
     
-    from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search = result
+    from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search, filter_si, filter_so = result
     
     st.markdown("---")
     
@@ -1478,6 +1485,18 @@ def render_period_summary():
             warehouse_id=warehouse_id,
             product_search=product_search
         )
+    
+    # Apply movement type filters (client-side)
+    if not df.empty and (filter_si or filter_so):
+        if filter_si and filter_so:
+            # Both checked: show products that have stock in OR stock out
+            df = df[(df['stock_in_qty'].abs() > 0.001) | (df['stock_out_qty'].abs() > 0.001)].reset_index(drop=True)
+        elif filter_si:
+            # Stock In only: show products that have stock in activity
+            df = df[df['stock_in_qty'].abs() > 0.001].reset_index(drop=True)
+        elif filter_so:
+            # Stock Out only: show products that have stock out activity
+            df = df[df['stock_out_qty'].abs() > 0.001].reset_index(drop=True)
     
     # Metrics row
     render_period_metrics(df)
