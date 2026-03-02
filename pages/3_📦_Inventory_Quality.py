@@ -718,8 +718,8 @@ def render_period_filters():
     Includes date, time, timezone selection, and movement type filters.
     
     Returns:
-        Tuple of (from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, 
-                  product_search, filter_stock_in, filter_stock_out)
+        Tuple of (from_utc, to_utc, from_date, to_date, tz_label, warehouse_id,
+                  entity_ids, product_search, filter_stock_in, filter_stock_out)
         or (None, ...) if invalid.
         from_utc/to_utc are UTC datetimes for DB queries.
         from_date/to_date/tz_label are kept for display purposes.
@@ -776,8 +776,8 @@ def render_period_filters():
             key="iq_period_timezone",
         )
     
-    # === Row 2: Warehouse, Product Search, Movement filters ===
-    col_w, col_s, col_si, col_so = st.columns([2, 3, 0.8, 0.8])
+    # === Row 2: Warehouse, Entity, Product Search, Movement filters ===
+    col_w, col_e, col_s, col_si, col_so = st.columns([1.5, 2, 2.5, 0.7, 0.7])
     
     with col_w:
         warehouses = data_loader.get_warehouses()
@@ -790,6 +790,19 @@ def render_period_filters():
             key="iq_period_warehouse"
         )
         warehouse_id = selected_warehouse.get('id') if selected_warehouse else None
+    
+    with col_e:
+        entities = data_loader.get_owning_entities()
+        entity_options = {e['id']: e['name'] for e in entities}
+        
+        selected_entity_ids = st.multiselect(
+            "Legal Entity",
+            options=list(entity_options.keys()),
+            format_func=lambda x: entity_options.get(x, 'Unknown'),
+            placeholder="All Entities",
+            key="iq_period_entity_filter"
+        )
+        entity_ids = tuple(selected_entity_ids) if selected_entity_ids else None
     
     with col_s:
         product_search = st.text_input(
@@ -807,17 +820,17 @@ def render_period_filters():
     # Validate dates
     if from_date > to_date:
         st.error("⚠️ 'From Date' must be before or equal to 'To Date'")
-        return None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None
     
     if from_date == to_date and from_time > to_time:
         st.error("⚠️ 'From Time' must be before 'To Time' on the same date")
-        return None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None
     
     # Convert local date+time to UTC range for DB queries
     utc_offset = tz_options[tz_label]
     from_utc, to_utc = local_range_to_utc(from_date, from_time, to_date, to_time, utc_offset)
     
-    return from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search or None, filter_stock_in, filter_stock_out
+    return from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, entity_ids, product_search or None, filter_stock_in, filter_stock_out
 
 
 def render_period_metrics(df: pd.DataFrame):
@@ -851,7 +864,8 @@ def render_period_metrics(df: pd.DataFrame):
 
 
 def render_period_table(df: pd.DataFrame, from_utc=None, to_utc=None, 
-                        from_date=None, to_date=None, tz_label=None, warehouse_id=None):
+                        from_date=None, to_date=None, tz_label=None, warehouse_id=None,
+                        entity_ids=None):
     """Render period summary data table with single-row checkbox selection"""
     if df.empty:
         st.info("📭 No inventory movements found for the selected period and filters.")
@@ -972,6 +986,7 @@ def render_period_table(df: pd.DataFrame, from_utc=None, to_utc=None,
                     'to_date': to_date,
                     'tz_label': tz_label,
                     'warehouse_id': warehouse_id,
+                    'entity_ids': entity_ids,
                 }
                 st.session_state['iq_period_show_detail'] = True
                 st.rerun()
@@ -1460,7 +1475,7 @@ def render_period_summary():
     if result[0] is None:
         return
     
-    from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, product_search, filter_si, filter_so = result
+    from_utc, to_utc, from_date, to_date, tz_label, warehouse_id, entity_ids, product_search, filter_si, filter_so = result
     
     st.markdown("---")
     
@@ -1483,7 +1498,8 @@ def render_period_summary():
             from_date_utc=from_utc,
             to_date_utc=to_utc,
             warehouse_id=warehouse_id,
-            product_search=product_search
+            product_search=product_search,
+            entity_ids=entity_ids
         )
     
     # Apply movement type filters (client-side)
@@ -1505,7 +1521,8 @@ def render_period_summary():
     # Data table with selection - pass UTC datetimes for detail drilldown
     render_period_table(df, from_utc=from_utc, to_utc=to_utc, 
                         from_date=from_date, to_date=to_date,
-                        tz_label=tz_label, warehouse_id=warehouse_id)
+                        tz_label=tz_label, warehouse_id=warehouse_id,
+                        entity_ids=entity_ids)
     
     # Export
     if not df.empty:

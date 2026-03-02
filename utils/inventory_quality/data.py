@@ -479,7 +479,8 @@ class InventoryQualityData:
                                       from_date_utc,
                                       to_date_utc,
                                       warehouse_id: Optional[int] = None,
-                                      product_search: Optional[str] = None) -> pd.DataFrame:
+                                      product_search: Optional[str] = None,
+                                      entity_ids: Optional[tuple] = None) -> pd.DataFrame:
         """
         Get inventory period summary (Tổng hợp tồn kho theo kỳ).
         
@@ -555,6 +556,17 @@ class InventoryQualityData:
                 query += " AND (p.name LIKE :search OR p.pt_code LIKE :search OR p.legacy_pt_code LIKE :search OR p.package_size LIKE :search)"
                 params['search'] = f"%{product_search}%"
             
+            if entity_ids:
+                placeholders = ', '.join([f':eid_{i}' for i in range(len(entity_ids))])
+                query += f"""
+                    AND ih.product_id IN (
+                        SELECT DISTINCT product_id 
+                        FROM inventory_quality_unified_view 
+                        WHERE owning_company_id IN ({placeholders})
+                    )"""
+                for i, eid in enumerate(entity_ids):
+                    params[f'eid_{i}'] = eid
+            
             query += """
                 GROUP BY ih.product_id, p.pt_code, p.legacy_pt_code, p.name, p.uom, 
                          p.package_size, b.brand_name
@@ -588,7 +600,8 @@ class InventoryQualityData:
                                    product_id: int,
                                    from_date_utc,
                                    to_date_utc,
-                                   warehouse_id: Optional[int] = None) -> pd.DataFrame:
+                                   warehouse_id: Optional[int] = None,
+                                   entity_ids: Optional[tuple] = None) -> pd.DataFrame:
         """
         Get detailed stock in/out transactions for a specific product within a period.
         
