@@ -437,14 +437,12 @@ class InventoryQualityData:
         """Get list of distinct owning entities from inventory for filter"""
         try:
             query = """
-                SELECT DISTINCT 
-                    owning_company_id AS id,
-                    owning_company_name AS name
-                FROM inventory_quality_unified_view
-                WHERE owning_company_id IS NOT NULL
-                ORDER BY owning_company_name
+                SELECT id, english_name AS name
+                FROM companies
+                WHERE delete_flag = 0 
+                AND id IN (SELECT DISTINCT company_id FROM warehouses) -- Hoặc điều kiện Entity của bạn
+                ORDER BY english_name
             """
-            
             with _self.engine.connect() as conn:
                 result = conn.execute(text(query))
                 return [dict(zip(result.keys(), row)) for row in result.fetchall()]
@@ -557,16 +555,38 @@ class InventoryQualityData:
                 params['search'] = f"%{product_search}%"
             
             if entity_ids:
+
                 placeholders = ', '.join([f':eid_{i}' for i in range(len(entity_ids))])
+                # Tối ưu hóa: Lọc product_id dựa trên nguồn gốc giao dịch (MO hoặc Stock In) 
+                # mà không quan tâm đến số lượng còn lại (remain)
                 query += f"""
                     AND ih.product_id IN (
-                        SELECT DISTINCT product_id 
-                        FROM inventory_quality_unified_view 
-                        WHERE owning_company_id IN ({placeholders})
+                        -- 1. Lấy sản phẩm từ Nhập kho sản xuất
+                        SELECT DISTINCT pr.product_id 
+                        FROM production_receipts pr
+                        JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+                        WHERE mo.entity_id IN ({placeholders})
+                        
+                        UNION
+                        
+                        -- 2. Lấy sản phẩm từ Nhập kho mua hàng/điều chuyển
+                        SELECT DISTINCT sid.product_id
+                        FROM stock_in_details sid
+                        JOIN stock_in si ON sid.stock_in_id = si.id
+                        WHERE si.company_id IN ({placeholders})
+                        
+                        UNION
+                        
+                        -- 3. Lấy sản phẩm từ Trả hàng sản xuất
+                        SELECT DISTINCT mrd.material_id
+                        FROM material_return_details mrd
+                        JOIN material_returns mr ON mrd.material_return_id = mr.id
+                        JOIN manufacturing_orders mo2 ON mr.manufacturing_order_id = mo2.id
+                        WHERE mo2.entity_id IN ({placeholders})
                     )"""
                 for i, eid in enumerate(entity_ids):
                     params[f'eid_{i}'] = eid
-            
+
             query += """
                 GROUP BY ih.product_id, p.pt_code, p.legacy_pt_code, p.name, p.uom, 
                          p.package_size, b.brand_name
