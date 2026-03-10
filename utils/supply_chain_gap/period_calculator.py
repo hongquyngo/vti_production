@@ -314,15 +314,16 @@ class PeriodGAPCalculator:
         if matrix.empty:
             return pd.DataFrame(), {}
 
-        # Merge material info
-        mat_info_cols = ['material_id']
-        for c in ['material_pt_code', 'material_name', 'material_brand',
-                   'material_package_size', 'material_uom', 'material_type', 'is_primary']:
-            if c in raw_demand.columns:
-                mat_info_cols.append(c)
-        if len(mat_info_cols) > 1:
-            mat_info = raw_demand[mat_info_cols].drop_duplicates(subset=['material_id'], keep='first')
-            matrix = matrix.merge(mat_info, on='material_id', how='left')
+        # Material info is already merged by _build_matrix() from raw_demand columns.
+        # Ensure material info exists (fallback if _build_matrix didn't pick them up)
+        mat_info_needed = ['material_pt_code', 'material_name', 'material_brand',
+                           'material_package_size', 'material_uom']
+        missing_info = [c for c in mat_info_needed if c not in matrix.columns]
+        if missing_info:
+            mat_info_cols = ['material_id'] + [c for c in mat_info_needed if c in raw_demand.columns]
+            if len(mat_info_cols) > 1:
+                mat_info = raw_demand[mat_info_cols].drop_duplicates(subset=['material_id'], keep='first')
+                matrix = matrix.merge(mat_info, on='material_id', how='left')
 
         # Safety stock lookup
         safety = {}
