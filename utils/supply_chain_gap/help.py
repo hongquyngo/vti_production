@@ -16,7 +16,8 @@ from .constants import (
     STATUS_CONFIG, GAP_CATEGORIES, PRODUCT_TYPES,
     ACTION_TYPES, RAW_MATERIAL_STATUS, THRESHOLDS,
     FIELD_TOOLTIPS, FORMULA_HELP, SUPPLY_SOURCES, DEMAND_SOURCES,
-    BOM_TYPES, MATERIAL_TYPES, MATERIAL_CATEGORIES, MAX_BOM_LEVELS, VERSION
+    BOM_TYPES, MATERIAL_TYPES, MATERIAL_CATEGORIES, MAX_BOM_LEVELS,
+    PERIOD_TYPES, PERIOD_CONFIG, VERSION
 )
 
 
@@ -52,7 +53,7 @@ def render_formula_help_section(section_key: str = 'all'):
     """
     
     if section_key == 'all':
-        sections = ['level_1', 'level_2', 'classification', 'status_thresholds', 'actions']
+        sections = ['level_1', 'level_2', 'classification', 'status_thresholds', 'actions', 'period_gap']
     else:
         sections = [section_key] if section_key in FORMULA_HELP else []
     
@@ -209,12 +210,17 @@ def _render_usage_guide():
     - **Level 2+ — Materials (Multi-level BOM):** Với sản phẩm Manufacturing có shortage, phân tích nguyên vật liệu qua BOM explosion đa cấp:
       - Nếu material là **bán thành phẩm** (có BOM riêng) → kiểm tra tồn kho → nếu thiếu → đi sâu thêm 1 level
       - Nếu material là **nguyên liệu** (không có BOM) → tính GAP để đề xuất mua
+    - **Period Timeline:** Phân tích GAP theo thời kỳ (tuần/tháng) với carry-forward — biết **KHI NÀO** thiếu, không chỉ thiếu bao nhiêu
     """)
     
     st.info("""
     💡 **Tip:** Hệ thống hỗ trợ BOM nhiều cấp (A → B → C). Ví dụ: FG cần bán thành phẩm B, 
     B cần nguyên liệu A. Nếu B đã có tồn kho đủ, hệ thống sẽ **không** tính tiếp nhu cầu A (supply netting).
     Sản phẩm Trading (không có BOM) sẽ được đề xuất tạo PO mua trực tiếp.
+    
+    📅 **Period Timeline:** Mỗi tab (FG, Manufacturing, Trading, Raw Materials) đều có 2 phần:
+    1. **Net GAP** — tổng thể thiếu/thừa bao nhiêu
+    2. **Period Timeline** — thiếu/thừa KHI NÀO (theo tuần/tháng), với carry-forward và backlog
     """)
     
     # -------------------------------------------------------------------------
@@ -265,6 +271,19 @@ def _render_usage_guide():
     | **Existing MO** | ✅ Bật | Tính thêm nhu cầu NVL từ MO đang pending |
     """)
     
+    st.markdown("##### 📅 Period Analysis")
+    st.markdown("""
+    | Tùy chọn | Mặc định | Ý nghĩa |
+    |----------|----------|---------|
+    | **Period Type** | Weekly | Group supply/demand theo tuần (Weekly) hoặc tháng (Monthly) |
+    | **Track Backlog** | ✅ Bật | Carry shortage sang kỳ tiếp theo. Khi bật: shortage period N → thêm demand period N+1 |
+    """)
+    
+    st.info("""
+    💡 **Track Backlog:** Khi bật, nhu cầu chưa đáp ứng (backlog) từ kỳ trước sẽ cộng vào nhu cầu kỳ hiện tại.
+    Điều này cho thấy tình trạng "nợ đọng" tích lũy qua các kỳ — quan trọng cho lập kế hoạch sản xuất và đặt hàng.
+    """)
+    
     st.info("""
     💡 **Khi nào tắt Safety Stock?**
     - Khi muốn xem "true gap" (chênh lệch thực sự không tính safety stock)
@@ -275,9 +294,10 @@ def _render_usage_guide():
     st.markdown("#### Bước 4: Chạy phân tích")
     st.markdown("""
     - Nhấn **🔬 Analyze** để chạy phân tích
-    - Hệ thống sẽ tính toán toàn bộ: FG GAP → Classification → Multi-level Material GAP → Actions
+    - Hệ thống sẽ tính toán toàn bộ: FG GAP → Classification → Multi-level Material GAP → Actions → **Period Timeline**
     - Quá trình BOM explosion đa cấp: tự động đi sâu qua các bán thành phẩm cho đến nguyên liệu cuối cùng
-    - Kết quả hiển thị qua 5 tab bên dưới
+    - Period Timeline tự động lấy **toàn bộ data** từ supply/demand (không cần chọn date range)
+    - Kết quả hiển thị qua 5 tab, mỗi tab có 2 phần: Net GAP + Period Timeline
     - Nhấn **🔄 Reset** để xóa bộ lọc và kết quả, bắt đầu lại
     """)
     
@@ -290,13 +310,21 @@ def _render_usage_guide():
     st.markdown("""
     Đây là tab chính, hiển thị toàn cảnh cung-cầu sản phẩm thành phẩm:
     
+    **Phần 1 — Net GAP:**
     - **Donut chart** (trái): Phân bố trạng thái GAP (Shortage / Optimal / Surplus / Inactive)
     - **Bar chart** (phải): Top 10 sản phẩm có giá trị rủi ro cao nhất (At Risk Value)
     - **Status badges**: Số lượng sản phẩm theo từng trạng thái chi tiết
     - **Quick filter**: Lọc nhanh theo nhóm (All / Shortage / Surplus / Critical)
     - **Bảng dữ liệu**: Chi tiết từng sản phẩm với Supply, Demand, GAP, Coverage, Status
     
-    **Cách đọc bảng FG:**
+    **Phần 2 — 📅 Period Timeline:**
+    - **KPIs**: Tổng số kỳ, kỳ shortage, tỷ lệ fill trung bình, backlog cuối cùng
+    - **Charts**: Shortage theo kỳ (bar) + Timeline GAP top sản phẩm (line)
+    - **Pivot View** (mở rộng): Bảng cross-tab products × periods, 🔴 = kỳ quá khứ, 🟢 = hiện tại/tương lai
+    - **Bảng chi tiết**: Begin Inv → Supply In → Available → Demand → Backlog → GAP → Fill % → Status
+    - **Filters**: Product, Status (Shortage/Fulfilled), Period (Past/Future), Product Type (Matched/Demand Only/Supply Only)
+    
+    **Cách đọc bảng Net GAP:**
     
     | Cột | Ý nghĩa | Lưu ý |
     |-----|---------|-------|
@@ -305,25 +333,50 @@ def _render_usage_guide():
     | GAP | Supply - Demand | Âm = thiếu, Dương = dư |
     | Coverage | Supply ÷ Demand × 100% | Dưới 100% = không đủ đáp ứng |
     | Status | Phân loại theo mức Coverage | Xem chi tiết ở tab Thuật ngữ |
+    
+    **Cách đọc bảng Period GAP:**
+    
+    | Cột | Ý nghĩa | Lưu ý |
+    |-----|---------|-------|
+    | 🔴 | Kỳ quá khứ (đã qua) | Trống = kỳ hiện tại hoặc tương lai |
+    | Begin Inv | Tồn kho đầu kỳ = carry-forward từ kỳ trước | Kỳ đầu tiên = 0 |
+    | Supply In | Supply nhận trong kỳ (PO ETA, CAN arrival...) | Chỉ tính supply có ngày thuộc kỳ |
+    | Available | Begin Inv + Supply In | Tổng hàng sẵn sàng trong kỳ |
+    | Demand | Nhu cầu trong kỳ (OC required_date, forecast) | Chỉ tính demand có ngày thuộc kỳ |
+    | Backlog In | Nhu cầu tồn đọng từ kỳ trước | Chỉ hiển thị khi bật Track Backlog |
+    | Total Need | Demand + Backlog In | Tổng nhu cầu thực tế phải đáp ứng |
+    | GAP | Available - Total Need | Âm = thiếu trong kỳ này |
+    | Fill % | Available ÷ Total Need × 100% | Progress bar, <100% = không đáp ứng hết |
+    | Backlog Out | Nhu cầu tồn đọng mang sang kỳ sau | = |GAP| khi shortage |
+    | Type | Matched / Demand Only / Supply Only | Sản phẩm có cả supply lẫn demand, hay chỉ 1 bên |
     """)
     
     st.markdown("#### 🏭 Tab Manufacturing")
     st.markdown("""
     Hiển thị sản phẩm **có BOM** (có thể tự sản xuất) đang thiếu hụt:
     
+    **Phần 1 — Net GAP:**
     - **Pie chart**: Tỷ lệ Manufacturing vs Trading
     - **Bảng dữ liệu**: Mỗi sản phẩm kèm trạng thái sản xuất:
       - ✅ **Can Produce**: Đủ NVL, có thể tạo MO ngay
       - ⚠️ **Cannot Produce**: Thiếu NVL, cần chờ hoặc mua thêm
     - **Reason**: Lý do cụ thể (NVL đủ, NVL thiếu, có alternative, ...)
+    
+    **Phần 2 — 📅 Period Timeline:**
+    - Chỉ hiển thị sản phẩm Manufacturing → biết KHI NÀO cần sản xuất
+    - Cùng carry-forward logic, nhưng chỉ lọc sản phẩm có BOM
     """)
     
     st.markdown("#### 🛒 Tab Trading")
     st.markdown("""
     Hiển thị sản phẩm **không có BOM** (cần mua trực tiếp) đang thiếu hụt:
     
+    **Phần 1 — Net GAP:**
     - Tất cả sản phẩm Trading với shortage sẽ được đề xuất **Create PO**
     - Đây là sản phẩm không thể tự sản xuất, phải mua từ nhà cung cấp
+    
+    **Phần 2 — 📅 Period Timeline:**
+    - Chỉ hiển thị sản phẩm Trading → biết KHI NÀO cần đặt PO (tính ngược theo lead time NCC)
     """)
     
     st.markdown("#### 🧪 Tab Raw Materials")
@@ -347,6 +400,12 @@ def _render_usage_guide():
     - Hệ thống đi qua từng cấp BOM, trừ tồn kho bán thành phẩm tại mỗi cấp (supply netting)
     - Chỉ nhu cầu thực sự (sau netting) được tính tiếp cho cấp dưới
     - Nếu bật "Existing MO": Cộng thêm nhu cầu từ MO đang pending chưa xuất kho
+    
+    **Phần 2 — 📅 Raw Material Period Timeline:**
+    - Nhu cầu NVL theo kỳ = BOM explosion từ FG Manufacturing shortage **theo từng period**
+    - Supply NVL: tổng tồn kho + PO đặt vào period đầu tiên (available now)
+    - Carry-forward: surplus NVL từ kỳ trước chuyển sang kỳ sau
+    - Trả lời câu hỏi: **"Khi nào cần mua NVL?"** — rất quan trọng cho procurement lead time
     """)
     
     st.markdown("#### 📋 Tab Actions")
@@ -371,13 +430,15 @@ def _render_usage_guide():
     
     | Sheet | Nội dung |
     |-------|---------|
-    | **Summary** | Tổng quan metrics + bộ lọc đã dùng |
+    | **Summary** | Tổng quan metrics + bộ lọc đã dùng + period analysis metrics |
     | **FG GAP** | Bảng chi tiết FG GAP toàn bộ sản phẩm |
     | **Manufacturing** | Sản phẩm Manufacturing có shortage + trạng thái sản xuất |
     | **Trading** | Sản phẩm Trading có shortage |
     | **Semi-Finished** | Bán thành phẩm + supply netting status (nếu BOM đa cấp) |
     | **Raw Materials** | Bảng chi tiết NVL GAP + BOM Level |
     | **Actions** | Toàn bộ action recommendations |
+    | **Period GAP** | FG Period Timeline — GAP theo kỳ với carry-forward/backlog |
+    | **Raw Period GAP** | Raw Material Period Timeline — nhu cầu NVL theo kỳ |
     
     File Excel có thể dùng để: báo cáo cho management, chia sẻ với team mua hàng/sản xuất, 
     lưu trữ lịch sử phân tích.
@@ -390,12 +451,19 @@ def _render_usage_guide():
     st.markdown("""
     1. **Phân tích hàng ngày:** Chạy phân tích mỗi sáng để nắm tình hình cung-cầu mới nhất
     2. **Kiểm tra Critical trước:** Dùng Quick Filter "🚨 Critical" để ưu tiên xử lý sản phẩm nghiêm trọng nhất
-    3. **Đối chiếu với thực tế:** Kết quả phân tích dựa trên dữ liệu hệ thống — 
+    3. **Xem Period Timeline:** Sau khi biết sản phẩm nào shortage, xem Period Timeline để biết **khi nào** 
+       shortage xảy ra → lên kế hoạch sản xuất/đặt hàng theo lead time
+    4. **Raw Material Period:** Xem tab Raw Materials → Period Timeline để biết khi nào cần mua NVL → 
+       đặt PO trước lead time nhà cung cấp
+    5. **Pivot View:** Mở Pivot View để thấy tổng quan GAP qua tất cả periods — 
+       dễ spot pattern (ví dụ: shortage tập trung vào Q1)
+    6. **Filter Past/Future:** Dùng filter "🟢 Future Only" để tập trung vào các kỳ sắp tới, 
+       bỏ qua kỳ đã qua (🔴)
+    7. **Đối chiếu với thực tế:** Kết quả phân tích dựa trên dữ liệu hệ thống — 
        luôn đối chiếu với tình hình thực tế kho, sản xuất, và giao hàng
-    4. **Entity riêng:** Khi phân tích cho đơn vị cụ thể, nhớ chọn Entity trước khi Analyze
-    5. **So sánh có/không safety stock:** Chạy 2 lần (bật/tắt safety stock) để thấy ảnh hưởng 
-       của safety stock lên kết quả
-    6. **Export định kỳ:** Xuất Excel hàng tuần để theo dõi xu hướng thay đổi GAP theo thời gian
+    8. **So sánh Weekly vs Monthly:** Chạy 2 lần (Weekly + Monthly) — Weekly cho chi tiết, 
+       Monthly cho xu hướng dài hạn
+    9. **Export định kỳ:** Xuất Excel hàng tuần để theo dõi xu hướng thay đổi GAP theo thời gian
     """)
 
 
@@ -551,9 +619,38 @@ def _render_glossary():
     """)
     
     # -------------------------------------------------------------------------
+    # Period GAP Analysis
+    # -------------------------------------------------------------------------
+    st.markdown("### 9. Period GAP Analysis (Phân tích theo kỳ)")
+    
+    st.markdown("""
+    | Thuật ngữ | Tiếng Việt | Định nghĩa |
+    |-----------|-----------|------------|
+    | **Period** | Kỳ phân tích | Đơn vị thời gian: Weekly (tuần ISO) hoặc Monthly (tháng) |
+    | **Carry Forward** | Chuyển sang kỳ sau | Surplus cuối kỳ N → tồn kho đầu kỳ N+1 |
+    | **Backlog** | Nhu cầu tồn đọng | Shortage cuối kỳ N → thêm demand đầu kỳ N+1 |
+    | **Begin Inventory** | Tồn đầu kỳ | = Carry forward từ kỳ trước (kỳ đầu = 0) |
+    | **Supply In Period** | Supply trong kỳ | Supply có availability_date/ETA thuộc kỳ |
+    | **Demand In Period** | Demand trong kỳ | Demand có required_date/ETD thuộc kỳ |
+    | **Effective Demand** | Nhu cầu thực tế | Demand in period + Backlog from previous |
+    | **Fulfillment Rate** | Tỷ lệ đáp ứng | (Available / Effective Demand) × 100% |
+    | **Past Period** 🔴 | Kỳ quá khứ | Kỳ đã kết thúc (week/month đã qua) — đánh dấu bằng 🔴 |
+    | **Product Type** | Loại sản phẩm | Matched (cả supply + demand), Demand Only, Supply Only |
+    | **Pivot View** | Bảng chéo | Cross-tab products × periods, color-coded theo GAP |
+    """)
+    
+    st.info("""
+    💡 **Carry Forward vs Backlog:**
+    - **Carry Forward** (surplus): Khi supply > demand → dư thừa mang sang kỳ sau như tồn kho
+    - **Backlog** (shortage): Khi demand > supply → thiếu hụt cộng vào demand kỳ sau
+    - Khi tắt Track Backlog: chỉ carry forward dương (shortage không mang sang kỳ sau)
+    - Khi bật Track Backlog (mặc định): backlog tích lũy → phản ánh đúng "nợ đọng" thực tế
+    """)
+    
+    # -------------------------------------------------------------------------
     # Action types
     # -------------------------------------------------------------------------
-    st.markdown("### 9. Loại hành động (Action Types)")
+    st.markdown("### 10. Loại hành động (Action Types)")
     st.markdown("""
     | Action | Icon | Điều kiện áp dụng | Mô tả chi tiết |
     |--------|------|-------------------|----------------|
@@ -568,7 +665,7 @@ def _render_glossary():
     # -------------------------------------------------------------------------
     # Giải thích các cột trong bảng
     # -------------------------------------------------------------------------
-    st.markdown("### 10. Giải thích các cột dữ liệu")
+    st.markdown("### 11. Giải thích các cột dữ liệu")
     
     st.markdown("#### Bảng FG GAP")
     field_data = []
@@ -597,6 +694,22 @@ def _render_glossary():
             raw_data.append({'Field': f"`{f}`", 'Mô tả': tooltip})
     if raw_data:
         st.table(raw_data)
+    
+    st.markdown("#### Bảng Period GAP")
+    period_fields = [
+        ('begin_inventory', 'Tồn kho đầu kỳ = carry forward từ kỳ trước (kỳ đầu tiên = 0)'),
+        ('supply_in_period', 'Nguồn cung nhận trong kỳ (supply có availability_date thuộc kỳ)'),
+        ('total_available', 'Begin Inv + Supply In Period — tổng hàng sẵn sàng trong kỳ'),
+        ('demand_in_period', 'Nhu cầu trong kỳ (demand có required_date thuộc kỳ)'),
+        ('backlog_from_prev', 'Nhu cầu tồn đọng từ kỳ trước (chỉ hiển thị khi Track Backlog = ON)'),
+        ('effective_demand', 'Demand + Backlog = tổng nhu cầu thực tế cần đáp ứng trong kỳ'),
+        ('gap_quantity', 'Total Available - Effective Demand (hoặc - Demand nếu Backlog OFF)'),
+        ('fulfillment_rate', 'Total Available ÷ Effective Demand × 100%'),
+        ('backlog_to_next', 'Shortage mang sang kỳ sau = |GAP| khi GAP < 0'),
+        ('is_past', '🔴 = kỳ đã kết thúc (weekly: cuối tuần < today, monthly: tháng sau ≤ today)'),
+        ('product_type', 'Matched (có cả supply + demand) / Demand Only / Supply Only'),
+    ]
+    st.table([{'Field': f'`{f}`', 'Mô tả': d} for f, d in period_fields])
 
 
 # =============================================================================
@@ -793,6 +906,74 @@ def _render_formulas():
     - MODERATE_SHORTAGE → Priority 3
     - LIGHT_SHORTAGE → Priority 4
     - Actions được sắp xếp theo priority tăng dần
+    """)
+    
+    st.divider()
+    
+    # -------------------------------------------------------------------------
+    # Period GAP - Carry Forward Logic
+    # -------------------------------------------------------------------------
+    st.markdown("### 📅 Period GAP — Carry Forward Logic")
+    st.markdown("Phân tích GAP theo từng kỳ (tuần/tháng) với carry-forward và backlog tracking.")
+    
+    st.code("""
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  KHỞI TẠO (cho mỗi sản phẩm):                                 │
+    │  carry_forward = 0                                              │
+    │  backlog = safety_stock_qty  (safety stock = "nợ" ban đầu)     │
+    │                                                                 │
+    │  FOR each period (sorted chronologically):                      │
+    │  ┌───────────────────────────────────────────────────────┐      │
+    │  │  begin_inventory   = carry_forward (từ kỳ trước)      │      │
+    │  │  supply_in_period  = ∑ supply có date thuộc kỳ này    │      │
+    │  │  total_available   = begin_inventory + supply_in       │      │
+    │  │                                                        │      │
+    │  │  demand_in_period  = ∑ demand có date thuộc kỳ này    │      │
+    │  │  effective_demand  = demand_in + backlog (từ kỳ trước) │      │
+    │  │                                                        │      │
+    │  │  gap = total_available - effective_demand               │      │
+    │  │                                                        │      │
+    │  │  IF gap >= 0:  (SURPLUS — đủ hàng)                    │      │
+    │  │    carry_forward = gap    ← dư mang sang kỳ sau       │      │
+    │  │    backlog = 0            ← xóa nợ                    │      │
+    │  │                                                        │      │
+    │  │  IF gap < 0:   (SHORTAGE — thiếu hàng)                │      │
+    │  │    carry_forward = 0     ← không còn gì để carry      │      │
+    │  │    backlog = |gap|       ← nợ mang sang kỳ sau        │      │
+    │  │                                                        │      │
+    │  │  fulfillment_rate = total_available / effective_demand │      │
+    │  └───────────────────────────────────────────────────────┘      │
+    │  END FOR                                                        │
+    └─────────────────────────────────────────────────────────────────┘
+    """, language="text")
+    
+    st.markdown("**Ví dụ minh họa (Track Backlog = ON, Safety Stock = 50):**")
+    st.markdown("""
+    | Kỳ | Begin Inv | Supply In | Available | Demand | Backlog In | Total Need | GAP | Carry FW | Backlog Out |
+    |----|-----------|-----------|-----------|--------|------------|------------|-----|----------|-------------|
+    | W1 | 0 | 100 | 100 | 80 | 50 (safety) | 130 | -30 | 0 | 30 |
+    | W2 | 0 | 200 | 200 | 150 | 30 | 180 | +20 | 20 | 0 |
+    | W3 | 20 | 0 | 20 | 100 | 0 | 100 | -80 | 0 | 80 |
+    | W4 | 0 | 300 | 300 | 50 | 80 | 130 | +170 | 170 | 0 |
+    
+    → W1: Safety stock 50 = "nợ" ban đầu, cộng demand 80 = need 130, supply 100 → shortage 30
+    → W2: Backlog 30 từ W1 + demand 150 = need 180, supply 200 → surplus 20 carry forward
+    → W3: Carry 20 + supply 0 = 20, demand 100 = shortage 80 → backlog 80
+    → W4: Backlog 80 + demand 50 = 130, supply 300 → surplus 170 carry forward
+    """)
+    
+    st.divider()
+    
+    st.markdown("### 📅 Raw Material Period GAP")
+    st.markdown("""
+    Nhu cầu NVL theo kỳ = BOM explosion từ FG manufacturing shortage **theo từng period**:
+    
+    1. Lấy FG Period GAP → lọc manufacturing products có shortage per period
+    2. BOM explode shortage qty per period → raw demand by (material_id, period)
+    3. Raw supply: tổng tồn kho + PO đặt vào period đầu tiên (available now)
+    4. Apply carry-forward per material → biết KHI NÀO NVL hết
+    
+    **Ứng dụng:** So sánh "khi nào NVL hết" vs "lead time mua NVL" → biết phải đặt PO bao giờ.
     """)
 
 
@@ -1170,4 +1351,100 @@ def _render_faq():
         - Chạy phân tích mỗi sáng đầu ngày làm việc
         - Export Excel và lưu với tên có ngày tháng
         - Review Critical/Severe shortage trước, gửi action items cho team liên quan
+        """)
+    
+    # -------------------------------------------------------------------------
+    # Nhóm 6: Period GAP Analysis
+    # -------------------------------------------------------------------------
+    st.markdown("### 📅 Period GAP Analysis")
+    
+    with st.expander("**Q18: Period Timeline khác gì với Net GAP?**"):
+        st.markdown("""
+        | | Net GAP | Period Timeline |
+        |--|---------|----------------|
+        | **Câu hỏi** | Thiếu/thừa **bao nhiêu**? | Thiếu/thừa **khi nào**? |
+        | **Đơn vị** | Tổng hợp tất cả (1 số/product) | Theo từng kỳ (tuần/tháng) |
+        | **Logic** | Supply - Demand (tĩnh) | Carry forward + Backlog (động) |
+        | **Ứng dụng** | Biết tổng thể tình hình | Lên kế hoạch sản xuất/đặt hàng theo thời gian |
+        
+        **Ví dụ:** Net GAP = -500 PCS. Nhưng Period Timeline cho thấy:
+        - W1-W3: đủ hàng (surplus carry forward)  
+        - W4: bắt đầu shortage -200
+        - W5: shortage tích lũy -500
+        
+        → Biết cần đặt PO hoặc tạo MO trước W4 (tính ngược lead time).
+        """)
+    
+    with st.expander("**Q18b: Track Backlog hoạt động thế nào?**"):
+        st.markdown("""
+        **Track Backlog = ON (mặc định):**
+        - Shortage kỳ N → cộng vào demand kỳ N+1 (effective_demand = demand + backlog)
+        - Phản ánh đúng thực tế: nhu cầu chưa đáp ứng không biến mất, nó tích lũy
+        - Safety stock được coi là "nợ ban đầu" (initial backlog)
+        
+        **Track Backlog = OFF:**
+        - Shortage không mang sang kỳ sau
+        - Chỉ carry forward surplus (dương)
+        - Mỗi kỳ độc lập — dễ đọc nhưng không phản ánh tích lũy
+        
+        **Khuyến nghị:** Luôn bật Track Backlog — đây là cách tính chính xác nhất cho lập kế hoạch.
+        """)
+    
+    with st.expander("**Q19: Tại sao kỳ đầu tiên có Backlog = Safety Stock?**"):
+        st.markdown("""
+        Safety stock được coi là **"nhu cầu dự trữ"** ngay từ đầu. 
+        
+        Ví dụ: Safety stock = 100, Supply W1 = 300, Demand W1 = 200
+        - Effective demand = 200 (demand) + 100 (safety stock) = **300**
+        - GAP = 300 (supply) - 300 (need) = **0** (balanced)
+        - Nếu không tính safety stock: GAP = 300 - 200 = +100 (misleading — chưa tính dự trữ)
+        
+        Cách này đảm bảo supply phải đủ cho cả demand lẫn safety stock trước khi được coi là "fulfilled".
+        """)
+    
+    with st.expander("**Q20: Kỳ quá khứ (🔴) có ảnh hưởng gì đến kết quả?**"):
+        st.markdown("""
+        Kỳ quá khứ **có ảnh hưởng** vì carry-forward logic:
+        
+        - Demand quá khứ chưa đáp ứng → backlog → ảnh hưởng kỳ hiện tại và tương lai
+        - Supply quá khứ → carry forward → tăng available cho kỳ hiện tại
+        
+        **Tại sao giữ lại kỳ quá khứ?**
+        - Thấy được lịch sử carry-forward/backlog
+        - Hiểu tại sao kỳ hiện tại có backlog (bắt nguồn từ kỳ nào)
+        
+        **Nếu chỉ muốn xem tương lai:** Dùng filter "🟢 Future Only" trong bảng Period.
+        """)
+    
+    with st.expander("**Q21: Raw Material Period GAP hoạt động thế nào?**"):
+        st.markdown("""
+        Raw Material Period GAP trả lời: **"Khi nào cần mua NVL?"**
+        
+        **Logic:**
+        1. Lấy FG Period GAP → lọc Manufacturing products có shortage **theo từng kỳ**
+        2. BOM explosion: shortage kỳ N → nhu cầu NVL kỳ N (theo BOM qty × scrap)
+        3. Raw supply: tổng tồn kho NVL đặt vào **kỳ đầu tiên** (available now)
+        4. Carry-forward per NVL: supply giảm dần → khi hết → backlog = cần mua
+        
+        **Ví dụ:** NVL X, tồn kho = 1,000 kg
+        - W1: BOM demand 200 kg → available = 1000 - 200 = 800 carry forward
+        - W2: BOM demand 300 kg → available = 800 - 300 = 500 carry forward
+        - W3: BOM demand 600 kg → available = 500 - 600 = -100 → **shortage bắt đầu W3!**
+        
+        → Phải đặt PO mua NVL X trước W3 (tính ngược NCC lead time).
+        """)
+    
+    with st.expander("**Q22: Period Type nên chọn Weekly hay Monthly?**"):
+        st.markdown("""
+        | | Weekly | Monthly |
+        |--|--------|---------|
+        | **Chi tiết** | Cao — theo tuần ISO | Thấp — theo tháng |
+        | **Phù hợp** | Kế hoạch sản xuất ngắn hạn (1-3 tháng) | Planning dài hạn (6-12 tháng) |
+        | **Số dòng dữ liệu** | Nhiều (52 kỳ/năm) | Ít (12 kỳ/năm) |
+        | **Carry-forward** | Chính xác hơn (ngắn hơn giữa các kỳ) | Gộp nhiều → có thể miss shortage ngắn |
+        
+        **Khuyến nghị:** 
+        - Dùng **Weekly** cho operational planning (sản xuất, xuất hàng)
+        - Dùng **Monthly** cho strategic planning (budget, capacity, procurement)
+        - Chạy cả 2 để so sánh: Weekly spot được shortage mà Monthly bỏ lỡ
         """)
