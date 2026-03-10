@@ -125,6 +125,49 @@ class SupplyChainFilters:
                      "When ON: shortage in period N becomes additional demand in period N+1"
             )
         
+        # --- Period Analysis Info Panel ---
+        with pcol3:
+            with st.popover("ℹ️ Period Analysis — Data Sources & Timing", use_container_width=True):
+                st.markdown(
+                    "**Kỳ phân tích** được xác định tự động từ ngày sớm nhất đến ngày muộn nhất "
+                    "trong dữ liệu supply/demand. Mỗi dòng dữ liệu được phân bổ vào period "
+                    f"(**{period_type}**) dựa trên date column tương ứng."
+                )
+                
+                st.markdown("---")
+                st.markdown("**📊 FG (Finished Goods) — Level 1**")
+                st.markdown(
+                    "| Nguồn | Date Column | Logic xác định |\n"
+                    "|---|---|---|\n"
+                    "| 📦 Inventory | `availability_date` | = Ngày hiện tại (tồn kho sẵn có) |\n"
+                    "| 📋 CAN Pending | `availability_date` | = Ngày dự kiến confirm |\n"
+                    "| 🚛 Transfer | `availability_date` | = Ngày dự kiến nhận hàng |\n"
+                    "| 📝 Purchase Order | `availability_date` | = Ngày giao hàng dự kiến |\n"
+                    "| 🏭 MO Expected | `availability_date` | = `scheduled_date` (ngày dự kiến hoàn thành SX) |\n"
+                    "| ✔ Confirmed Orders | `required_date` | = Ngày giao hàng yêu cầu từ khách |\n"
+                    "| 📊 Forecast | `required_date` | = Ngày dự báo nhu cầu |"
+                )
+                
+                st.markdown("---")
+                st.markdown("**🧪 Raw Material — Level 2**")
+                st.markdown(
+                    "| Nguồn | Date Column | Logic xác định |\n"
+                    "|---|---|---|\n"
+                    "| 📦 Inventory NVL | `availability_date` | = Ngày hiện tại |\n"
+                    "| 📋 CAN Pending NVL | `availability_date` | = Ngày dự kiến confirm |\n"
+                    "| 🚛 Transfer NVL | `availability_date` | = Ngày dự kiến nhận |\n"
+                    "| 📝 PO NVL | `availability_date` | = Ngày giao hàng dự kiến |\n"
+                    "| 🔬 BOM Explosion | _(kế thừa từ FG)_ | = Period của FG shortage parent |\n"
+                    "| 🏭 Existing MO Demand | `scheduled_date` | = Ngày dự kiến hoàn thành MO |"
+                )
+                
+                st.markdown("---")
+                st.caption(
+                    "**Carry-forward:** Surplus/backlog từ period N tự động chuyển sang N+1. "
+                    "**From date** = ngày sớm nhất trong supply hoặc demand. "
+                    "**To date** = ngày muộn nhất trong supply hoặc demand."
+                )
+        
         # Detect MO Expected in supply sources
         include_mo_expected = 'MO_EXPECTED' in supply_sources
         
