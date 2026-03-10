@@ -133,9 +133,15 @@ def calculate_gap(
                 include_draft_mo=filter_values.get('include_draft_mo', False)
             )
         
-        # Load Raw Material Supply
+        # Load Raw Material Supply (summary for net GAP, detail for period GAP)
         raw_supply = data_loader.load_raw_material_supply_summary(
             entity_name=filter_values.get('entity')
+        )
+        
+        # Load Raw Material Supply Detail (has availability_date for period allocation)
+        raw_supply_detail = data_loader.load_raw_material_supply(
+            entity_name=filter_values.get('entity'),
+            exclude_expired=filter_values.get('exclude_expired', True)
         )
         
         # Load Raw Safety Stock
@@ -154,6 +160,7 @@ def calculate_gap(
             bom_explosion_df=bom_explosion,
             existing_mo_demand_df=existing_mo,
             raw_supply_df=raw_supply,
+            raw_supply_detail_df=raw_supply_detail,
             raw_safety_stock_df=raw_safety,
             selected_supply_sources=filter_values.get('supply_sources'),
             selected_demand_sources=filter_values.get('demand_sources'),

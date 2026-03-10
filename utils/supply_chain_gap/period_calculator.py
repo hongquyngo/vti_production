@@ -267,16 +267,23 @@ class PeriodGAPCalculator:
         raw_safety_stock_df: Optional[pd.DataFrame] = None,
         include_safety: bool = True,
         track_backlog: bool = True,
-        selected_supply_sources: Optional[List[str]] = None
+        selected_supply_sources: Optional[List[str]] = None,
+        # v2.4: Date-aware supply + existing MO demand
+        raw_supply_detail_df: Optional[pd.DataFrame] = None,
+        existing_mo_demand_df: Optional[pd.DataFrame] = None,
+        include_existing_mo: bool = True,
+        include_draft_mo: bool = False
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """
         Calculate raw material period GAP from BOM explosion of FG shortage by period.
 
-        Approach:
+        v2.4 Approach:
         1. Filter FG period gap → manufacturing products with shortage per period
         2. BOM explode shortage qty → raw demand by (material, period)
-        3. Raw supply: summary totals placed in first period (available now)
-        4. Apply carry-forward per material
+        3. (NEW) Add existing MO demand by period using scheduled_date
+        4. (NEW) Raw supply from detail view — allocate by availability_date per period
+           Fallback: summary totals placed in first period (v2.3 behavior)
+        5. Apply carry-forward per material
 
         Returns: (raw_period_gap_df, raw_period_metrics)
         """
@@ -302,10 +309,29 @@ class PeriodGAPCalculator:
         if raw_demand.empty:
             return pd.DataFrame(), {}
 
-        # Step 3: Raw supply — place summary totals in first period
-        raw_supply = self._prepare_raw_supply_by_period(
-            raw_supply_summary_df, raw_demand, selected_supply_sources
-        )
+        # Step 3: Add existing MO demand by period (using scheduled_date)
+        if include_existing_mo and existing_mo_demand_df is not None and not existing_mo_demand_df.empty:
+            mo_demand = self._prepare_existing_mo_demand_by_period(
+                existing_mo_demand_df, include_draft_mo
+            )
+            if not mo_demand.empty:
+                # Merge BOM explosion demand + MO demand
+                raw_demand = self._merge_demand_sources(raw_demand, mo_demand)
+                logger.info(f"Period GAP (Raw): added {len(mo_demand)} existing MO demand rows")
+
+        # Step 4: Raw supply by period
+        # Prefer detail view (has availability_date) over summary (dumps all to first period)
+        if raw_supply_detail_df is not None and not raw_supply_detail_df.empty:
+            raw_supply = self._prepare_raw_supply_by_period_from_detail(
+                raw_supply_detail_df, selected_supply_sources
+            )
+            logger.info(f"Period GAP (Raw): supply allocated by availability_date ({len(raw_supply)} rows)")
+        else:
+            # Fallback: summary totals in first period (v2.3 behavior)
+            raw_supply = self._prepare_raw_supply_by_period(
+                raw_supply_summary_df, raw_demand, selected_supply_sources
+            )
+            logger.info("Period GAP (Raw): using summary supply (all in first period)")
 
         # Build matrix
         matrix = self._build_matrix(
@@ -314,8 +340,7 @@ class PeriodGAPCalculator:
         if matrix.empty:
             return pd.DataFrame(), {}
 
-        # Material info is already merged by _build_matrix() from raw_demand columns.
-        # Ensure material info exists (fallback if _build_matrix didn't pick them up)
+        # Material info: ensure columns exist (fallback merge if _build_matrix missed them)
         mat_info_needed = ['material_pt_code', 'material_name', 'material_brand',
                            'material_package_size', 'material_uom']
         missing_info = [c for c in mat_info_needed if c not in matrix.columns]
@@ -452,6 +477,152 @@ class PeriodGAPCalculator:
         result['period'] = first_period
         result = result[result['supply_qty'] > 0]
 
+        return result
+
+    # -----------------------------------------------------------------
+    # v2.4: DATE-AWARE RAW SUPPLY + EXISTING MO DEMAND
+    # -----------------------------------------------------------------
+
+    def _prepare_raw_supply_by_period_from_detail(
+        self,
+        detail_df: pd.DataFrame,
+        selected_supply_sources: Optional[List[str]]
+    ) -> pd.DataFrame:
+        """
+        Group raw supply detail by (material_id, period) using availability_date.
+        Each supply row is allocated to its actual availability period.
+
+        raw_material_supply_view has: material_id, supply_source, available_quantity,
+        availability_date, availability_status.
+        Note: MO_EXPECTED is NOT in raw supply view (only INVENTORY, CAN_PENDING,
+        WAREHOUSE_TRANSFER, PURCHASE_ORDER).
+        """
+        if detail_df.empty:
+            return pd.DataFrame()
+
+        df = detail_df.copy()
+
+        # Filter by selected supply sources (exclude MO_EXPECTED — not in raw supply)
+        if selected_supply_sources and 'supply_source' in df.columns:
+            valid_sources = [s for s in selected_supply_sources if s != 'MO_EXPECTED']
+            if valid_sources:
+                df = df[df['supply_source'].isin(valid_sources)]
+            else:
+                return pd.DataFrame()
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Convert availability_date → period
+        date_col = 'availability_date'
+        if date_col not in df.columns:
+            # Fallback: treat all as current period
+            df['_date'] = pd.Timestamp.now().normalize()
+            date_col = '_date'
+
+        df['period'] = df[date_col].apply(lambda x: convert_to_period(x, self.period_type))
+        df = df[df['period'].notna() & (df['period'] != 'nan')]
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # material_id column (data_loader renames product_id → material_id)
+        mid_col = 'material_id' if 'material_id' in df.columns else 'product_id'
+
+        # Group by (material_id, period)
+        result = df.groupby([mid_col, 'period']).agg({
+            'available_quantity': 'sum'
+        }).reset_index()
+
+        if mid_col != 'material_id':
+            result.rename(columns={mid_col: 'material_id'}, inplace=True)
+
+        result.rename(columns={'available_quantity': 'supply_qty'}, inplace=True)
+        result = result[result['supply_qty'] > 0]
+
+        return result
+
+    def _prepare_existing_mo_demand_by_period(
+        self,
+        existing_mo_df: pd.DataFrame,
+        include_draft_mo: bool = False
+    ) -> pd.DataFrame:
+        """
+        Convert existing MO raw material demand to period-based demand
+        using manufacturing_orders.scheduled_date.
+
+        manufacturing_raw_demand_view has: material_id, pending_qty (renamed from
+        pending_material_qty), scheduled_date, mo_status.
+        """
+        if existing_mo_df.empty:
+            return pd.DataFrame()
+
+        df = existing_mo_df.copy()
+
+        # Filter by MO status (same logic as data_loader)
+        if not include_draft_mo and 'mo_status' in df.columns:
+            df = df[df['mo_status'] != 'DRAFT']
+
+        # Convert scheduled_date → period
+        date_col = 'scheduled_date'
+        if date_col not in df.columns:
+            logger.warning("Period GAP (Raw): existing MO demand has no scheduled_date column")
+            return pd.DataFrame()
+
+        df['period'] = df[date_col].apply(lambda x: convert_to_period(x, self.period_type))
+        df = df[df['period'].notna() & (df['period'] != 'nan')]
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # pending_qty column (data_loader renames pending_material_qty → pending_qty)
+        pending_col = 'pending_qty' if 'pending_qty' in df.columns else 'pending_material_qty'
+        if pending_col not in df.columns:
+            logger.warning(f"Period GAP (Raw): no pending qty column in MO demand. "
+                           f"Available: {df.columns.tolist()}")
+            return pd.DataFrame()
+
+        # Group by (material_id, period)
+        agg = {pending_col: 'sum'}
+        for c in ['material_pt_code', 'material_name', 'material_brand',
+                   'material_package_size', 'material_uom']:
+            if c in df.columns:
+                agg[c] = 'first'
+
+        result = df.groupby(['material_id', 'period']).agg(agg).reset_index()
+        result.rename(columns={pending_col: 'demand_qty'}, inplace=True)
+        result = result[result['demand_qty'] > 0]
+
+        return result
+
+    def _merge_demand_sources(
+        self,
+        bom_demand: pd.DataFrame,
+        mo_demand: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        Merge BOM explosion demand + existing MO demand into unified raw demand.
+        Both DataFrames have: material_id, period, demand_qty + material info columns.
+        Same (material_id, period) rows get demand_qty summed.
+        """
+        if bom_demand.empty:
+            return mo_demand
+        if mo_demand.empty:
+            return bom_demand
+
+        # Concat and reaggregate
+        combined = pd.concat([bom_demand, mo_demand], ignore_index=True)
+
+        # Build aggregation
+        agg = {'demand_qty': 'sum'}
+        for c in ['material_pt_code', 'material_name', 'material_brand',
+                   'material_package_size', 'material_uom', 'material_type', 'is_primary']:
+            if c in combined.columns:
+                agg[c] = 'first'
+        if 'fg_product_count' in combined.columns:
+            agg['fg_product_count'] = 'sum'
+
+        result = combined.groupby(['material_id', 'period']).agg(agg).reset_index()
         return result
 
     # -----------------------------------------------------------------

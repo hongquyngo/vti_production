@@ -51,6 +51,7 @@ class SupplyChainGAPCalculator:
         
         # Raw Material Data
         raw_supply_df: Optional[pd.DataFrame] = None,
+        raw_supply_detail_df: Optional[pd.DataFrame] = None,
         raw_safety_stock_df: Optional[pd.DataFrame] = None,
         
         # Options
@@ -242,10 +243,13 @@ class SupplyChainGAPCalculator:
             
             # --- Raw Material Period GAP (v2.3) ---
             # BOM-explode FG manufacturing shortage by period → raw demand timeline
+            # v2.4: Use detail supply (with availability_date) + existing MO demand (with scheduled_date)
+            has_raw_supply = (raw_supply_df is not None and not raw_supply_df.empty) or \
+                             (raw_supply_detail_df is not None and not raw_supply_detail_df.empty)
             if (not period_gap_df.empty and
                 not result.manufacturing_df.empty and
                 bom_explosion_df is not None and not bom_explosion_df.empty and
-                raw_supply_df is not None and not raw_supply_df.empty):
+                has_raw_supply):
                 
                 try:
                     mfg_ids = result.manufacturing_df['product_id'].tolist()
@@ -257,7 +261,11 @@ class SupplyChainGAPCalculator:
                         raw_safety_stock_df=raw_safety_stock_df if include_raw_safety else None,
                         include_safety=include_raw_safety,
                         track_backlog=track_backlog,
-                        selected_supply_sources=selected_supply_sources
+                        selected_supply_sources=selected_supply_sources,
+                        raw_supply_detail_df=raw_supply_detail_df,
+                        existing_mo_demand_df=existing_mo_demand_df if include_existing_mo else None,
+                        include_existing_mo=include_existing_mo,
+                        include_draft_mo=include_draft_mo
                     )
                     result.raw_period_gap_df = raw_period_gap_df
                     result.raw_period_metrics = raw_period_metrics
