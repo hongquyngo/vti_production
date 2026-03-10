@@ -239,6 +239,31 @@ class SupplyChainGAPCalculator:
                 f"Period GAP: {len(period_gap_df)} rows, "
                 f"{period_metrics.get('shortage_periods', 0)} shortage periods"
             )
+            
+            # --- Raw Material Period GAP (v2.3) ---
+            # BOM-explode FG manufacturing shortage by period → raw demand timeline
+            if (not period_gap_df.empty and
+                not result.manufacturing_df.empty and
+                bom_explosion_df is not None and not bom_explosion_df.empty and
+                raw_supply_df is not None and not raw_supply_df.empty):
+                
+                try:
+                    mfg_ids = result.manufacturing_df['product_id'].tolist()
+                    raw_period_gap_df, raw_period_metrics = period_calc.calculate_raw_period_gap(
+                        fg_period_gap_df=period_gap_df,
+                        manufacturing_product_ids=mfg_ids,
+                        bom_explosion_df=bom_explosion_df,
+                        raw_supply_summary_df=raw_supply_df,
+                        raw_safety_stock_df=raw_safety_stock_df if include_raw_safety else None,
+                        include_safety=include_raw_safety,
+                        track_backlog=track_backlog,
+                        selected_supply_sources=selected_supply_sources
+                    )
+                    result.raw_period_gap_df = raw_period_gap_df
+                    result.raw_period_metrics = raw_period_metrics
+                    logger.info(f"Raw Period GAP: {len(raw_period_gap_df)} rows")
+                except Exception as e:
+                    logger.error(f"Raw material period GAP failed (non-fatal): {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Period GAP calculation failed (non-fatal): {e}", exc_info=True)
             # Period GAP failure is non-fatal — net GAP + actions are still valid

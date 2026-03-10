@@ -48,14 +48,18 @@ from utils.supply_chain_gap import (
     render_kpi_cards,
     render_data_freshness,
     render_help_popover,
-    # Fragment functions for each tab
+    # Fragment functions for each tab — Net GAP
     fg_charts_fragment,
     fg_table_fragment,
     manufacturing_fragment,
     trading_fragment,
     raw_materials_fragment,
     actions_fragment,
-    period_gap_fragment,
+    # Fragment functions — Period GAP per tab (v2.3)
+    fg_period_fragment,
+    manufacturing_period_fragment,
+    trading_period_fragment,
+    raw_period_fragment,
     UI_CONFIG
 )
 
@@ -270,44 +274,55 @@ def main():
     # MAIN TABS — each tab body is a @st.fragment
     # Interactions inside a tab only rerun that fragment, not the full page.
     # =========================================================================
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 FG Overview",
-        "📅 Period Analysis",
         "🏭 Manufacturing",
         "🛒 Trading",
         "🧪 Raw Materials",
         "📋 Actions"
     ])
     
-    # Tab 1: FG Overview  (two fragments: charts + interactive table)
+    # Tab 1: FG Overview — Net GAP + Period Timeline
     with tab1:
-        st.subheader("📊 Finished Goods GAP")
+        st.subheader("📊 Finished Goods — Net GAP")
         fg_charts_fragment(result, charts)
         fg_table_fragment(result)
+        
+        st.divider()
+        st.subheader("📅 Period Timeline — When Do Shortages Occur?")
+        st.caption("Carry-forward: surplus/backlog from period N propagates to N+1")
+        fg_period_fragment(result, charts)
     
-    # Tab 2: Period Analysis (v2.2)
+    # Tab 2: Manufacturing — Net GAP + Period Timeline
     with tab2:
-        st.subheader("📅 Period GAP Analysis — When Do Shortages Occur?")
-        st.caption("Carry-forward logic: surplus/backlog from period N propagates to period N+1")
-        period_gap_fragment(result, charts)
-    
-    # Tab 3: Manufacturing
-    with tab3:
-        st.subheader("🏭 Manufacturing Products")
+        st.subheader("🏭 Manufacturing — Net GAP")
         manufacturing_fragment(result, charts)
+        
+        st.divider()
+        st.subheader("📅 Manufacturing Period Timeline")
+        manufacturing_period_fragment(result, charts)
     
-    # Tab 4: Trading
-    with tab4:
-        st.subheader("🛒 Trading Products")
+    # Tab 3: Trading — Net GAP + Period Timeline
+    with tab3:
+        st.subheader("🛒 Trading — Net GAP")
         trading_fragment(result)
+        
+        st.divider()
+        st.subheader("📅 Trading Period Timeline")
+        trading_period_fragment(result, charts)
     
-    # Tab 5: Raw Materials
-    with tab5:
-        st.subheader("🧪 Raw Material GAP")
+    # Tab 4: Raw Materials — Net GAP + Period Timeline
+    with tab4:
+        st.subheader("🧪 Raw Material — Net GAP")
         raw_materials_fragment(result, charts)
+        
+        st.divider()
+        st.subheader("📅 Raw Material Period Timeline")
+        st.caption("Demand = BOM explosion of FG manufacturing shortage per period")
+        raw_period_fragment(result, charts)
     
-    # Tab 6: Actions
-    with tab6:
+    # Tab 5: Actions
+    with tab5:
         st.subheader("📋 Action Recommendations")
         actions_fragment(result, charts)
     

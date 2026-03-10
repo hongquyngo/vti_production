@@ -99,6 +99,10 @@ class SupplyChainGAPResult:
     fg_period_metrics: Dict[str, Any] = field(default_factory=dict)
     period_type: str = 'Weekly'
     
+    # Raw Material Period GAP (v2.3)
+    raw_period_gap_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    raw_period_metrics: Dict[str, Any] = field(default_factory=dict)
+    
     # =========================================================================
     # SUMMARY METHODS
     # =========================================================================
@@ -155,12 +159,16 @@ class SupplyChainGAPResult:
             # Period analysis metrics (v2.2)
             'period_type': self.period_type,
             'has_period_data': self.has_period_data(),
+            'has_raw_period_data': self.has_raw_period_data(),
         }
         
         # Merge period metrics if available
         if self.fg_period_metrics:
             for k, v in self.fg_period_metrics.items():
                 metrics[f'period_{k}'] = v
+        if self.raw_period_metrics:
+            for k, v in self.raw_period_metrics.items():
+                metrics[f'raw_period_{k}'] = v
         
         return metrics
     
@@ -438,8 +446,11 @@ class SupplyChainGAPResult:
     def has_period_data(self) -> bool:
         return not self.fg_period_gap_df.empty
     
+    def has_raw_period_data(self) -> bool:
+        return not self.raw_period_gap_df.empty
+    
     # =========================================================================
-    # PERIOD GAP ACCESSORS (v2.2)
+    # PERIOD GAP ACCESSORS (v2.2+)
     # =========================================================================
     
     def get_period_shortage(self) -> pd.DataFrame:
@@ -453,3 +464,17 @@ class SupplyChainGAPResult:
         if self.fg_period_gap_df.empty:
             return pd.DataFrame()
         return self.fg_period_gap_df[self.fg_period_gap_df['product_id'] == product_id].copy()
+    
+    def get_manufacturing_period_gap(self) -> pd.DataFrame:
+        """Get FG period GAP filtered to manufacturing products only"""
+        if self.fg_period_gap_df.empty or self.manufacturing_df.empty:
+            return pd.DataFrame()
+        mfg_ids = self.manufacturing_df['product_id'].tolist()
+        return self.fg_period_gap_df[self.fg_period_gap_df['product_id'].isin(mfg_ids)].copy()
+    
+    def get_trading_period_gap(self) -> pd.DataFrame:
+        """Get FG period GAP filtered to trading products only"""
+        if self.fg_period_gap_df.empty or self.trading_df.empty:
+            return pd.DataFrame()
+        trading_ids = self.trading_df['product_id'].tolist()
+        return self.fg_period_gap_df[self.fg_period_gap_df['product_id'].isin(trading_ids)].copy()

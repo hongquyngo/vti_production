@@ -58,12 +58,9 @@ class SupplyChainStateManager:
                 'filters': {},
                 'result': None,
                 'pages': {
-                    'fg': 1,
-                    'mfg': 1,
-                    'trading': 1,
-                    'raw': 1,
-                    'action': 1,
-                    'period': 1
+                    'fg': 1, 'mfg': 1, 'trading': 1, 'raw': 1,
+                    'action': 1, 'period': 1, 'fg_period': 1,
+                    'mfg_period': 1, 'trd_period': 1, 'raw_period': 1
                 },
                 'active_tab': 'overview',
                 'last_calculated': None
@@ -120,12 +117,9 @@ class SupplyChainStateManager:
     def _reset_pages(self):
         """Reset all pages to 1"""
         st.session_state[self.STATE_KEY]['pages'] = {
-            'fg': 1,
-            'mfg': 1,
-            'trading': 1,
-            'raw': 1,
-            'action': 1,
-            'period': 1
+            'fg': 1, 'mfg': 1, 'trading': 1, 'raw': 1, 'action': 1,
+            'period': 1, 'fg_period': 1, 'mfg_period': 1,
+            'trd_period': 1, 'raw_period': 1
         }
     
     def get_page(self, section: str = 'fg') -> int:

@@ -270,21 +270,24 @@ class SupplyChainCharts:
         top_n: int = 10,
         period_type: str = 'Weekly'
     ) -> go.Figure:
-        """Create period GAP timeline — shows gap over time for top shortage products."""
+        """Create period GAP timeline — shows gap over time for top shortage items."""
         
         if period_gap_df.empty or 'gap_quantity' not in period_gap_df.columns:
             return self._empty_chart("No period data available")
         
-        # Find top shortage products
-        shortage_by_product = period_gap_df[period_gap_df['gap_quantity'] < 0].groupby(
-            'pt_code'
+        # Auto-detect code column (pt_code for FG, material_pt_code for raw)
+        code_col = 'material_pt_code' if 'material_pt_code' in period_gap_df.columns else 'pt_code'
+        
+        # Find top shortage items
+        shortage_by_item = period_gap_df[period_gap_df['gap_quantity'] < 0].groupby(
+            code_col
         )['gap_quantity'].sum().nsmallest(top_n)
         
-        if shortage_by_product.empty:
+        if shortage_by_item.empty:
             return self._empty_chart("No shortage in any period")
         
-        top_products = shortage_by_product.index.tolist()
-        filtered = period_gap_df[period_gap_df['pt_code'].isin(top_products)]
+        top_items = shortage_by_item.index.tolist()
+        filtered = period_gap_df[period_gap_df[code_col].isin(top_items)]
         
         # Sort periods
         from .period_calculator import get_period_sort_key
@@ -301,27 +304,30 @@ class SupplyChainCharts:
         
         fig = go.Figure()
         
-        for pt_code in top_products:
-            product_data = filtered[filtered['pt_code'] == pt_code]
-            # Ensure period order
-            product_data = product_data.set_index('period').reindex(periods_sorted).reset_index()
+        for item_code in top_items:
+            item_data = filtered[filtered[code_col] == item_code]
+            # Aggregate duplicates (same item can appear multiple times per period)
+            item_agg = item_data.groupby('period')['gap_quantity'].sum()
+            # Build series aligned to all sorted periods (fill missing with NaN)
+            aligned = pd.Series(index=periods_sorted, dtype=float)
+            for p in periods_sorted:
+                aligned[p] = item_agg.get(p, float('nan'))
             
             x_labels = [period_label_map.get(p, p) for p in periods_sorted]
-            y_vals = product_data['gap_quantity'].tolist()
             
             fig.add_trace(go.Scatter(
                 x=x_labels,
-                y=y_vals,
+                y=aligned.tolist(),
                 mode='lines+markers',
-                name=pt_code,
-                hovertemplate=f'{pt_code}<br>%{{x}}<br>GAP: %{{y:,.0f}}<extra></extra>'
+                name=item_code,
+                connectgaps=True,
+                hovertemplate=f'{item_code}<br>%{{x}}<br>GAP: %{{y:,.0f}}<extra></extra>'
             ))
         
-        # Add zero line
         fig.add_hline(y=0, line_dash="dash", line_color="#6B7280", line_width=1)
         
         fig.update_layout(
-            title=f"Period GAP Timeline — Top {min(top_n, len(top_products))} Shortage Products",
+            title=f"Period GAP Timeline — Top {min(top_n, len(top_items))} Shortage Items",
             xaxis_title="Period",
             yaxis_title="GAP Quantity",
             height=self.chart_height + 50,
@@ -348,9 +354,12 @@ class SupplyChainCharts:
         
         from .period_calculator import get_period_sort_key, format_period_display
         
+        # Detect ID column (product_id for FG, material_id for raw)
+        id_col = 'material_id' if 'material_id' in shortage.columns else 'product_id'
+        
         period_totals = shortage.groupby('period').agg(
             total_shortage=('gap_quantity', lambda x: x.abs().sum()),
-            products_affected=('product_id', 'nunique')
+            items_affected=(id_col, 'nunique')
         ).reset_index()
         
         period_totals['_sort'] = period_totals['period'].apply(
@@ -366,7 +375,7 @@ class SupplyChainCharts:
             x=x_labels,
             y=period_totals['total_shortage'],
             marker_color='#DC2626',
-            text=period_totals['products_affected'].apply(lambda x: f"{x} products"),
+            text=period_totals['items_affected'].apply(lambda x: f"{x} items"),
             textposition='outside',
             hovertemplate='%{x}<br>Shortage: %{y:,.0f}<br>%{text}<extra></extra>'
         )])

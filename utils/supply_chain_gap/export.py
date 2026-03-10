@@ -71,6 +71,10 @@ def export_to_excel(
         # Sheet 7: Period GAP (v2.2)
         if result.has_period_data():
             _write_period_gap_sheet(writer, result)
+        
+        # Sheet 8: Raw Material Period GAP (v2.3)
+        if result.has_raw_period_data():
+            _write_raw_period_gap_sheet(writer, result)
     
     buffer.seek(0)
     return buffer
@@ -415,6 +419,43 @@ def _write_period_gap_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult
     export_df.rename(columns=rename_map, inplace=True)
     
     export_df.to_excel(writer, sheet_name='Period GAP', index=False)
+
+
+def _write_raw_period_gap_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
+    """Write raw material period GAP sheet (v2.3)"""
+    
+    df = result.raw_period_gap_df.copy()
+    
+    if df.empty:
+        pd.DataFrame({'Note': ['No raw material period data']}).to_excel(
+            writer, sheet_name='Raw Period GAP', index=False
+        )
+        return
+    
+    columns = [
+        'material_pt_code', 'material_name', 'material_brand', 'material_uom',
+        'period', 'begin_inventory', 'supply_in_period', 'total_available',
+        'demand_in_period', 'backlog_from_prev', 'effective_demand',
+        'gap_quantity', 'fulfillment_rate', 'fulfillment_status',
+        'backlog_to_next'
+    ]
+    available = [c for c in columns if c in df.columns]
+    export_df = df[available].copy()
+    
+    if 'period_display' in df.columns:
+        export_df['period'] = df['period_display']
+    
+    rename_map = {
+        'material_pt_code': 'Code', 'material_name': 'Part Number',
+        'material_brand': 'Brand', 'material_uom': 'UOM', 'period': 'Period',
+        'begin_inventory': 'Begin Inv', 'supply_in_period': 'Supply In',
+        'total_available': 'Available', 'demand_in_period': 'BOM Demand',
+        'backlog_from_prev': 'Backlog In', 'effective_demand': 'Total Need',
+        'gap_quantity': 'GAP', 'fulfillment_rate': 'Fill %',
+        'fulfillment_status': 'Status', 'backlog_to_next': 'Backlog Out',
+    }
+    export_df.rename(columns=rename_map, inplace=True)
+    export_df.to_excel(writer, sheet_name='Raw Period GAP', index=False)
 
 
 def get_export_filename(prefix: str = "supply_chain_gap") -> str:

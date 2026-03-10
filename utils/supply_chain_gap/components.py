@@ -124,7 +124,7 @@ def render_data_freshness(state, on_refresh=None):
         refresh_clicked = st.button(
             "🔄 Refresh",
             key="scg_refresh_btn",
-            use_container_width=True,
+            width='stretch',
             type="secondary"
         )
         if refresh_clicked:
@@ -332,7 +332,7 @@ def show_affected_customers_dialog():
         st.dataframe(
             styled,
             column_config=cust_col_config,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             height=min(500, 35 * len(cust_summary) + 38)
         )
@@ -418,7 +418,7 @@ def show_affected_customers_dialog():
         st.dataframe(
             styled,
             column_config=prod_col_config,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             height=min(500, 35 * len(prod_summary) + 38)
         )
@@ -492,7 +492,7 @@ def show_affected_customers_dialog():
             st.dataframe(
                 styled,
                 column_config=detail_col_config,
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
                 height=min(500, 35 * len(filtered_details) + 38)
             )
@@ -659,7 +659,7 @@ def render_fg_table(
         event = st.dataframe(
             styled,
             column_config=_get_column_config_fg(),
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             height=min(400, 35 * len(page_df) + 38),
             on_select="rerun",
@@ -675,7 +675,7 @@ def render_fg_table(
         st.dataframe(
             styled,
             column_config=_get_column_config_fg(),
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             height=min(400, 35 * len(page_df) + 38)
         )
@@ -751,7 +751,7 @@ def render_manufacturing_table(
             'reason': st.column_config.TextColumn('Reason', width='medium'),
             'bom_code': st.column_config.TextColumn('BOM', width='small'),
         },
-        use_container_width=True, hide_index=True,
+        width='stretch', hide_index=True,
         height=min(400, 35 * len(display_df) + 38)
     )
     
@@ -803,7 +803,7 @@ def render_trading_table(
             'at_risk_value': st.column_config.NumberColumn('At Risk ($)'),
             'action': st.column_config.TextColumn('Action', width='small'),
         },
-        use_container_width=True, hide_index=True,
+        width='stretch', hide_index=True,
         height=min(400, 35 * len(page_df) + 38)
     )
     
@@ -886,7 +886,7 @@ def render_raw_material_table(
         page_df[available],
         qty_cols=['total_required_qty', 'total_supply', 'net_gap']
     )
-    st.dataframe(styled, column_config=col_config, use_container_width=True,
+    st.dataframe(styled, column_config=col_config, width='stretch',
                  hide_index=True, height=min(400, 35 * len(page_df) + 38))
     
     return {'page': current_page, 'total_pages': total_pages,
@@ -944,7 +944,7 @@ def render_semi_finished_table(
             'net_gap': st.column_config.NumberColumn('GAP'),
             'netting_status': st.column_config.TextColumn('Netting', width='medium'),
         },
-        use_container_width=True, hide_index=True,
+        width='stretch', hide_index=True,
         height=min(300, 35 * len(page_df) + 38)
     )
     return {'page': current_page, 'total_pages': total_pages,
@@ -1013,7 +1013,7 @@ def render_action_table(
             'priority': st.column_config.NumberColumn('Priority', format="%d"),
             'reason': st.column_config.TextColumn('Reason', width='medium'),
         },
-        use_container_width=True, hide_index=True,
+        width='stretch', hide_index=True,
         height=min(400, 35 * len(page_df) + 38)
     )
     return {'page': current_page, 'total_pages': total_pages,
@@ -1178,7 +1178,7 @@ def _render_dialog_manufacturing(result, product_id, product, prod_status):
         'total_supply': st.column_config.NumberColumn('Supply'),
         'net_gap': st.column_config.NumberColumn('GAP'),
         'status_icon': st.column_config.TextColumn('', width='small'),
-    }, use_container_width=True, hide_index=True, height=min(300, 35 * len(mat_df) + 38))
+    }, width='stretch', hide_index=True, height=min(300, 35 * len(mat_df) + 38))
     
     gap_val = float(product.get('net_gap', 0))
     if gap_val < 0:
@@ -1244,9 +1244,9 @@ def fg_charts_fragment(result: SupplyChainGAPResult, charts):
     """Fragment for FG charts — donut + value at risk + top shortages."""
     col1, col2 = st.columns(2)
     with col1:
-        st.plotly_chart(charts.create_status_donut(result.fg_gap_df), use_container_width=True)
+        st.plotly_chart(charts.create_status_donut(result.fg_gap_df), width='stretch')
     with col2:
-        st.plotly_chart(charts.create_top_items_bar(result.fg_gap_df, 'shortage', 8), use_container_width=True)
+        st.plotly_chart(charts.create_top_items_bar(result.fg_gap_df, 'shortage', 8), width='stretch')
     
     render_status_summary(result.fg_gap_df, key_prefix="fg")
 
@@ -1343,7 +1343,7 @@ def manufacturing_fragment(result: SupplyChainGAPResult, charts):
         with col1:
             st.plotly_chart(
                 charts.create_classification_pie(len(result.manufacturing_df), len(result.trading_df)),
-                use_container_width=True)
+                width='stretch')
         with col2:
             metrics = result.get_metrics()
             st.metric("Manufacturing Products", metrics.get('manufacturing_count', 0))
@@ -1429,9 +1429,9 @@ def raw_materials_fragment(result: SupplyChainGAPResult, charts):
     # --- Row 2: Charts (donut + top shortages) ---
     col1, col2 = st.columns(2)
     with col1:
-        st.plotly_chart(charts.create_raw_material_status(result.raw_gap_df), use_container_width=True)
+        st.plotly_chart(charts.create_raw_material_status(result.raw_gap_df), width='stretch')
     with col2:
-        st.plotly_chart(charts.create_raw_material_top_shortage(result.raw_gap_df), use_container_width=True)
+        st.plotly_chart(charts.create_raw_material_top_shortage(result.raw_gap_df), width='stretch')
     
     # --- Semi-finished section (only if multi-level) ---
     if result.has_semi_finished_data():
@@ -1469,7 +1469,7 @@ def actions_fragment(result: SupplyChainGAPResult, charts):
         st.plotly_chart(
             charts.create_action_summary(
                 metrics.get('mo_count', 0), metrics.get('po_fg_count', 0), metrics.get('po_raw_count', 0)),
-            use_container_width=True)
+            width='stretch')
     
     at1, at2, at3 = st.tabs([
         f"🏭 MO ({metrics.get('mo_count', 0)})",
@@ -1485,200 +1485,167 @@ def actions_fragment(result: SupplyChainGAPResult, charts):
 
 
 # =============================================================================
-# FRAGMENT: PERIOD GAP TAB (v2.2)
+# PERIOD GAP: REUSABLE COMPONENTS (v2.3)
 # =============================================================================
 
-@st.fragment
-def period_gap_fragment(result: SupplyChainGAPResult, charts):
-    """Fragment for Period GAP Analysis tab — isolated reruns."""
+def _render_period_kpis(period_df: pd.DataFrame, track_backlog: bool, period_type: str):
+    """Render compact period KPIs with past/future breakdown."""
+    from .period_calculator import format_period_display
     
-    if not result.has_period_data():
-        st.info("📅 No period data available. Period analysis requires supply/demand with dates.")
+    if period_df.empty:
         return
     
-    from .state import get_state
-    from .period_calculator import (
-        identify_critical_shortage_periods,
-        identify_critical_shortage_products,
-        format_period_display,
-        get_period_sort_key
+    id_col = 'material_id' if 'material_id' in period_df.columns else 'product_id'
+    shortage = period_df[period_df['gap_quantity'] < 0]
+    
+    # Count past/future periods
+    if 'is_past' in period_df.columns:
+        past_periods = period_df[period_df['is_past']]['period'].nunique()
+        future_periods = period_df[~period_df['is_past']]['period'].nunique()
+        period_label = f"{period_df['period'].nunique()} (🔴{past_periods} past, 🟢{future_periods} future)"
+    else:
+        period_label = str(period_df['period'].nunique())
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📅 Periods", period_label)
+    c2.metric("🔴 Shortage Periods", shortage['period'].nunique() if not shortage.empty else 0)
+    c3.metric("🔴 Shortage Items", shortage[id_col].nunique() if not shortage.empty else 0)
+    avg_fill = period_df['fulfillment_rate'].mean() if 'fulfillment_rate' in period_df.columns else 0
+    c4.metric("Avg Fill %", f"{avg_fill:.1f}%")
+    
+    if track_backlog and 'backlog_to_next' in period_df.columns:
+        fb = period_df.groupby(id_col)['backlog_to_next'].last()
+        total_backlog = fb.sum()
+        with_backlog = (fb > 0).sum()
+        if total_backlog > 0:
+            bc1, bc2 = st.columns(2)
+            bc1.metric("📦 Final Backlog", f"{total_backlog:,.0f}")
+            bc2.metric("Items w/ Backlog", with_backlog)
+
+
+def render_pivot_view(
+    period_df: pd.DataFrame,
+    period_type: str,
+    key_prefix: str,
+    code_col: str = 'pt_code',
+    name_col: str = 'product_name'
+):
+    """Render pivot view: products × periods matrix with color coding."""
+    from .period_calculator import create_pivot_data
+    
+    if period_df.empty:
+        return
+    
+    pivot = create_pivot_data(period_df, period_type, code_col=code_col, name_col=name_col)
+    if pivot.empty:
+        return
+    
+    # Determine numeric columns (period columns)
+    non_period_cols = [code_col, name_col, 'Category']
+    period_cols = [c for c in pivot.columns if c not in non_period_cols]
+    
+    if not period_cols:
+        return
+    
+    st.caption(
+        f"**Category:** 🔺 = Net Shortage | 📈 = Net Surplus | ✅ = Balanced  \n"
+        f"**Period:** 🔴 = Past | 🟢 = Current/Future"
     )
     
-    state = get_state()
-    period_gap_df = result.fg_period_gap_df
-    period_type = result.period_type
-    pm = result.fg_period_metrics
-    track_backlog = result.filters_used.get('track_backlog', True)
+    # Apply color styling to numeric cells
+    def _color_gap(val):
+        if isinstance(val, (int, float)):
+            if val < 0:
+                return 'background-color: #fee2e2; color: #DC2626; font-weight: bold'
+            elif val > 0:
+                return 'background-color: #d1fae5; color: #059669'
+        return ''
     
-    # --- Row 1: Period KPIs ---
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Products", pm.get('total_products', 0))
-    c2.metric("Periods", pm.get('total_periods', 0))
-    c3.metric("🔴 Shortage Periods", pm.get('shortage_periods', 0))
-    c4.metric("🔴 Shortage Products", pm.get('shortage_products', 0))
-    c5.metric("Avg Fulfillment", f"{pm.get('avg_fulfillment_rate', 0):.1f}%")
+    styled = pivot.style.applymap(_color_gap, subset=period_cols).format(
+        {c: '{:,.0f}' for c in period_cols}, na_rep='-'
+    )
     
-    # Backlog metrics
-    if track_backlog and 'total_final_backlog' in pm:
-        bc1, bc2, bc3 = st.columns(3)
-        bc1.metric("📦 Final Backlog", f"{pm.get('total_final_backlog', 0):,.0f}")
-        bc2.metric("Products w/ Backlog", pm.get('products_with_backlog', 0))
-        if 'first_shortage_period' in pm:
-            bc3.metric(
-                "First Shortage",
-                format_period_display(pm['first_shortage_period'], period_type)
-            )
-    
-    # --- Row 2: Charts ---
-    col1, col2 = st.columns(2)
-    with col1:
-        st.plotly_chart(
-            charts.create_period_shortage_summary(period_gap_df, period_type),
-            use_container_width=True
-        )
-    with col2:
-        st.plotly_chart(
-            charts.create_period_gap_timeline(period_gap_df, top_n=8, period_type=period_type),
-            use_container_width=True
-        )
-    
-    # --- Critical periods ---
-    critical_periods = identify_critical_shortage_periods(period_gap_df, period_type, top_n=5)
-    if not critical_periods.empty:
-        with st.expander("🔴 Critical Shortage Periods", expanded=False):
-            styled = _styled_dataframe(
-                critical_periods[['period_display', 'total_shortage', 'products_affected', 'avg_fulfillment']],
-                qty_cols=['total_shortage'],
-                decimal_cols={'avg_fulfillment': 1}
-            )
-            st.dataframe(styled, column_config={
-                'period_display': st.column_config.TextColumn('Period', width='medium'),
-                'total_shortage': st.column_config.NumberColumn('Total Shortage'),
-                'products_affected': st.column_config.NumberColumn('Products', format="%d"),
-                'avg_fulfillment': st.column_config.NumberColumn('Avg Fill %', format="%.1f%%"),
-            }, use_container_width=True, hide_index=True, height=min(250, 35 * len(critical_periods) + 38))
-    
-    # --- Filters for period table ---
-    st.divider()
-    st.markdown("#### 📋 Period GAP Detail")
-    
-    fc1, fc2, fc3, fc4 = st.columns([1, 1, 1, 1])
-    
-    with fc1:
-        # Product filter
-        product_options = sorted(period_gap_df['pt_code'].unique().tolist())
-        selected_products = st.multiselect(
-            "Filter Products", product_options, key="period_product_filter",
-            placeholder="All products"
-        )
-    
-    with fc2:
-        # Period filter
-        all_periods = period_gap_df['period'].unique().tolist()
-        all_periods_sorted = sorted(all_periods, key=lambda p: get_period_sort_key(p, period_type))
-        period_display_options = [format_period_display(p, period_type) for p in all_periods_sorted]
-        period_map = dict(zip(period_display_options, all_periods_sorted))
-        selected_period_displays = st.multiselect(
-            "Filter Periods", period_display_options, key="period_period_filter",
-            placeholder="All periods"
-        )
-    
-    with fc3:
-        status_filter = st.selectbox(
-            "Status", ["All", "❌ Shortage Only", "✅ Fulfilled Only"],
-            key="period_status_filter"
-        )
-    
-    with fc4:
-        items_per_page = st.selectbox(
-            "Items/page", UI_CONFIG['items_per_page_options'],
-            index=1, key="period_items_per_page"
-        )
-    
-    # Apply filters
-    filtered = period_gap_df.copy()
-    
-    if selected_products:
-        filtered = filtered[filtered['pt_code'].isin(selected_products)]
-    
-    if selected_period_displays:
-        selected_periods_raw = [period_map[d] for d in selected_period_displays]
-        filtered = filtered[filtered['period'].isin(selected_periods_raw)]
-    
-    if status_filter == "❌ Shortage Only":
-        filtered = filtered[filtered['gap_quantity'] < 0]
-    elif status_filter == "✅ Fulfilled Only":
-        filtered = filtered[filtered['gap_quantity'] >= 0]
-    
-    # --- Render period GAP table ---
-    render_period_gap_table(filtered, items_per_page, state, track_backlog, period_type)
+    st.dataframe(
+        styled, width='stretch', hide_index=True,
+        height=min(400, 35 * len(pivot) + 38)
+    )
 
 
-def render_period_gap_table(
+def render_period_detail_table(
     df: pd.DataFrame,
     items_per_page: int,
-    state,
+    page_key: str,
     track_backlog: bool,
-    period_type: str
+    period_type: str,
+    code_col: str = 'pt_code',
+    name_col: str = 'product_name',
+    brand_col: str = 'brand',
+    uom_col: str = 'standard_uom'
 ):
-    """Render period GAP table with pagination."""
+    """Render period GAP detail table with pagination, past-period indicator, product type."""
     from .period_calculator import format_period_display
+    from .state import get_state
+    
+    state = get_state()
     
     if df.empty:
         st.info("No data matches current filters")
         return
     
-    st.caption(f"**{len(df):,} rows** — {df['product_id'].nunique()} products × {df['period'].nunique()} periods")
+    id_col = 'material_id' if 'material_id' in df.columns else 'product_id'
+    st.caption(f"**{len(df):,} rows** — {df[id_col].nunique()} items × {df['period'].nunique()} periods")
     
-    # Pagination
     total_items = len(df)
     total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
-    page = state.get_page('period')
+    page = state.get_page(page_key)
     page = min(max(1, page), total_pages)
     start_idx = (page - 1) * items_per_page
     end_idx = min(start_idx + items_per_page, total_items)
     page_df = df.iloc[start_idx:end_idx].copy()
     
-    # Format period display
+    # Past period indicator (🔴 = past, blank = current/future)
+    if 'is_past' in page_df.columns:
+        page_df['_past'] = page_df['is_past'].apply(lambda x: '🔴' if x else '')
+    else:
+        page_df['_past'] = ''
+    
+    # Period label with date range
     page_df['period_label'] = page_df['period'].apply(
         lambda p: format_period_display(p, period_type)
     )
     
-    # Build display columns
-    display_cols = [
-        'pt_code', 'product_name', 'brand', 'standard_uom',
-        'period_label', 'begin_inventory', 'supply_in_period', 'total_available',
-        'demand_in_period',
-    ]
-    
+    # Build display columns — _past indicator first
+    display_cols = ['_past', code_col, name_col, brand_col, uom_col,
+                    'period_label', 'begin_inventory', 'supply_in_period', 'total_available',
+                    'demand_in_period']
     if track_backlog:
         display_cols.extend(['backlog_from_prev', 'effective_demand'])
-    
-    display_cols.extend([
-        'gap_quantity', 'fulfillment_rate', 'fulfillment_status',
-    ])
-    
+    display_cols.extend(['gap_quantity', 'fulfillment_rate', 'fulfillment_status'])
     if track_backlog:
         display_cols.append('backlog_to_next')
+    # Product type (Matched / Demand Only / Supply Only) — only for FG
+    if 'product_type' in page_df.columns:
+        display_cols.append('product_type')
+    # Backlog status
+    if 'backlog_to_next' in page_df.columns:
+        page_df['backlog_status'] = page_df['backlog_to_next'].apply(
+            lambda x: 'Has Backlog' if x > 0 else 'No Backlog'
+        )
+        display_cols.append('backlog_status')
     
     available = [c for c in display_cols if c in page_df.columns]
-    
-    # Numeric formatting
     qty_cols = [c for c in ['begin_inventory', 'supply_in_period', 'total_available',
                             'demand_in_period', 'gap_quantity', 'backlog_from_prev',
                             'effective_demand', 'backlog_to_next'] if c in available]
     
-    styled = _styled_dataframe(
-        page_df[available],
-        qty_cols=qty_cols,
-        decimal_cols={'fulfillment_rate': 1}
-    )
+    styled = _styled_dataframe(page_df[available], qty_cols=qty_cols, decimal_cols={'fulfillment_rate': 1})
     
     col_config = {
-        'pt_code': st.column_config.TextColumn('Code', width='small'),
-        'product_name': st.column_config.TextColumn('Product', width='medium'),
-        'brand': st.column_config.TextColumn('Brand', width='small'),
-        'standard_uom': st.column_config.TextColumn('UOM', width='small'),
+        '_past': st.column_config.TextColumn('', width='small'),
+        code_col: st.column_config.TextColumn('Code', width='small'),
+        name_col: st.column_config.TextColumn('Product', width='medium'),
+        brand_col: st.column_config.TextColumn('Brand', width='small'),
+        uom_col: st.column_config.TextColumn('UOM', width='small'),
         'period_label': st.column_config.TextColumn('Period', width='medium'),
         'begin_inventory': st.column_config.NumberColumn('Begin Inv'),
         'supply_in_period': st.column_config.NumberColumn('Supply In'),
@@ -1687,24 +1654,183 @@ def render_period_gap_table(
         'backlog_from_prev': st.column_config.NumberColumn('Backlog In'),
         'effective_demand': st.column_config.NumberColumn('Total Need'),
         'gap_quantity': st.column_config.NumberColumn('GAP'),
-        'fulfillment_rate': st.column_config.ProgressColumn(
-            'Fill %', format="%.0f%%", min_value=0, max_value=100
-        ),
+        'fulfillment_rate': st.column_config.ProgressColumn('Fill %', format="%.0f%%", min_value=0, max_value=100),
         'fulfillment_status': st.column_config.TextColumn('Status', width='small'),
         'backlog_to_next': st.column_config.NumberColumn('Backlog Out'),
+        'product_type': st.column_config.TextColumn('Type', width='small'),
+        'backlog_status': st.column_config.TextColumn('Backlog', width='small'),
     }
     
-    st.dataframe(
-        styled,
-        column_config=col_config,
-        use_container_width=True,
-        hide_index=True,
-        height=min(500, 35 * len(page_df) + 38)
-    )
+    st.dataframe(styled, column_config=col_config, width='stretch',
+                 hide_index=True, height=min(500, 35 * len(page_df) + 38))
     
-    # Pagination controls
     if total_pages > 1:
-        new_page = render_pagination(page, total_pages, "period")
+        new_page = render_pagination(page, total_pages, page_key)
         if new_page != page:
-            state.set_page(new_page, 'period', total_pages)
+            state.set_page(new_page, page_key, total_pages)
             st.rerun(scope="fragment")
+
+
+def _render_period_analysis_section(
+    period_df: pd.DataFrame,
+    charts,
+    period_type: str,
+    track_backlog: bool,
+    key_prefix: str,
+    page_key: str,
+    code_col: str = 'pt_code',
+    name_col: str = 'product_name',
+    brand_col: str = 'brand',
+    uom_col: str = 'standard_uom',
+    id_col: str = 'product_id'
+):
+    """
+    Reusable period analysis section — called within each tab fragment.
+    Contains: KPIs → Charts → Pivot View → Filters → Detail Table
+    """
+    from .period_calculator import format_period_display, get_period_sort_key
+    
+    if period_df.empty:
+        st.info("📅 No period data available for this category")
+        return
+    
+    # KPIs
+    _render_period_kpis(period_df, track_backlog, period_type)
+    
+    # Charts
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(
+            charts.create_period_shortage_summary(period_df, period_type),
+            width='stretch')
+    with col2:
+        st.plotly_chart(
+            charts.create_period_gap_timeline(period_df, top_n=8, period_type=period_type),
+            width='stretch')
+    
+    # Pivot View
+    with st.expander("📊 Pivot View — GAP by Period", expanded=False):
+        render_pivot_view(period_df, period_type, key_prefix, code_col=code_col, name_col=name_col)
+    
+    # Filters + Detail Table
+    has_product_type = 'product_type' in period_df.columns
+    
+    if has_product_type:
+        fc1, fc2, fc3, fc4, fc5 = st.columns([2, 1, 1, 1, 1])
+    else:
+        fc1, fc2, fc3, fc5 = st.columns([2, 1, 1, 1])
+        fc4 = None
+    
+    with fc1:
+        code_options = sorted(period_df[code_col].dropna().unique().tolist())
+        sel_codes = st.multiselect("Filter", code_options, key=f"{key_prefix}_code_f", placeholder="All items")
+    with fc2:
+        status_f = st.selectbox("Status", ["All", "❌ Shortage", "✅ Fulfilled"], key=f"{key_prefix}_status_f")
+    with fc3:
+        period_f = st.selectbox("Period", ["All", "🟢 Future Only", "🔴 Past Only"],
+                                key=f"{key_prefix}_period_f")
+    if has_product_type and fc4:
+        with fc4:
+            type_f = st.selectbox("Type", ["All", "Matched", "Demand Only", "Supply Only"],
+                                  key=f"{key_prefix}_type_f")
+    else:
+        type_f = "All"
+    with fc5:
+        ipp = st.selectbox("Items/page", UI_CONFIG['items_per_page_options'], index=1, key=f"{key_prefix}_ipp")
+    
+    filtered = period_df.copy()
+    if sel_codes:
+        filtered = filtered[filtered[code_col].isin(sel_codes)]
+    if status_f == "❌ Shortage":
+        filtered = filtered[filtered['gap_quantity'] < 0]
+    elif status_f == "✅ Fulfilled":
+        filtered = filtered[filtered['gap_quantity'] >= 0]
+    if period_f == "🟢 Future Only" and 'is_past' in filtered.columns:
+        filtered = filtered[~filtered['is_past']]
+    elif period_f == "🔴 Past Only" and 'is_past' in filtered.columns:
+        filtered = filtered[filtered['is_past']]
+    if type_f != "All" and 'product_type' in filtered.columns:
+        filtered = filtered[filtered['product_type'] == type_f]
+    
+    render_period_detail_table(
+        filtered, ipp, page_key, track_backlog, period_type,
+        code_col=code_col, name_col=name_col, brand_col=brand_col, uom_col=uom_col
+    )
+
+
+# =============================================================================
+# PER-TAB PERIOD FRAGMENTS (v2.3)
+# =============================================================================
+
+@st.fragment
+def fg_period_fragment(result: SupplyChainGAPResult, charts):
+    """Period analysis for ALL FG products."""
+    if not result.has_period_data():
+        st.caption("📅 No period data. Supply/demand need date columns.")
+        return
+    _render_period_analysis_section(
+        result.fg_period_gap_df, charts, result.period_type,
+        result.filters_used.get('track_backlog', True),
+        key_prefix='fg_p', page_key='fg_period'
+    )
+
+
+@st.fragment
+def manufacturing_period_fragment(result: SupplyChainGAPResult, charts):
+    """Period analysis for manufacturing products only."""
+    if not result.has_period_data() or not result.has_classification():
+        st.caption("📅 No period data for manufacturing products")
+        return
+    mfg_period = result.get_manufacturing_period_gap()
+    if mfg_period.empty:
+        st.caption("📅 No manufacturing products in period data")
+        return
+    _render_period_analysis_section(
+        mfg_period, charts, result.period_type,
+        result.filters_used.get('track_backlog', True),
+        key_prefix='mfg_p', page_key='mfg_period'
+    )
+
+
+@st.fragment
+def trading_period_fragment(result: SupplyChainGAPResult, charts):
+    """Period analysis for trading products only."""
+    if not result.has_period_data() or not result.has_classification():
+        st.caption("📅 No period data for trading products")
+        return
+    trd_period = result.get_trading_period_gap()
+    if trd_period.empty:
+        st.caption("📅 No trading products in period data")
+        return
+    _render_period_analysis_section(
+        trd_period, charts, result.period_type,
+        result.filters_used.get('track_backlog', True),
+        key_prefix='trd_p', page_key='trd_period'
+    )
+
+
+@st.fragment
+def raw_period_fragment(result: SupplyChainGAPResult, charts):
+    """Period analysis for raw materials (BOM-exploded from FG shortage)."""
+    if not result.has_raw_period_data():
+        st.caption("📅 No raw material period data (requires manufacturing shortage + BOM)")
+        return
+    _render_period_analysis_section(
+        result.raw_period_gap_df, charts, result.period_type,
+        result.filters_used.get('track_backlog', True),
+        key_prefix='raw_p', page_key='raw_period',
+        code_col='material_pt_code', name_col='material_name',
+        brand_col='material_brand', uom_col='material_uom',
+        id_col='material_id'
+    )
+
+
+# Backward compatibility alias
+def period_gap_fragment(result, charts):
+    """Deprecated: use fg_period_fragment instead."""
+    fg_period_fragment(result, charts)
+
+
+def render_period_gap_table(*args, **kwargs):
+    """Deprecated: use render_period_detail_table instead."""
+    render_period_detail_table(*args, **kwargs)
