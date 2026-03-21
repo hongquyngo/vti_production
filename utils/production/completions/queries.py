@@ -891,36 +891,23 @@ class CompletionQueries:
             logger.error(f"Error in bulk load: {e}")
             return None
     
-    def _get_live_stats_only(self) -> Dict[str, int]:
-        """Lightweight live stats — scalar subqueries only."""
+    def _get_header_on_single_conn(self) -> Dict[str, Any]:
+        """
+        Run live_stats + ready_to_close on ONE connection (2 queries, 1 conn).
+        Avoids pool contention — only 2 connections used total in bootstrap.
+        """
         from .common import get_vietnam_today
         today = get_vietnam_today()
         
-        query = """
+        stats_query = text("""
             SELECT 
                 (SELECT COUNT(*) FROM manufacturing_orders 
                  WHERE delete_flag = 0 AND status = 'IN_PROGRESS') as in_progress,
                 (SELECT COUNT(*) FROM production_receipts 
-                 WHERE DATE(receipt_date) = %s) as today_count
-        """
+                 WHERE DATE(receipt_date) = :today) as today_count
+        """)
         
-        try:
-            import time as _t; _t0 = _t.perf_counter()
-            result = pd.read_sql(query, self.engine, params=(today,))
-            _ms = (_t.perf_counter() - _t0) * 1000
-            logger.info(f"[PERF] _get_live_stats_only: {_ms:.0f}ms")
-            row = result.iloc[0]
-            return {
-                'in_progress': int(row['in_progress']),
-                'today_count': int(row['today_count']),
-            }
-        except Exception as e:
-            logger.error(f"Error getting live stats: {e}")
-            return {'in_progress': 0, 'today_count': 0}
-    
-    def _get_ready_to_close_only(self) -> Dict[str, Any]:
-        """Ready-to-close orders for banner display."""
-        query = """
+        ready_query = text("""
             SELECT
                 mo.id,
                 mo.order_no,
@@ -950,57 +937,76 @@ class CompletionQueries:
                 AND mo.delete_flag = 0
                 AND mo.produced_qty >= mo.planned_qty
             ORDER BY mo.order_no
-        """
+        """)
         
         try:
             import time as _t; _t0 = _t.perf_counter()
-            result = pd.read_sql(query, self.engine)
+            
+            # Single connection for both queries — no pool round-trip for 2nd query
+            with self.engine.connect() as conn:
+                stats_result = conn.execute(stats_query, {'today': today})
+                stats_row = stats_result.fetchone()
+                
+                ready_result = pd.read_sql(ready_query, conn)
+            
             _ms = (_t.perf_counter() - _t0) * 1000
-            logger.info(f"[PERF] _get_ready_to_close_only: {_ms:.0f}ms")
+            logger.info(f"[PERF] _get_header_on_single_conn: {_ms:.0f}ms (stats+ready, 1 conn)")
             
-            if result.empty:
-                return {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
-            
-            ready = result[result['close_status'] == 'READY']
-            blocked = result[result['close_status'] == 'BLOCKED']
-            return {
-                'ready_count': len(ready),
-                'blocked_count': len(blocked),
-                'ready_orders': ready.to_dict('records') if not ready.empty else [],
-                'blocked_orders': blocked.to_dict('records') if not blocked.empty else [],
+            # Parse stats
+            live_stats = {
+                'in_progress': int(stats_row[0]) if stats_row else 0,
+                'today_count': int(stats_row[1]) if stats_row else 0,
             }
+            
+            # Parse ready-to-close
+            if ready_result.empty:
+                ready_info = {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
+            else:
+                ready = ready_result[ready_result['close_status'] == 'READY']
+                blocked = ready_result[ready_result['close_status'] == 'BLOCKED']
+                ready_info = {
+                    'ready_count': len(ready),
+                    'blocked_count': len(blocked),
+                    'ready_orders': ready.to_dict('records') if not ready.empty else [],
+                    'blocked_orders': blocked.to_dict('records') if not blocked.empty else [],
+                }
+            
+            live_stats['ready_to_close'] = ready_info['ready_count']
+            
+            return {
+                'live_stats': live_stats,
+                'ready_to_close': ready_info,
+            }
+            
         except Exception as e:
-            logger.error(f"Error getting ready-to-close: {e}")
-            return {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
+            logger.error(f"Error getting header data: {e}")
+            return {
+                'live_stats': {'in_progress': 0, 'today_count': 0, 'ready_to_close': 0},
+                'ready_to_close': {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []},
+            }
     
     # ==================== Parallel Bootstrap ====================
     
     def bootstrap_all(self, include_completed: bool = False) -> Dict[str, Any]:
         """
-        Load ALL page data in 3 PARALLEL queries.
+        Load ALL page data in 2 parallel threads, 2 connections max.
         
-        Thread 1: get_all_active_receipts  ~236ms ─┐
-        Thread 2: _get_live_stats_only     ~170ms ─┤ parallel = max() ≈ 240ms
-        Thread 3: _get_ready_to_close_only ~300ms ─┘
-        
-        Returns dict with:
-        - 'receipts': DataFrame
-        - 'header': {'live_stats': {...}, 'ready_to_close': {...}}
-        - 'connection_error': str or None
+        Thread 1: get_all_active_receipts      ~236ms ─┐ 1 conn
+        Thread 2: _get_header_on_single_conn   ~300ms ─┘ 1 conn (2 queries reuse)
+                                                         ─────────
+                                          max(236, 300) ≈ 300ms total
         """
         from concurrent.futures import ThreadPoolExecutor
         import time as _t
         
         _t0 = _t.perf_counter()
         
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             fut_receipts = executor.submit(
                 self.get_all_active_receipts, include_completed
             )
-            fut_stats = executor.submit(self._get_live_stats_only)
-            fut_ready = executor.submit(self._get_ready_to_close_only)
+            fut_header = executor.submit(self._get_header_on_single_conn)
             
-            # Collect results
             try:
                 receipts = fut_receipts.result(timeout=30)
             except Exception as e:
@@ -1008,19 +1014,13 @@ class CompletionQueries:
                 receipts = None
             
             try:
-                live_stats = fut_stats.result(timeout=30)
+                header = fut_header.result(timeout=30)
             except Exception as e:
-                logger.error(f"Bootstrap stats failed: {e}")
-                live_stats = {'in_progress': 0, 'today_count': 0}
-            
-            try:
-                ready_info = fut_ready.result(timeout=30)
-            except Exception as e:
-                logger.error(f"Bootstrap ready-to-close failed: {e}")
-                ready_info = {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
-        
-        # Merge live_stats + ready count
-        live_stats['ready_to_close'] = ready_info.get('ready_count', 0)
+                logger.error(f"Bootstrap header failed: {e}")
+                header = {
+                    'live_stats': {'in_progress': 0, 'today_count': 0, 'ready_to_close': 0},
+                    'ready_to_close': {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []},
+                }
         
         connection_error = None
         if receipts is None:
@@ -1028,13 +1028,10 @@ class CompletionQueries:
         
         _ms = (_t.perf_counter() - _t0) * 1000
         n_rows = len(receipts) if receipts is not None else 0
-        logger.info(f"[PERF] bootstrap_all: {_ms:.0f}ms total (3 parallel, {n_rows} receipts)")
+        logger.info(f"[PERF] bootstrap_all: {_ms:.0f}ms total (2 threads, 2 conns, {n_rows} receipts)")
         
         return {
             'receipts': receipts,
-            'header': {
-                'live_stats': live_stats,
-                'ready_to_close': ready_info,
-            },
+            'header': header,
             'connection_error': connection_error,
         }
