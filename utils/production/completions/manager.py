@@ -1,20 +1,19 @@
 # utils/production/completions/manager.py
 """
-Completion Manager - Business logic for Production Completions
-Complete production orders with receipt creation and inventory updates
+Production Receipts Manager - Business logic for Production Output Recording
+Record production output with QC breakdown, close orders manually
 
-Version: 3.2.0
+Version: 4.0.0
 Changes:
-- v3.2.0: Added pending QC post-validation - order cannot auto-complete
-  if any receipts have PENDING quality status (blocks entire transaction)
+- v4.0.0: Production Receipts refactoring
+  - complete_production() now accepts passed_qty/pending_qty/failed_qty
+  - REMOVED auto-complete: MO stays IN_PROGRESS after receipt
+  - NEW close_order(): manual order closure with validation
+  - QC transitions locked: PASSED/FAILED → immutable
+  - QC updates blocked when MO = COMPLETED
+- v3.2.0: Added pending QC post-validation
 - v3.1.0: Changed validation from "fully issued" to "issued" (issued_qty > 0)
-  - Renamed _get_pending_raw_materials → _get_unissued_raw_materials
-  - Allows completion when materials are partially issued (practical tolerance)
-- v3.0.0: Full partial QC support - PASSED + PENDING + FAILED combinations
-- v2.0.1: Fixed SQL error - removed updated_by/updated_date from production_receipts UPDATE
-- v2.0.0: Added update_quality_status_partial() for partial QC results
-
-Based on: materials.py complete_production function
+- v3.0.0: Full partial QC support
 """
 
 import logging
@@ -39,31 +38,41 @@ class CompletionManager:
     
     # ==================== Complete Production ====================
     
-    def complete_production(self, order_id: int, produced_qty: float,
+    def complete_production(self, order_id: int,
+                           passed_qty: float, pending_qty: float, failed_qty: float,
                            batch_no: str, warehouse_id: int,
-                           quality_status: str, user_id: int, keycloak_id: str,
+                           user_id: int, keycloak_id: str,
                            expiry_date: Optional[date] = None,
+                           defect_type: Optional[str] = None,
                            notes: str = '') -> Dict[str, Any]:
         """
-        Complete production with output receipt
+        Record production output with QC breakdown.
+        MO stays IN_PROGRESS — does NOT auto-complete.
         
         Args:
             order_id: Production order ID
-            produced_qty: Actual quantity produced
+            passed_qty: Quantity that passed QC (→ inventory)
+            pending_qty: Quantity pending QC (→ no inventory)
+            failed_qty: Quantity that failed QC (→ no inventory)
             batch_no: Production batch number
             warehouse_id: Target warehouse for finished goods
-            quality_status: 'PENDING', 'PASSED', 'FAILED'
             user_id: User ID for manufacturing tables (INT)
             keycloak_id: Keycloak ID for inventory tables (VARCHAR)
             expiry_date: Optional expiry date for finished goods
+            defect_type: Defect type if failed_qty > 0
             notes: Production notes
         
         Returns:
-            Dictionary with receipt_no, receipt_id, order_completed
+            Dictionary with receipt info
         
         Raises:
             ValueError: If validation fails
         """
+        total_produced = passed_qty + pending_qty + failed_qty
+        
+        if total_produced <= 0:
+            raise ValueError("Total produced quantity must be greater than 0")
+        
         with self.engine.begin() as conn:
             try:
                 # Get order info
@@ -72,132 +81,225 @@ class CompletionManager:
                     raise ValueError(f"Order {order_id} not found")
                 
                 if order['status'] not in ['IN_PROGRESS']:
-                    raise ValueError(f"Cannot complete {order['status']} order. Only IN_PROGRESS orders can be completed.")
+                    raise ValueError(f"Cannot record output for {order['status']} order. Only IN_PROGRESS orders allowed.")
                 
-                # Validate all RAW_MATERIALs have been issued (at least partially)
+                # Validate RAW_MATERIALs have been issued
                 unissued_materials = self._get_unissued_raw_materials(conn, order_id)
                 if unissued_materials:
                     material_list = ", ".join([m['name'] for m in unissued_materials[:3]])
                     if len(unissued_materials) > 3:
                         material_list += f" and {len(unissued_materials) - 3} more..."
                     raise ValueError(
-                        f"Cannot complete order: {len(unissued_materials)} raw material(s) have not been issued. "
+                        f"Cannot record output: {len(unissued_materials)} raw material(s) have not been issued. "
                         f"Materials: {material_list}"
                     )
                 
-                # Generate receipt number and group ID
-                receipt_no = self._generate_receipt_number(conn)
                 group_id = str(uuid.uuid4())
+                created_receipts = []
                 
-                # Create production receipt
-                receipt_query = text("""
-                    INSERT INTO production_receipts (
-                        receipt_no, manufacturing_order_id, receipt_date,
-                        product_id, quantity, uom, batch_no, expired_date,
-                        warehouse_id, quality_status, notes,
-                        created_by, created_date
-                    ) VALUES (
-                        :receipt_no, :order_id, NOW(),
-                        :product_id, :quantity, :uom, :batch_no, :expired_date,
-                        :warehouse_id, :quality_status, :notes,
-                        :user_id, NOW()
-                    )
-                """)
+                # Determine portions
+                has_passed = passed_qty > 0
+                has_pending = pending_qty > 0
+                has_failed = failed_qty > 0
+                portions = sum([has_passed, has_pending, has_failed])
                 
-                receipt_result = conn.execute(receipt_query, {
-                    'receipt_no': receipt_no,
-                    'order_id': order_id,
-                    'product_id': order['product_id'],
-                    'quantity': produced_qty,
-                    'uom': order['uom'],
-                    'batch_no': batch_no,
-                    'expired_date': expiry_date,
-                    'warehouse_id': warehouse_id,
-                    'quality_status': quality_status,
-                    'notes': notes,
-                    'user_id': user_id
-                })
-                
-                receipt_id = receipt_result.lastrowid
-                
-                # Update inventory if quality passed
-                # Type: stockInProduction (as per spec)
-                if quality_status == 'PASSED':
-                    self._add_production_to_inventory(
-                        conn, order, produced_qty, batch_no,
-                        warehouse_id, expiry_date,
-                        group_id, keycloak_id, receipt_id
-                    )
-                
-                # ===== POST-VALIDATION: Pending QC blocks order auto-completion =====
-                # If this receipt would cause order to auto-complete,
-                # verify ALL receipts (including this one) have been QC'd.
-                new_total = float(order.get('produced_qty') or 0) + produced_qty
-                would_complete = new_total >= float(order['planned_qty'])
-                
-                if would_complete:
-                    pending_check = text("""
-                        SELECT COUNT(*) as cnt
-                        FROM production_receipts
-                        WHERE manufacturing_order_id = :order_id
-                            AND quality_status = 'PENDING'
-                    """)
-                    pending_result = conn.execute(pending_check, {'order_id': order_id})
-                    pending_count = int(pending_result.fetchone()[0])
+                if portions == 1:
+                    # Single receipt
+                    if has_passed:
+                        status = 'PASSED'
+                        qty = passed_qty
+                    elif has_pending:
+                        status = 'PENDING'
+                        qty = pending_qty
+                    else:
+                        status = 'FAILED'
+                        qty = failed_qty
                     
-                    if pending_count > 0:
-                        raise ValueError(
-                            f"Cannot complete order: {pending_count} receipt(s) still have PENDING quality status. "
-                            f"All receipts must pass QC before order can be finalized.\n"
-                            f"Tip: Update quality status of pending receipts, or change this receipt's quality to PASSED/FAILED."
+                    receipt_no = self._generate_receipt_number(conn)
+                    receipt_id = self._insert_receipt(
+                        conn, receipt_no, order_id, order['product_id'],
+                        qty, order['uom'], batch_no, expiry_date, warehouse_id,
+                        status, notes, defect_type if status == 'FAILED' else None,
+                        user_id, None
+                    )
+                    
+                    if status == 'PASSED':
+                        self._add_production_to_inventory(
+                            conn, order, qty, batch_no, warehouse_id,
+                            expiry_date, group_id, keycloak_id, receipt_id
                         )
+                    
+                    created_receipts.append({
+                        'receipt_no': receipt_no, 'receipt_id': receipt_id,
+                        'status': status, 'qty': qty
+                    })
                 
-                # Update order produced quantity
+                else:
+                    # Multiple receipts — priority: PASSED > PENDING > FAILED
+                    # Main receipt gets highest priority status
+                    main_receipt_id = None
+                    
+                    if has_passed:
+                        receipt_no = self._generate_receipt_number(conn)
+                        main_receipt_id = self._insert_receipt(
+                            conn, receipt_no, order_id, order['product_id'],
+                            passed_qty, order['uom'], batch_no, expiry_date, warehouse_id,
+                            'PASSED', notes, None, user_id, None
+                        )
+                        self._add_production_to_inventory(
+                            conn, order, passed_qty, batch_no, warehouse_id,
+                            expiry_date, group_id, keycloak_id, main_receipt_id
+                        )
+                        created_receipts.append({
+                            'receipt_no': receipt_no, 'receipt_id': main_receipt_id,
+                            'status': 'PASSED', 'qty': passed_qty
+                        })
+                    
+                    if has_pending:
+                        receipt_no = self._generate_receipt_number(conn)
+                        parent_id = main_receipt_id
+                        if not has_passed:
+                            # PENDING is the main receipt
+                            parent_id = None
+                            main_receipt_id = None  # will be set below
+                        
+                        pending_receipt_id = self._insert_receipt(
+                            conn, receipt_no, order_id, order['product_id'],
+                            pending_qty, order['uom'], batch_no, expiry_date, warehouse_id,
+                            'PENDING', notes, None, user_id, parent_id
+                        )
+                        if main_receipt_id is None:
+                            main_receipt_id = pending_receipt_id
+                        created_receipts.append({
+                            'receipt_no': receipt_no, 'receipt_id': pending_receipt_id,
+                            'status': 'PENDING', 'qty': pending_qty
+                        })
+                    
+                    if has_failed:
+                        receipt_no = self._generate_receipt_number(conn)
+                        parent_id = main_receipt_id
+                        failed_receipt_id = self._insert_receipt(
+                            conn, receipt_no, order_id, order['product_id'],
+                            failed_qty, order['uom'], batch_no, expiry_date, warehouse_id,
+                            'FAILED', notes, defect_type, user_id, parent_id
+                        )
+                        created_receipts.append({
+                            'receipt_no': receipt_no, 'receipt_id': failed_receipt_id,
+                            'status': 'FAILED', 'qty': failed_qty
+                        })
+                
+                # Update order produced quantity — NO STATUS CHANGE
                 update_query = text("""
                     UPDATE manufacturing_orders
-                    SET produced_qty = COALESCE(produced_qty, 0) + :produced_qty,
-                        status = CASE 
-                            WHEN COALESCE(produced_qty, 0) + :produced_qty >= planned_qty 
-                            THEN 'COMPLETED' ELSE 'IN_PROGRESS' 
-                        END,
-                        completion_date = CASE 
-                            WHEN COALESCE(produced_qty, 0) + :produced_qty >= planned_qty 
-                            THEN NOW() ELSE NULL 
-                        END,
+                    SET produced_qty = COALESCE(produced_qty, 0) + :total_produced,
                         updated_by = :user_id,
                         updated_date = NOW()
                     WHERE id = :order_id
                 """)
                 
                 conn.execute(update_query, {
-                    'produced_qty': produced_qty,
+                    'total_produced': total_produced,
                     'order_id': order_id,
                     'user_id': user_id
                 })
                 
-                # Check if order is completed
-                check_query = text("""
-                    SELECT 
-                        COALESCE(produced_qty, 0) >= planned_qty as is_completed
-                    FROM manufacturing_orders
-                    WHERE id = :order_id
-                """)
-                check_result = conn.execute(check_query, {'order_id': order_id})
-                order_completed = bool(check_result.fetchone()[0])
+                logger.info(
+                    f"✅ Recorded production output for order {order_id}: "
+                    f"PASSED={passed_qty}, PENDING={pending_qty}, FAILED={failed_qty}"
+                )
                 
-                logger.info(f"✅ Completed production receipt {receipt_no} for order {order_id}")
-                
+                main = created_receipts[0]
                 return {
-                    'receipt_no': receipt_no,
-                    'receipt_id': receipt_id,
-                    'order_completed': order_completed,
-                    'quantity': produced_qty,
+                    'receipt_no': main['receipt_no'],
+                    'receipt_id': main['receipt_id'],
+                    'order_completed': False,  # Never auto-complete
+                    'quantity': total_produced,
                     'batch_no': batch_no,
-                    'quality_status': quality_status
+                    'quality_status': main['status'],
+                    'receipts': created_receipts
                 }
                 
             except Exception as e:
-                logger.error(f"❌ Error completing production for order {order_id}: {e}")
+                logger.error(f"❌ Error recording production for order {order_id}: {e}")
+                raise
+    
+    # ==================== Close Order ====================
+    
+    def close_order(self, order_id: int, user_id: int) -> Dict[str, Any]:
+        """
+        Manually close a manufacturing order.
+        
+        Pre-conditions (validated inside transaction):
+        1. MO.status == IN_PROGRESS
+        2. At least 1 receipt exists
+        3. Zero PENDING receipts
+        4. RAW_MATERIALs issued
+        
+        Returns:
+            Dict with success status and order info
+        
+        Raises:
+            ValueError with specific message if validation fails
+        """
+        with self.engine.begin() as conn:
+            try:
+                order = self._get_order_info(conn, order_id)
+                if not order:
+                    raise ValueError(f"Order {order_id} not found")
+                
+                if order['status'] != 'IN_PROGRESS':
+                    raise ValueError(f"Cannot close order: status is {order['status']}, must be IN_PROGRESS")
+                
+                # Check receipts exist
+                receipt_check = text("""
+                    SELECT COUNT(*) as cnt FROM production_receipts
+                    WHERE manufacturing_order_id = :order_id
+                """)
+                receipt_count = int(conn.execute(receipt_check, {'order_id': order_id}).fetchone()[0])
+                if receipt_count == 0:
+                    raise ValueError("Cannot close order: no production receipts exist")
+                
+                # Check no PENDING receipts
+                pending_check = text("""
+                    SELECT COUNT(*) as cnt FROM production_receipts
+                    WHERE manufacturing_order_id = :order_id AND quality_status = 'PENDING'
+                """)
+                pending_count = int(conn.execute(pending_check, {'order_id': order_id}).fetchone()[0])
+                if pending_count > 0:
+                    raise ValueError(f"Cannot close order: {pending_count} receipt(s) still have PENDING QC status")
+                
+                # Check raw materials issued
+                unissued = self._get_unissued_raw_materials(conn, order_id)
+                if unissued:
+                    material_list = ", ".join([m['name'] for m in unissued[:3]])
+                    raise ValueError(f"Cannot close order: {len(unissued)} raw material(s) not issued ({material_list})")
+                
+                # Close the order
+                close_query = text("""
+                    UPDATE manufacturing_orders
+                    SET status = 'COMPLETED',
+                        completion_date = NOW(),
+                        closed_by = :user_id,
+                        updated_by = :user_id,
+                        updated_date = NOW()
+                    WHERE id = :order_id
+                """)
+                
+                conn.execute(close_query, {
+                    'order_id': order_id,
+                    'user_id': user_id
+                })
+                
+                logger.info(f"🔒 Closed manufacturing order {order['order_no']} (ID: {order_id}) by user {user_id}")
+                
+                return {
+                    'success': True,
+                    'order_no': order['order_no'],
+                    'order_id': order_id
+                }
+                
+            except Exception as e:
+                logger.error(f"❌ Error closing order {order_id}: {e}")
                 raise
     
     # ==================== Update Quality Status (Original - Full Batch) ====================
@@ -206,30 +308,38 @@ class CompletionManager:
                              notes: str, user_id: int,
                              keycloak_id: str = None) -> bool:
         """
-        Update quality status of a receipt (entire batch)
+        Update quality status of a receipt (entire batch).
         
-        Args:
-            receipt_id: Receipt ID
-            new_status: New quality status (PENDING, PASSED, FAILED)
-            notes: Updated notes
-            user_id: User ID
-            keycloak_id: Keycloak ID for inventory updates
+        Guards (v4.0):
+        - MO must be IN_PROGRESS (COMPLETED = locked)
+        - Only PENDING → PASSED or PENDING → FAILED allowed (one-way)
         
-        Returns:
-            True if successful
-        
-        Inventory Logic (spec compliant):
-        - PENDING/FAILED → PASSED: Create stockInProduction record
-        - PASSED → PENDING/FAILED: Remove from inventory (set remain = 0)
+        Inventory Logic:
+        - PENDING → PASSED: Create stockInProduction record
+        - PENDING → FAILED: No inventory change
         """
         with self.engine.begin() as conn:
             try:
-                # Get current receipt info
                 receipt = self._get_receipt_info(conn, receipt_id)
                 if not receipt:
                     raise ValueError(f"Receipt {receipt_id} not found")
                 
                 old_status = receipt['quality_status']
+                
+                # Guard: Check MO status
+                order_status = self._get_order_status_for_receipt_tx(conn, receipt_id)
+                if order_status == 'COMPLETED':
+                    raise ValueError("Cannot update QC: order is COMPLETED and locked.")
+                
+                # Guard: One-way transitions only
+                if old_status in ('PASSED', 'FAILED'):
+                    raise ValueError(
+                        f"Cannot change QC from {old_status}. "
+                        f"Only PENDING receipts can be updated."
+                    )
+                
+                if old_status == 'PENDING' and new_status not in ('PASSED', 'FAILED'):
+                    raise ValueError("PENDING can only transition to PASSED or FAILED.")
                 
                 # Skip if no change
                 if old_status == new_status:
@@ -279,32 +389,12 @@ class CompletionManager:
                                       user_id: int,
                                       keycloak_id: str = None) -> Dict[str, Any]:
         """
-        Update quality status with partial results support
+        Update quality status with partial results support.
         
-        Supports all 7 scenarios:
-        1. All PASSED (passed = total)
-        2. All PENDING (pending = total)
-        3. All FAILED (failed = total)
-        4. PASSED + FAILED (split into 2 receipts)
-        5. PASSED + PENDING (split into 2 receipts)
-        6. PENDING + FAILED (split into 2 receipts)
-        7. PASSED + PENDING + FAILED (split into 3 receipts)
-        
-        Split priority: PASSED > PENDING > FAILED
-        Original receipt keeps highest priority status
-        
-        Args:
-            receipt_id: Receipt ID
-            passed_qty: Quantity that passed QC
-            pending_qty: Quantity still pending QC
-            failed_qty: Quantity that failed QC
-            defect_type: Defect type for failed items
-            notes: QC notes
-            user_id: User ID
-            keycloak_id: Keycloak ID for inventory
-        
-        Returns:
-            Dict with success status and new receipt info
+        Guards (v4.0):
+        - MO must be IN_PROGRESS (COMPLETED = locked)
+        - Only PENDING receipts can be updated
+        - Cannot assign back to PENDING (one-way: PENDING → PASSED/FAILED only)
         """
         with self.engine.begin() as conn:
             try:
@@ -312,8 +402,21 @@ class CompletionManager:
                 if not receipt:
                     return {'success': False, 'error': 'Receipt not found'}
                 
-                total_qty = float(receipt['quantity'])
                 old_status = receipt['quality_status']
+                
+                # Guard: Check MO status
+                order_status = self._get_order_status_for_receipt_tx(conn, receipt_id)
+                if order_status == 'COMPLETED':
+                    return {'success': False, 'error': 'Cannot update QC: order is COMPLETED and locked.'}
+                
+                # Guard: Only PENDING can be updated
+                if old_status in ('PASSED', 'FAILED'):
+                    return {
+                        'success': False,
+                        'error': f'Cannot change QC from {old_status}. Only PENDING receipts can be updated.'
+                    }
+                
+                total_qty = float(receipt['quantity'])
                 
                 # Validate total
                 input_total = passed_qty + pending_qty + failed_qty
@@ -412,6 +515,44 @@ class CompletionManager:
                 return {'success': False, 'error': str(e)}
     
     # ==================== Private Helper Methods ====================
+    
+    def _insert_receipt(self, conn, receipt_no: str, order_id: int, product_id,
+                        quantity: float, uom: str, batch_no: str,
+                        expired_date, warehouse_id: int, quality_status: str,
+                        notes: str, defect_type: Optional[str],
+                        user_id: int, parent_receipt_id: Optional[int]) -> int:
+        """Insert a production receipt and return its ID"""
+        query = text("""
+            INSERT INTO production_receipts (
+                receipt_no, manufacturing_order_id, receipt_date,
+                product_id, quantity, uom, batch_no, expired_date,
+                warehouse_id, quality_status, notes, defect_type,
+                parent_receipt_id, created_by, created_date
+            ) VALUES (
+                :receipt_no, :order_id, NOW(),
+                :product_id, :quantity, :uom, :batch_no, :expired_date,
+                :warehouse_id, :quality_status, :notes, :defect_type,
+                :parent_receipt_id, :user_id, NOW()
+            )
+        """)
+        
+        result = conn.execute(query, {
+            'receipt_no': receipt_no,
+            'order_id': order_id,
+            'product_id': product_id,
+            'quantity': quantity,
+            'uom': uom,
+            'batch_no': batch_no,
+            'expired_date': expired_date,
+            'warehouse_id': warehouse_id,
+            'quality_status': quality_status,
+            'notes': notes,
+            'defect_type': defect_type,
+            'parent_receipt_id': parent_receipt_id,
+            'user_id': user_id
+        })
+        
+        return result.lastrowid
     
     def _get_receipt_info(self, conn, receipt_id: int) -> Optional[Dict]:
         """Get receipt information"""
@@ -565,6 +706,18 @@ class CompletionManager:
         if row:
             return dict(zip(result.keys(), row))
         return None
+    
+    def _get_order_status_for_receipt_tx(self, conn, receipt_id: int) -> Optional[str]:
+        """Get MO status for a receipt (within transaction)"""
+        query = text("""
+            SELECT mo.status
+            FROM production_receipts pr
+            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            WHERE pr.id = :receipt_id
+        """)
+        result = conn.execute(query, {'receipt_id': receipt_id})
+        row = result.fetchone()
+        return row[0] if row else None
     
     def _generate_receipt_number(self, conn) -> str:
         """Generate unique receipt number PR-YYYYMMDD-XXX"""

@@ -3,8 +3,9 @@
 Production Management - Entry Point
 Routes to domain-specific modules
 
-Version: 2.1.0 - Added Overview tab
+Version: 3.0.0 - Renamed Completion → Production Receipts
 Changes:
+- v3.0.0: Renamed Completion tab → Production Receipts
 - v2.1.0: Added Overview tab for comprehensive production monitoring
 - v2.0.0: Refactored with Domain Isolation
 """
@@ -53,13 +54,13 @@ def main():
         render_header()
         st.markdown("---")
         
-        # Tab navigation - Added Overview tab
+        # Tab navigation
         tab_labels = [
-            "📊 Overview",      # NEW
+            "📊 Overview",
             "📋 Orders", 
             "📦 Material Issue", 
             "↩️ Material Return", 
-            "✅ Completion"
+            "📦 Production Receipts"
         ]
         tabs = st.tabs(tab_labels)
         
@@ -83,7 +84,7 @@ def main():
             from utils.production.returns.page import render_returns_tab
             render_returns_tab()
         
-        # Completions Tab
+        # Completions Tab → Production Receipts
         with tabs[4]:
             from utils.production.completions.page import render_completions_tab
             render_completions_tab()
@@ -97,7 +98,7 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.caption("Manufacturing Module v2.1 - Domain Isolation Architecture")
+    st.caption("Manufacturing Module v3.0 - Production Receipts Refactoring")
 
 
 if __name__ == "__main__":

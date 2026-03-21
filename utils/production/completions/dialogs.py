@@ -1,16 +1,18 @@
 # utils/production/completions/dialogs.py
 """
-Dialog components for Completions domain
-Receipt detail, quality update, PDF export dialogs
+Dialog components for Production Receipts domain
+Receipt detail, quality update (with guards), PDF export, close order dialogs
 
-Version: 3.0.0
+Version: 4.0.0
 Changes:
-- v3.0.0: Full partial QC support with 3 inputs (passed, pending, failed)
-  - Added pending_qty input for partial pending scenarios
-  - Preview shows impact for all 3 statuses
-  - Supports all 7 QC scenarios including 3-way split
-- v2.0.0: Updated QC dialog to support partial results (passed_qty + failed_qty)
-- Added defect type selection for failed items
+- v4.0.0: Production Receipts refactoring
+  - QC dialog: ONLY PENDING receipts can be updated (PASSED/FAILED locked)
+  - QC dialog: Blocked when MO = COMPLETED
+  - QC dialog: Removed ability to assign back to PENDING (one-way)
+  - Added aging warning display in QC dialog
+  - NEW: show_close_order_dialog() for manual order closure
+  - Updated check_pending_dialogs() for close order dialog
+- v3.0.0: Full partial QC support with 3 inputs
 """
 
 import logging
@@ -26,7 +28,8 @@ from .pdf_generator import ReceiptPDFGenerator
 from .common import (
     format_number, calculate_percentage, create_status_indicator,
     format_datetime, get_vietnam_now, get_user_audit_info,
-    CompletionConstants, format_product_display, format_material_display
+    CompletionConstants, format_product_display, format_material_display,
+    get_aging_indicator, get_aging_message
 )
 
 logger = logging.getLogger(__name__)
@@ -178,17 +181,12 @@ DEFECT_TYPES = [
 @st.dialog("🔬 Update Quality Status", width="large")
 def show_update_quality_dialog(receipt_id: int):
     """
-    Show quality update dialog with full partial QC support
-    Allows specifying passed_qty, pending_qty, and failed_qty separately
+    Show quality update dialog — ONLY for PENDING receipts on IN_PROGRESS MOs.
     
-    Supports all 7 scenarios:
-    1. All PASSED
-    2. All PENDING
-    3. All FAILED
-    4. PASSED + FAILED
-    5. PASSED + PENDING
-    6. PENDING + FAILED
-    7. PASSED + PENDING + FAILED
+    Guards:
+    - PASSED/FAILED receipts → locked, show message
+    - MO = COMPLETED → locked, show message
+    - One-way only: PENDING → PASSED and/or FAILED (no back to PENDING)
     
     Args:
         receipt_id: Receipt ID to update
@@ -202,45 +200,67 @@ def show_update_quality_dialog(receipt_id: int):
     
     total_qty = float(receipt['quantity'])
     current_status = receipt['quality_status']
+    order_status = receipt.get('order_status', '')
+    
+    # ===== GUARD: Check MO status =====
+    if order_status == 'COMPLETED':
+        st.error("🔒 **Order is COMPLETED** — all QC is locked and cannot be changed.")
+        st.info(f"Receipt: {receipt['receipt_no']} | Status: {create_status_indicator(current_status)}")
+        if st.button("Close", use_container_width=True, key="qc_close_locked"):
+            st.rerun()
+        return
+    
+    # ===== GUARD: Check receipt status =====
+    if current_status in ('PASSED', 'FAILED'):
+        st.error(
+            f"🔒 **Receipt is {current_status}** — QC result is final and cannot be changed.\n\n"
+            f"Only PENDING receipts can be updated."
+        )
+        st.info(f"Receipt: {receipt['receipt_no']} | Status: {create_status_indicator(current_status)}")
+        if st.button("Close", use_container_width=True, key="qc_close_final"):
+            st.rerun()
+        return
+    
+    # ===== PENDING receipt — allow update =====
     
     # Header
     st.markdown(f"### Receipt: {receipt['receipt_no']}")
     
-    # Product display with new format
     product_display = format_product_display(receipt)
     st.info(f"**Product:** {product_display}")
     
-    # Receipt info cards
     col1, col2 = st.columns(2)
     with col1:
         st.info(f"**Total Qty:** {format_number(total_qty, 2)} {receipt['uom']}")
     with col2:
         st.info(f"**Batch:** {receipt['batch_no']}")
-        st.info(f"**Current Status:** {create_status_indicator(current_status)}")
+    
+    # Aging warning
+    age_days = None
+    if receipt.get('created_date'):
+        from datetime import datetime
+        try:
+            created = receipt['created_date']
+            if isinstance(created, str):
+                created = datetime.strptime(created, '%Y-%m-%d %H:%M:%S')
+            age_days = (datetime.now() - created).days
+        except Exception:
+            pass
+    
+    aging_msg = get_aging_message(age_days) if age_days else None
+    if aging_msg:
+        aging_icon = get_aging_indicator(age_days)
+        st.warning(f"{aging_icon} **{aging_msg}**")
+    
+    st.info(f"**Current Status:** {create_status_indicator(current_status)}")
     
     st.markdown("---")
     
-    # QC Result Section
-    st.markdown("### 📊 QC Result Breakdown")
-    st.caption("Enter quantities for each QC result. Total must equal the receipt quantity.")
+    # QC Result — PENDING can only go to PASSED or FAILED
+    st.markdown("### 📊 QC Result")
+    st.caption("Split this PENDING quantity into PASSED and/or FAILED. No quantity can remain PENDING.")
     
-    # Initialize session state for QC values based on current status
-    if 'qc_passed_qty' not in st.session_state:
-        if current_status == 'PASSED':
-            st.session_state.qc_passed_qty = total_qty
-            st.session_state.qc_pending_qty = 0.0
-            st.session_state.qc_failed_qty = 0.0
-        elif current_status == 'FAILED':
-            st.session_state.qc_passed_qty = 0.0
-            st.session_state.qc_pending_qty = 0.0
-            st.session_state.qc_failed_qty = total_qty
-        else:  # PENDING
-            st.session_state.qc_passed_qty = 0.0
-            st.session_state.qc_pending_qty = total_qty
-            st.session_state.qc_failed_qty = 0.0
-    
-    # Three-column layout for QC inputs
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
         st.markdown("##### ✅ Passed")
@@ -248,57 +268,38 @@ def show_update_quality_dialog(receipt_id: int):
             "Passed Quantity",
             min_value=0.0,
             max_value=total_qty,
-            value=float(st.session_state.qc_passed_qty),
+            value=total_qty,  # Default: all passed
             step=1.0,
             format="%.2f",
             key="input_passed_qty",
             label_visibility="collapsed",
-            help="Quantity that passed quality check - will be added to available inventory"
+            help="Quantity that passed QC — will be added to inventory"
         )
     
     with col2:
-        st.markdown("##### ⏳ Pending")
-        pending_qty = st.number_input(
-            "Pending Quantity",
-            min_value=0.0,
-            max_value=total_qty,
-            value=float(st.session_state.qc_pending_qty),
-            step=1.0,
-            format="%.2f",
-            key="input_pending_qty",
-            label_visibility="collapsed",
-            help="Quantity still awaiting QC - not yet in inventory"
-        )
-    
-    with col3:
         st.markdown("##### ❌ Failed")
         failed_qty = st.number_input(
             "Failed Quantity",
             min_value=0.0,
             max_value=total_qty,
-            value=float(st.session_state.qc_failed_qty),
+            value=0.0,
             step=1.0,
             format="%.2f",
             key="input_failed_qty",
             label_visibility="collapsed",
-            help="Quantity that failed QC - will not be added to inventory"
+            help="Quantity that failed QC — will NOT be added to inventory"
         )
     
-    # Update session state
-    st.session_state.qc_passed_qty = passed_qty
-    st.session_state.qc_pending_qty = pending_qty
-    st.session_state.qc_failed_qty = failed_qty
-    
-    # Validation
-    sum_qty = passed_qty + pending_qty + failed_qty
+    # Validation — must equal total, NO pending allowed
+    sum_qty = passed_qty + failed_qty
     remaining = total_qty - sum_qty
     is_valid = False
     
-    if abs(remaining) < 0.001:  # Allow small floating point differences
+    if abs(remaining) < 0.001:
         st.success(f"✅ **Total matches:** {format_number(sum_qty, 2)} = {format_number(total_qty, 2)} {receipt['uom']}")
         is_valid = True
     elif remaining > 0:
-        st.warning(f"⚠️ **Remaining:** {format_number(remaining, 2)} {receipt['uom']} not assigned")
+        st.warning(f"⚠️ **Remaining:** {format_number(remaining, 2)} {receipt['uom']} — all quantity must be assigned to PASSED or FAILED")
     else:
         st.error(f"❌ **Over-assigned:** {format_number(abs(remaining), 2)} {receipt['uom']} exceeds total")
     
@@ -333,10 +334,10 @@ def show_update_quality_dialog(receipt_id: int):
     
     st.markdown("---")
     
-    # Preview Section - Inventory Impact
-    st.markdown("### 📋 Preview - Inventory Impact")
+    # Preview — Inventory Impact
+    st.markdown("### 📋 Preview — Inventory Impact")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
         if passed_qty > 0:
@@ -345,51 +346,21 @@ def show_update_quality_dialog(receipt_id: int):
             st.info("📗 No items to GOOD inventory")
     
     with col2:
-        if pending_qty > 0:
-            st.warning(f"📙 **{format_number(pending_qty, 2)} {receipt['uom']}**\n\n→ Awaiting QC")
-        else:
-            st.info("📙 No items pending")
-    
-    with col3:
         if failed_qty > 0:
             st.error(f"📕 **{format_number(failed_qty, 2)} {receipt['uom']}**\n\n→ DEFECTIVE")
         else:
             st.info("📕 No failed items")
     
-    # Determine scenario and show split info
+    # Split preview
     has_passed = passed_qty > 0
-    has_pending = pending_qty > 0
     has_failed = failed_qty > 0
-    portions = sum([has_passed, has_pending, has_failed])
     
-    if portions > 1:
+    if has_passed and has_failed:
         st.markdown("---")
         st.markdown("### 📑 Receipt Split Preview")
-        
-        split_info = []
-        if has_passed:
-            split_info.append(f"✅ Original receipt → **PASSED** ({format_number(passed_qty, 2)})")
-        if has_pending:
-            if has_passed:
-                split_info.append(f"⏳ New receipt → **PENDING** ({format_number(pending_qty, 2)})")
-            else:
-                split_info.append(f"⏳ Original receipt → **PENDING** ({format_number(pending_qty, 2)})")
-        if has_failed:
-            split_info.append(f"❌ New receipt → **FAILED** ({format_number(failed_qty, 2)})")
-        
-        for info in split_info:
-            st.write(info)
-        
-        st.caption("💡 Split priority: PASSED > PENDING > FAILED. Original receipt keeps highest priority status.")
-    
-    # Special case warnings
-    if current_status == 'PASSED':
-        if pending_qty > 0 or failed_qty > 0:
-            removed_qty = pending_qty + failed_qty
-            st.warning(
-                f"⚠️ **Attention:** This receipt was previously PASSED. "
-                f"{format_number(removed_qty, 2)} {receipt['uom']} will be removed from GOOD inventory."
-            )
+        st.write(f"✅ Original receipt → **PASSED** ({format_number(passed_qty, 2)})")
+        st.write(f"❌ New receipt → **FAILED** ({format_number(failed_qty, 2)})")
+        st.caption("💡 Original receipt keeps PASSED status (higher priority).")
     
     st.markdown("---")
     
@@ -411,10 +382,11 @@ def show_update_quality_dialog(receipt_id: int):
                 manager = CompletionManager()
                 
                 with st.spinner("Updating quality status..."):
+                    # Use partial update — pending_qty = 0 (one-way, no back to PENDING)
                     result = manager.update_quality_status_partial(
                         receipt_id=receipt_id,
                         passed_qty=passed_qty,
-                        pending_qty=pending_qty,
+                        pending_qty=0.0,  # Never assign back to PENDING
                         failed_qty=failed_qty,
                         defect_type=defect_type,
                         notes=notes,
@@ -423,30 +395,18 @@ def show_update_quality_dialog(receipt_id: int):
                     )
                 
                 if result.get('success'):
-                    # Clear session state
-                    st.session_state.pop('qc_passed_qty', None)
-                    st.session_state.pop('qc_pending_qty', None)
-                    st.session_state.pop('qc_failed_qty', None)
-                    
-                    # Show success message
                     msg_parts = []
                     if passed_qty > 0:
                         msg_parts.append(f"✅ {format_number(passed_qty, 2)} PASSED")
-                    if pending_qty > 0:
-                        msg_parts.append(f"⏳ {format_number(pending_qty, 2)} PENDING")
                     if failed_qty > 0:
                         msg_parts.append(f"❌ {format_number(failed_qty, 2)} FAILED")
                     
                     st.success(f"QC Updated: {' | '.join(msg_parts)}")
                     
-                    # Show new receipts created
                     new_receipts = result.get('new_receipts', [])
                     if new_receipts:
                         for nr in new_receipts:
                             st.info(f"📝 New {nr['status']} receipt: **{nr['receipt_no']}** ({format_number(nr['qty'], 2)})")
-                    elif result.get('new_receipt_no'):
-                        # Backward compatibility
-                        st.info(f"📝 New receipt created: {result['new_receipt_no']}")
                     
                     time.sleep(1.5)
                     st.rerun()
@@ -459,10 +419,6 @@ def show_update_quality_dialog(receipt_id: int):
     
     with col2:
         if st.button("❌ Cancel", use_container_width=True, key="qc_cancel_btn"):
-            # Clear session state
-            st.session_state.pop('qc_passed_qty', None)
-            st.session_state.pop('qc_pending_qty', None)
-            st.session_state.pop('qc_failed_qty', None)
             st.rerun()
 
 
@@ -537,6 +493,115 @@ def show_pdf_dialog(receipt_id: int, receipt_no: str):
             st.rerun()
 
 
+# ==================== Close Order Dialog ====================
+
+@st.dialog("🔒 Close Manufacturing Order", width="medium")
+def show_close_order_dialog(order_id: int):
+    """
+    Confirmation dialog for manually closing an MO.
+    Shows validation results and requires explicit confirmation.
+    """
+    queries = CompletionQueries()
+    validation = queries.get_close_order_validation(order_id)
+    
+    if not validation:
+        st.error("❌ Could not validate order")
+        return
+    
+    st.markdown(f"### 🔒 Close Order: {validation.get('order_no', 'N/A')}")
+    
+    # Order summary
+    produced = validation.get('produced_qty', 0)
+    planned = validation.get('planned_qty', 0)
+    uom = validation.get('uom', '')
+    yield_pct = calculate_percentage(produced, planned)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Planned", f"{format_number(planned, 2)} {uom}")
+    with col2:
+        st.metric("Produced", f"{format_number(produced, 2)} {uom}")
+    with col3:
+        st.metric("Yield", f"{yield_pct}%")
+    
+    st.markdown("---")
+    
+    # Validation checklist
+    st.markdown("### ✅ Pre-conditions")
+    
+    can_close = validation.get('can_close', False)
+    reasons = validation.get('reasons', [])
+    
+    checks = [
+        ("Status = IN_PROGRESS", validation.get('status') == 'IN_PROGRESS'),
+        ("At least 1 receipt exists", validation.get('receipt_count', 0) > 0),
+        ("No PENDING QC receipts", validation.get('pending_count', 0) == 0),
+    ]
+    
+    for label, passed in checks:
+        icon = "✅" if passed else "❌"
+        st.write(f"{icon} {label}")
+    
+    if reasons:
+        st.markdown("---")
+        st.error("**Cannot close order:**")
+        for reason in reasons:
+            st.write(f"• {reason}")
+    
+    # Receipt summary
+    st.markdown("---")
+    st.markdown("### 📊 Receipt Summary")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("✅ Passed", validation.get('passed_count', 0))
+    with col2:
+        st.metric("⏳ Pending", validation.get('pending_count', 0))
+    with col3:
+        st.metric("❌ Failed", validation.get('failed_count', 0))
+    
+    if can_close:
+        st.markdown("---")
+        st.warning(
+            "⚠️ **This action is permanent.** After closing:\n"
+            "- No more production output can be recorded\n"
+            "- QC results cannot be changed\n"
+            "- Material issues/returns are blocked"
+        )
+    
+    st.markdown("---")
+    
+    # Action buttons
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🔒 Confirm Close", type="primary", use_container_width=True,
+                     disabled=not can_close, key="close_order_confirm_btn"):
+            try:
+                audit_info = get_user_audit_info()
+                manager = CompletionManager()
+                
+                with st.spinner("Closing order..."):
+                    result = manager.close_order(
+                        order_id=order_id,
+                        user_id=audit_info['user_id']
+                    )
+                
+                if result.get('success'):
+                    st.success(f"🔒 Order **{result['order_no']}** has been closed.")
+                    time.sleep(1.5)
+                    st.rerun()
+                else:
+                    st.error(f"❌ Failed: {result.get('error', 'Unknown error')}")
+                    
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                logger.error(f"Close order failed: {e}", exc_info=True)
+    
+    with col2:
+        if st.button("Cancel", use_container_width=True, key="close_order_cancel_btn"):
+            st.rerun()
+
+
 # ==================== Check for pending dialogs ====================
 
 def check_pending_dialogs():
@@ -559,6 +624,13 @@ def check_pending_dialogs():
         st.session_state.pop('open_quality_dialog', None)
         if receipt_id:
             show_update_quality_dialog(receipt_id)
+    
+    # Check for close order dialog
+    if st.session_state.get('open_close_order_dialog'):
+        order_id = st.session_state.pop('close_order_id', None)
+        st.session_state.pop('open_close_order_dialog', None)
+        if order_id:
+            show_close_order_dialog(order_id)
 
 
 # ==================== Quick Action Functions ====================

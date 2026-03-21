@@ -1,10 +1,13 @@
 # utils/production/completions/common.py
 """
-Common utilities for Completions domain
+Common utilities for Production Receipts domain
 Formatting, validation, UI helpers, and date utilities
 
-Version: 1.2.0
+Version: 2.0.0
 Changes:
+- v2.0.0: Renamed from Completions to Production Receipts
+  - Added ALLOWED_QC_TRANSITIONS, aging constants
+  - Added get_aging_indicator(), get_aging_message()
 - v1.2.0: Added check_expiry_warning, check_overproduction_warning to CompletionValidator
 - v1.1.0: Removed unused validator methods (validate_produced_qty, can_complete)
 """
@@ -36,7 +39,7 @@ logger = logging.getLogger(__name__)
 # ==================== Constants ====================
 
 class CompletionConstants:
-    """Completion-specific constants"""
+    """Production Receipts constants"""
     DEFAULT_PAGE_SIZE = 20
     MAX_PAGE_SIZE = 100
     QUANTITY_DECIMALS = 2
@@ -52,8 +55,23 @@ class CompletionConstants:
         ('FAILED', '❌ Failed')
     ]
     
-    # Completable order statuses
+    # Allowed QC transitions (one-way only)
+    ALLOWED_QC_TRANSITIONS = {
+        'PENDING': ['PASSED', 'FAILED'],
+        'PASSED': [],   # locked
+        'FAILED': [],   # locked
+    }
+    
+    # QC Aging thresholds (days)
+    AGING_WARNING_DAYS = 3
+    AGING_URGENT_DAYS = 7
+    AGING_CRITICAL_DAYS = 14
+    
+    # Completable order statuses (for recording output)
     COMPLETABLE_STATUSES = ['IN_PROGRESS']
+    
+    # Closeable order statuses (for manual close)
+    CLOSEABLE_STATUSES = ['IN_PROGRESS']
 
 
 # ==================== Timezone Helpers ====================
@@ -193,6 +211,31 @@ def get_yield_indicator(yield_rate: float) -> str:
         return "⚠️"
     else:
         return "❌"
+
+
+def get_aging_indicator(age_days: int) -> str:
+    """Get aging indicator for PENDING receipts"""
+    if age_days is None or age_days <= CompletionConstants.AGING_WARNING_DAYS:
+        return ""
+    elif age_days <= CompletionConstants.AGING_URGENT_DAYS:
+        return "🟡"
+    elif age_days <= CompletionConstants.AGING_CRITICAL_DAYS:
+        return "🟠"
+    else:
+        return "🔴"
+
+
+def get_aging_message(age_days: int) -> Optional[str]:
+    """Get aging warning message for PENDING receipts"""
+    if age_days is None:
+        return None
+    if age_days > CompletionConstants.AGING_CRITICAL_DAYS:
+        return f"QC critically overdue — {age_days} days"
+    elif age_days > CompletionConstants.AGING_URGENT_DAYS:
+        return f"QC overdue — {age_days} days"
+    elif age_days > CompletionConstants.AGING_WARNING_DAYS:
+        return f"Pending QC for {age_days} days"
+    return None
 
 
 # ==================== Date Helpers ====================

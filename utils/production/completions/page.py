@@ -1,22 +1,19 @@
 # utils/production/completions/page.py
 """
-Main UI orchestrator for Completions domain
-Renders the Completions tab with unified metrics, filters, and receipts list
+Main UI orchestrator for Production Receipts domain
+Renders the Production Receipts tab with unified metrics, filters, and receipts list
 
-Version: 3.0.0
+Version: 4.0.0
 Changes:
-- v3.0.0: Layout redesign — removed duplicate metrics & quality breakdowns
-  - Removed separate dashboard section (all-time metrics not actionable)
-  - Removed 2x Quality Breakdown expanders (redundant)
-  - Added get_live_stats() for header badges (In Progress + Today)
-  - Added get_filtered_stats() for accurate metrics across ALL filtered data
-  - Single unified metrics row: count, qty, passed, pending, failed, yield
-  - Table visible without scrolling (~240px overhead vs ~600px before)
-- v2.1.0: Post-validation warnings in Receipts List table
-- v2.0.0: Help → popover, @st.fragment for receipts section
-- v1.3.0: Added Scheduled Date column
-
-Requires: Streamlit >= 1.37 (for @st.fragment and st.rerun(scope=...))
+- v4.0.0: Production Receipts refactoring
+  - Renamed from "Completions" to "Production Receipts"
+  - Added "Show completed orders" filter (default: unchecked)
+  - Added Ready-to-Close banner for orders meeting close conditions
+  - Added Close Order button in action bar
+  - Update Quality button disabled for non-PENDING or COMPLETED MOs
+  - Added aging indicators in warnings column
+  - Updated header badges to include ready_to_close count
+- v3.0.0: Layout redesign
 """
 
 import logging
@@ -29,13 +26,13 @@ from .queries import CompletionQueries
 from .forms import render_completion_form
 from .dialogs import (
     show_receipt_details_dialog, show_update_quality_dialog,
-    show_pdf_dialog, check_pending_dialogs
+    show_pdf_dialog, show_close_order_dialog, check_pending_dialogs
 )
 from .common import (
     format_number, create_status_indicator, get_yield_indicator,
     calculate_percentage, format_datetime_vn, get_vietnam_today,
     export_to_excel, get_date_filter_presets, CompletionConstants,
-    format_product_display
+    format_product_display, get_aging_indicator
 )
 
 logger = logging.getLogger(__name__)
@@ -79,18 +76,21 @@ def _render_header(queries: CompletionQueries):
     """
     Page header with title and live operational stats.
     Renders ONCE outside fragment — not affected by filter/pagination.
-    Shows real-time KPIs: In Progress orders + Today's receipts.
+    Shows real-time KPIs: In Progress orders + Today's receipts + Ready to close.
     """
     stats = queries.get_live_stats()
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.subheader("✅ Production Completions")
+        st.subheader("📦 Production Receipts")
     with col2:
+        ready = stats.get('ready_to_close', 0)
+        ready_badge = f" · 🔒 <b>{ready}</b> ready to close" if ready > 0 else ""
         st.markdown(
             f"<div style='text-align:right; padding-top:10px; font-size:0.9em;'>"
             f"🔄 <b>{stats['in_progress']}</b> in progress &nbsp;·&nbsp; "
             f"📅 <b>{stats['today_count']}</b> today"
+            f"{ready_badge}"
             f"</div>",
             unsafe_allow_html=True
         )
@@ -105,24 +105,50 @@ def _render_help_popover():
     inventory impact, alerts, and terminology.
     """
     with st.popover("❓ Help", use_container_width=True):
-        st.markdown("### 📚 Production Completion Help")
+        st.markdown("### 📚 Production Receipts Help")
 
-        st.markdown("#### 🔒 Validation Rules")
-        st.markdown("Để hoàn thành (complete) một Production Order:")
+        st.markdown("#### 📦 Record Output (Phase 1)")
         st.markdown("""\
 | Điều kiện | Yêu cầu | Giải thích |
 |-----------|---------|------------|
 | Order Status | = `IN_PROGRESS` | Chỉ orders đang sản xuất |
-| Produced Qty | > 0 | Số lượng phải là số dương |
-| Max Qty | ≤ Remaining × 1.5 | Cho phép vượt 50% kế hoạch |
+| QC Breakdown | Passed + Pending + Failed > 0 | Chia QC ngay lúc receipt |
 | Batch No | Không trống | Mã batch để truy xuất |
 | Raw Materials | `issued_qty > 0` | NVL chính phải được issue |
-| Pending QC | Không có receipt PENDING | Khi order sẽ auto-complete |\
+| Overproduction | Không giới hạn | Ghi đúng thực tế |\
+""")
+
+        st.markdown("---")
+        
+        st.markdown("#### 🔒 Close Order (Phase 2)")
+        st.markdown("""\
+| Điều kiện | Yêu cầu | Giải thích |
+|-----------|---------|------------|
+| Có receipt | ≥ 1 | Phải có ít nhất 1 phiếu nhập |
+| PENDING QC | = 0 | Tất cả QC phải resolved |
+| Raw Materials | issued | NVL chính đã xuất |
+| Action | Manual confirm | User phải nhấn Close |\
 """)
 
         st.markdown("""\
-> 💡 **Raw Materials:** Chỉ kiểm tra `RAW_MATERIAL` (hoặc NULL).  
-> PACKAGING & CONSUMABLE không bắt buộc.\
+> 💡 **MO không auto-complete.** Sau khi Record Output, MO vẫn IN_PROGRESS.  
+> User chủ động Close Order khi sẵn sàng.\
+""")
+
+        st.markdown("---")
+
+        st.markdown("#### 🔄 QC Status Flow")
+        st.markdown("""\
+| Transition | Cho phép? | Inventory |
+|-----------|----------|-----------|
+| Receipt → PASSED | ✅ | ➕ Vào kho |
+| Receipt → PENDING | ✅ | ❌ Chưa vào kho |
+| Receipt → FAILED | ✅ | ❌ Không vào kho |
+| PENDING → PASSED | ✅ | ➕ Vào kho |
+| PENDING → FAILED | ✅ | Không thay đổi |
+| PASSED → bất kỳ | 🔒 Locked | — |
+| FAILED → bất kỳ | 🔒 Locked | — |
+| MO COMPLETED → sửa QC | 🔒 Locked | — |\
 """)
 
         st.markdown("---")
@@ -131,82 +157,12 @@ def _render_help_popover():
         st.markdown("""\
 | Icon | Cảnh báo | Mô tả |
 |------|---------|-------|
-| 🔁 | Duplicate Batch | Batch number trùng với order khác |
-| 📅 | Expired | Sản phẩm đã quá hạn sử dụng |
-| 📈 | Overproduction | Yield rate > 100% |
-| ⏳ | Pending QC | Chưa kiểm tra chất lượng |\
-""")
-
-        st.markdown("""\
-> 🔁 📅 📈 là **warning** (không block).  
-> ⏳ sẽ **block** order auto-complete nếu có receipt PENDING.\
-""")
-
-        st.markdown("---")
-
-        st.markdown("#### 📐 Calculation Formulas")
-        st.markdown("""\
-| Công thức | Cách tính |
-|-----------|-----------|
-| **Progress** | Produced ÷ Planned × 100% |
-| **Remaining** | Planned − Produced |
-| **Max Input** | Remaining × 1.5 |
-| **Yield Rate** | Produced ÷ Planned × 100% |
-| **Pass Rate** | PASSED Count ÷ Total Count × 100% |\
-""")
-
-        st.markdown("---")
-
-        st.markdown("#### 🔄 Quality Status Flow")
-        st.markdown("""\
-| Status | Inventory Impact |
-|--------|-----------------|
-| ⏳ PENDING | ❌ Không cập nhật tồn kho |
-| ✅ PASSED | ✅ Cộng vào tồn kho |
-| ❌ FAILED | ❌ Không cập nhật tồn kho |\
-""")
-
-        st.markdown("---")
-
-        st.markdown("#### 📦 Inventory Impact khi cập nhật QC")
-        st.markdown("""\
-| Thay đổi | Action |
-|----------|--------|
-| PENDING → **PASSED** | ➕ Tạo `stockInProduction` |
-| PENDING → FAILED | Không thay đổi |
-| **PASSED** → PENDING | ➖ Set `remain = 0` |
-| **PASSED** → FAILED | ➖ Set `remain = 0` |
-| FAILED → **PASSED** | ➕ Tạo `stockInProduction` |
-| FAILED → PENDING | Không thay đổi |\
-""")
-
-        st.markdown("---")
-
-        st.markdown("#### 🔬 Partial QC (Chia tách receipt)")
-        st.markdown("""\
-| # | Kịch bản | Kết quả |
-|---|----------|---------|
-| 1 | 100% PASSED | Original → PASSED |
-| 2 | 100% PENDING | Original → PENDING |
-| 3 | 100% FAILED | Original → FAILED |
-| 4-7 | Mixed | Split thành 2-3 receipts |\
-""")
-
-        st.markdown("""\
-> **Priority:** PASSED > PENDING > FAILED.  
-> Original receipt giữ status priority cao nhất.\
-""")
-
-        st.markdown("---")
-
-        st.markdown("#### 📖 Thuật ngữ")
-        st.markdown("""\
-| Thuật ngữ | Mô tả |
-|-----------|-------|
-| MO | Lệnh sản xuất |
-| PR | Phiếu nhập kho thành phẩm |
-| Yield Rate | Produced ÷ Planned × 100% |
-| stockInProduction | Loại inventory từ SX |\
+| 🔁 | Duplicate Batch | Batch number trùng MO khác |
+| 📅 | Expired | Sản phẩm đã quá hạn |
+| 📈 | Overproduction | Yield > 100% |
+| ⏳ | Pending QC | Chưa kiểm tra chất lượng |
+| 🟡🟠🔴 | Aging | PENDING lâu (>3/7/14 ngày) |
+| 🔒 | Completed | Order đã đóng |\
 """)
 
         st.caption("💬 Liên hệ team IT hoặc sử dụng nút 👎 để báo lỗi.")
@@ -279,6 +235,13 @@ def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
                 placeholder="Search by batch number...",
                 key="completion_batch_filter"
             )
+        
+        show_completed = st.checkbox(
+            "Show completed orders",
+            value=False,
+            key="completion_show_completed",
+            help="Include receipts from COMPLETED manufacturing orders"
+        )
 
     return {
         'from_date': from_date,
@@ -287,7 +250,8 @@ def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
         'product_id': product_id,
         'warehouse_id': warehouse_id,
         'order_no': order_no if order_no else None,
-        'batch_no': batch_no if batch_no else None
+        'batch_no': batch_no if batch_no else None,
+        'exclude_completed': not show_completed
     }
 
 
@@ -308,25 +272,31 @@ def _render_receipts_section(queries: CompletionQueries):
 
 def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
     """Render action bar with help popover"""
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
 
     with col1:
-        if st.button("✅ Record Output", type="primary", use_container_width=True,
+        if st.button("📦 Record Output", type="primary", use_container_width=True,
                       key="btn_record_output"):
             st.session_state.completions_view = 'create'
             st.rerun()
 
     with col2:
+        if st.button("🔒 Close Order", use_container_width=True,
+                      key="btn_close_order"):
+            st.session_state.completions_view = 'close_order'
+            st.rerun()
+
+    with col3:
         if st.button("📊 Export Excel", use_container_width=True,
                       key="btn_export_receipts"):
             _export_receipts_excel(queries, filters)
 
-    with col3:
+    with col4:
         if st.button("🔄 Refresh", use_container_width=True,
                       key="btn_refresh_completions"):
             st.rerun()
 
-    with col4:
+    with col5:
         _render_help_popover()
 
 
@@ -378,6 +348,32 @@ def _render_metrics(stats: Dict[str, Any], avg_yield: float):
             )
 
 
+# ==================== Ready-to-Close Banner ====================
+
+def _render_ready_to_close_banner(queries: CompletionQueries):
+    """Render banner showing orders ready to close or blocked by pending QC."""
+    ready_info = queries.get_ready_to_close_orders()
+    
+    if ready_info['ready_count'] > 0:
+        orders_text = ", ".join(
+            o['order_no'] for o in ready_info['ready_orders'][:5]
+        )
+        if ready_info['ready_count'] > 5:
+            orders_text += f" +{ready_info['ready_count'] - 5} more"
+        
+        st.success(
+            f"✅ **{ready_info['ready_count']} order(s) ready to close** — "
+            f"production target met, all QC resolved. "
+            f"({orders_text})"
+        )
+    
+    if ready_info['blocked_count'] > 0:
+        st.warning(
+            f"⏳ **{ready_info['blocked_count']} order(s) met target but have pending QC** — "
+            f"resolve QC before closing."
+        )
+
+
 # ==================== Data Warnings ====================
 
 def _compute_warnings(receipts: pd.DataFrame,
@@ -385,6 +381,7 @@ def _compute_warnings(receipts: pd.DataFrame,
     """
     Compute warning flags for each receipt row.
     Returns Series of warning emoji strings aligned with receipts index.
+    Includes aging indicators for PENDING receipts.
     """
     today = pd.Timestamp(get_vietnam_today())
 
@@ -401,7 +398,14 @@ def _compute_warnings(receipts: pd.DataFrame,
         if row.get('yield_rate', 0) > 100:
             warnings.append('📈')
         if row.get('quality_status') == 'PENDING':
-            warnings.append('⏳')
+            age_days = row.get('age_days')
+            aging_icon = get_aging_indicator(age_days) if pd.notna(age_days) else ''
+            if aging_icon:
+                warnings.append(aging_icon)
+            else:
+                warnings.append('⏳')
+        if row.get('order_status') == 'COMPLETED':
+            warnings.append('🔒')
         return ' '.join(warnings)
 
     return receipts.apply(_row_warnings, axis=1)
@@ -442,6 +446,10 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     """
     page_size = CompletionConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.completions_page
+    exclude_completed = filters.get('exclude_completed', True)
+
+    # Ready-to-close banner
+    _render_ready_to_close_banner(queries)
 
     # Get current page data
     receipts = queries.get_receipts(
@@ -452,6 +460,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         warehouse_id=filters['warehouse_id'],
         order_no=filters['order_no'],
         batch_no=filters['batch_no'],
+        exclude_completed=exclude_completed,
         page=page,
         page_size=page_size
     )
@@ -471,7 +480,8 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         product_id=filters['product_id'],
         warehouse_id=filters['warehouse_id'],
         order_no=filters['order_no'],
-        batch_no=filters['batch_no']
+        batch_no=filters['batch_no'],
+        exclude_completed=exclude_completed
     )
 
     total_count = stats['total_count']
@@ -585,10 +595,25 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
 
         st.markdown("---")
         product_info = format_product_display(selected_receipt.to_dict())
+        qc_status = create_status_indicator(selected_receipt['quality_status'])
+        order_status = selected_receipt.get('order_status', '')
+        
         st.markdown(
             f"**Selected:** `{selected_receipt['receipt_no']}` "
-            f"| {selected_receipt['order_no']} | {product_info}"
+            f"| {selected_receipt['order_no']} | {product_info} | {qc_status}"
         )
+
+        # Check if QC update is allowed
+        can_update_qc = (
+            selected_receipt['quality_status'] == 'PENDING'
+            and order_status != 'COMPLETED'
+        )
+        
+        qc_help = ""
+        if order_status == 'COMPLETED':
+            qc_help = "🔒 Order is COMPLETED — QC locked"
+        elif selected_receipt['quality_status'] != 'PENDING':
+            qc_help = f"🔒 QC is {selected_receipt['quality_status']} — final"
 
         col1, col2, col3, col4 = st.columns(4)
 
@@ -598,9 +623,14 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
                 show_receipt_details_dialog(selected_receipt['id'])
 
         with col2:
-            if st.button("✏️ Update Quality",
-                         use_container_width=True, key="btn_update_quality"):
-                show_update_quality_dialog(selected_receipt['id'])
+            if can_update_qc:
+                if st.button("✏️ Update Quality",
+                             use_container_width=True, key="btn_update_quality"):
+                    show_update_quality_dialog(selected_receipt['id'])
+            else:
+                st.button("🔒 QC Locked",
+                         use_container_width=True, key="btn_update_quality",
+                         disabled=True, help=qc_help)
 
         with col3:
             if st.button("📄 Export PDF",
@@ -649,6 +679,7 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
             warehouse_id=filters['warehouse_id'],
             order_no=filters['order_no'],
             batch_no=filters['batch_no'],
+            exclude_completed=filters.get('exclude_completed', True),
             page=1,
             page_size=10000
         )
@@ -693,20 +724,69 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
         )
 
 
+# ==================== Close Order View ====================
+
+def _render_close_order_view(queries: CompletionQueries):
+    """Render close order selection and confirmation view."""
+    st.subheader("🔒 Close Manufacturing Order")
+    st.caption("Select an order to close. All QC must be resolved before closing.")
+    
+    ready_info = queries.get_ready_to_close_orders()
+    
+    if ready_info['ready_count'] == 0 and ready_info['blocked_count'] == 0:
+        st.info("📭 No orders are ready to close. Orders need to meet their production target first.")
+        return
+    
+    # Show ready orders
+    if ready_info['ready_count'] > 0:
+        st.success(f"✅ **{ready_info['ready_count']} order(s) ready to close**")
+        
+        for order in ready_info['ready_orders']:
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([3, 2, 1])
+                with col1:
+                    yield_pct = calculate_percentage(order['produced_qty'], order['planned_qty'])
+                    st.markdown(
+                        f"**{order['order_no']}** | {order['product_name']}"
+                    )
+                    st.caption(
+                        f"Produced: {format_number(order['produced_qty'], 2)}"
+                        f" / {format_number(order['planned_qty'], 2)} {order['uom']}"
+                        f" ({yield_pct}%)"
+                    )
+                with col2:
+                    st.caption(f"Receipts: {order['receipt_count']}")
+                with col3:
+                    if st.button("🔒 Close", key=f"close_order_{order['id']}",
+                                use_container_width=True):
+                        show_close_order_dialog(int(order['id']))
+    
+    # Show blocked orders
+    if ready_info['blocked_count'] > 0:
+        st.warning(f"⏳ **{ready_info['blocked_count']} order(s) blocked by pending QC**")
+        
+        for order in ready_info['blocked_orders']:
+            st.caption(
+                f"• **{order['order_no']}** — {order['product_name']} "
+                f"({int(order['pending_count'])} pending receipts)"
+            )
+
+
 # ==================== Main Render Function ====================
 
 def render_completions_tab():
     """
-    Main function to render the Completions tab.
+    Main function to render the Production Receipts tab.
 
-    Layout v3.0 (Redesigned):
+    Layout v4.0:
     ┌──────────────────────────────────┐
     │  Header + Live Badges            │  ← renders once
     ├──────────────────────────────────┤
     │  @st.fragment                    │
     │  ┌────────────────────────────┐  │
-    │  │ Filters (expander)         │  │
-    │  │ Action Bar (+ Help popover)│  │  ← fragment reruns independently
+    │  │ Filters (+ show completed) │  │
+    │  │ Action Bar (Record/Close)  │  │  ← fragment reruns independently
+    │  │ Ready-to-Close Banner      │  │
     │  │ Unified Metrics (6 cols)   │  │
     │  │ Warnings Bar               │  │
     │  │ Receipts Table + Actions   │  │
@@ -728,6 +808,15 @@ def render_completions_tab():
             st.rerun()
 
         render_completion_form()
+        return
+    
+    # Close Order view
+    if st.session_state.completions_view == 'close_order':
+        if st.button("⬅️ Back to Receipts", key="btn_back_from_close"):
+            st.session_state.completions_view = 'receipts'
+            st.rerun()
+        
+        _render_close_order_view(queries)
         return
 
     # Receipts view — Header (once) + Fragment (interactive)

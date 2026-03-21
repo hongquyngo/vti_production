@@ -1,15 +1,18 @@
 # utils/production/completions/queries.py
 """
-Database queries for Completions domain
+Database queries for Production Receipts domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 1.4.0
+Version: 2.0.0
 Changes:
+- v2.0.0: Production Receipts refactoring
+  - Added order_status, receipt age_days to get_receipts()
+  - Added exclude_completed filter to get_receipts() and get_filtered_stats()
+  - Added get_close_order_validation(), get_ready_to_close_orders()
+  - Added get_order_status_for_receipt()
+  - Updated get_live_stats() to include ready_to_close count
 - v1.4.0: Added validation queries (check_duplicate_batch_no, get_pending_receipts_count)
 - v1.3.0: Added scheduled_date to receipts query
-- v1.2.0: Added order_date and package_size to receipts query for improved display
-- v1.1.0: Added connection check method
-- Better error handling to distinguish connection errors from no data
 """
 
 import logging
@@ -74,10 +77,14 @@ class CompletionQueries:
                     warehouse_id: Optional[int] = None,
                     order_no: Optional[str] = None,
                     batch_no: Optional[str] = None,
+                    exclude_completed: bool = True,
                     page: int = 1,
                     page_size: int = 20) -> Optional[pd.DataFrame]:
         """
         Get production receipts with filters and pagination
+        
+        Args:
+            exclude_completed: If True, hide receipts from COMPLETED MOs (default)
         
         Returns:
             DataFrame with receipt list, or None if connection error
@@ -100,6 +107,8 @@ class CompletionQueries:
                 mo.scheduled_date,
                 mo.planned_qty,
                 mo.produced_qty,
+                mo.status as order_status,
+                DATEDIFF(NOW(), pr.created_date) as age_days,
                 p.id as product_id,
                 p.name as product_name,
                 p.pt_code,
@@ -122,6 +131,9 @@ class CompletionQueries:
         """
         
         params = []
+        
+        if exclude_completed:
+            query += " AND mo.status != 'COMPLETED'"
         
         if from_date:
             query += " AND DATE(pr.receipt_date) >= %s"
@@ -489,7 +501,8 @@ class CompletionQueries:
     def get_live_stats(self) -> Dict[str, int]:
         """
         Lightweight query for header live KPIs.
-        Returns in_progress orders count and today's receipts count.
+        Returns in_progress orders count, today's receipts count,
+        and ready-to-close orders count.
         Called outside fragment — renders once per page load.
         """
         from .common import get_vietnam_today
@@ -500,7 +513,21 @@ class CompletionQueries:
                 (SELECT COUNT(*) FROM manufacturing_orders 
                  WHERE delete_flag = 0 AND status = 'IN_PROGRESS') as in_progress,
                 (SELECT COUNT(*) FROM production_receipts 
-                 WHERE DATE(receipt_date) = %s) as today_count
+                 WHERE DATE(receipt_date) = %s) as today_count,
+                (SELECT COUNT(*) FROM manufacturing_orders mo
+                 WHERE mo.delete_flag = 0 
+                   AND mo.status = 'IN_PROGRESS'
+                   AND mo.produced_qty >= mo.planned_qty
+                   AND NOT EXISTS (
+                       SELECT 1 FROM production_receipts pr 
+                       WHERE pr.manufacturing_order_id = mo.id 
+                         AND pr.quality_status = 'PENDING'
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM production_receipts pr2
+                       WHERE pr2.manufacturing_order_id = mo.id
+                   )
+                ) as ready_to_close
         """
         
         try:
@@ -508,11 +535,12 @@ class CompletionQueries:
             row = result.iloc[0]
             return {
                 'in_progress': int(row['in_progress']),
-                'today_count': int(row['today_count'])
+                'today_count': int(row['today_count']),
+                'ready_to_close': int(row['ready_to_close'])
             }
         except Exception as e:
             logger.error(f"Error getting live stats: {e}")
-            return {'in_progress': 0, 'today_count': 0}
+            return {'in_progress': 0, 'today_count': 0, 'ready_to_close': 0}
     
     # ==================== Filtered Stats (All Matching Data) ====================
     
@@ -523,7 +551,8 @@ class CompletionQueries:
                            product_id: Optional[int] = None,
                            warehouse_id: Optional[int] = None,
                            order_no: Optional[str] = None,
-                           batch_no: Optional[str] = None) -> Dict[str, Any]:
+                           batch_no: Optional[str] = None,
+                           exclude_completed: bool = True) -> Dict[str, Any]:
         """
         Get summary statistics for ALL filtered receipts (not just current page).
         Single query returning count, quantity, quality breakdown.
@@ -547,6 +576,9 @@ class CompletionQueries:
         """
         
         params = []
+        
+        if exclude_completed:
+            query += " AND mo.status != 'COMPLETED'"
         
         if from_date:
             query += " AND DATE(pr.receipt_date) >= %s"
@@ -598,3 +630,158 @@ class CompletionQueries:
                 'passed_qty': 0, 'pending_qty': 0, 'failed_qty': 0,
                 'pass_rate': 0,
             }
+    
+    # ==================== Close Order Queries ====================
+    
+    def get_close_order_validation(self, order_id: int) -> Dict[str, Any]:
+        """
+        Check all pre-conditions for closing an order.
+        Returns dict with can_close, reasons, and stats.
+        """
+        query = """
+            SELECT
+                mo.id,
+                mo.order_no,
+                mo.status,
+                mo.produced_qty,
+                mo.planned_qty,
+                mo.uom,
+                COALESCE(pr_stats.receipt_count, 0) AS receipt_count,
+                COALESCE(pr_stats.pending_count, 0) AS pending_count,
+                COALESCE(pr_stats.passed_count, 0) AS passed_count,
+                COALESCE(pr_stats.failed_count, 0) AS failed_count,
+                COALESCE(pr_stats.passed_qty, 0) AS passed_qty,
+                COALESCE(unissued.unissued_count, 0) AS unissued_materials
+            FROM manufacturing_orders mo
+            LEFT JOIN (
+                SELECT 
+                    manufacturing_order_id,
+                    COUNT(*) AS receipt_count,
+                    SUM(CASE WHEN quality_status = 'PASSED' THEN 1 ELSE 0 END) AS passed_count,
+                    SUM(CASE WHEN quality_status = 'PENDING' THEN 1 ELSE 0 END) AS pending_count,
+                    SUM(CASE WHEN quality_status = 'FAILED' THEN 1 ELSE 0 END) AS failed_count,
+                    SUM(CASE WHEN quality_status = 'PASSED' THEN quantity ELSE 0 END) AS passed_qty
+                FROM production_receipts
+                GROUP BY manufacturing_order_id
+            ) pr_stats ON mo.id = pr_stats.manufacturing_order_id
+            LEFT JOIN (
+                SELECT 
+                    mom.manufacturing_order_id,
+                    COUNT(*) AS unissued_count
+                FROM manufacturing_order_materials mom
+                LEFT JOIN manufacturing_orders mo2 ON mom.manufacturing_order_id = mo2.id
+                LEFT JOIN bom_details bd ON bd.bom_header_id = mo2.bom_header_id 
+                    AND bd.material_id = mom.material_id
+                WHERE COALESCE(mom.issued_qty, 0) = 0
+                    AND (bd.material_type = 'RAW_MATERIAL' OR bd.material_type IS NULL)
+                GROUP BY mom.manufacturing_order_id
+            ) unissued ON mo.id = unissued.manufacturing_order_id
+            WHERE mo.id = %s AND mo.delete_flag = 0
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=(order_id,))
+            if result.empty:
+                return {'can_close': False, 'reasons': ['Order not found']}
+            
+            row = result.iloc[0]
+            reasons = []
+            
+            if row['status'] != 'IN_PROGRESS':
+                reasons.append(f"Order status is {row['status']}, must be IN_PROGRESS")
+            if row['receipt_count'] == 0:
+                reasons.append("No production receipts exist")
+            if row['pending_count'] > 0:
+                reasons.append(f"{int(row['pending_count'])} receipt(s) still PENDING QC")
+            if row['unissued_materials'] > 0:
+                reasons.append(f"{int(row['unissued_materials'])} raw material(s) not issued")
+            
+            return {
+                'can_close': len(reasons) == 0,
+                'reasons': reasons,
+                'order_no': row['order_no'],
+                'status': row['status'],
+                'produced_qty': float(row['produced_qty']),
+                'planned_qty': float(row['planned_qty']),
+                'uom': row['uom'],
+                'receipt_count': int(row['receipt_count']),
+                'pending_count': int(row['pending_count']),
+                'passed_count': int(row['passed_count']),
+                'failed_count': int(row['failed_count']),
+                'passed_qty': float(row['passed_qty']),
+            }
+        except Exception as e:
+            logger.error(f"Error validating close order {order_id}: {e}")
+            return {'can_close': False, 'reasons': [f'Database error: {str(e)}']}
+    
+    def get_ready_to_close_orders(self) -> Dict[str, Any]:
+        """
+        Get counts and lists of orders ready to close vs blocked by pending QC.
+        For Ready-to-Close banner display.
+        """
+        query = """
+            SELECT
+                mo.id,
+                mo.order_no,
+                mo.produced_qty,
+                mo.planned_qty,
+                mo.uom,
+                p.name AS product_name,
+                COALESCE(pr_stats.pending_count, 0) AS pending_count,
+                COALESCE(pr_stats.receipt_count, 0) AS receipt_count,
+                CASE 
+                    WHEN COALESCE(pr_stats.pending_count, 0) = 0 
+                         AND COALESCE(pr_stats.receipt_count, 0) > 0
+                    THEN 'READY'
+                    ELSE 'BLOCKED'
+                END AS close_status
+            FROM manufacturing_orders mo
+            JOIN products p ON mo.product_id = p.id
+            LEFT JOIN (
+                SELECT 
+                    manufacturing_order_id,
+                    COUNT(*) AS receipt_count,
+                    SUM(CASE WHEN quality_status = 'PENDING' THEN 1 ELSE 0 END) AS pending_count
+                FROM production_receipts
+                GROUP BY manufacturing_order_id
+            ) pr_stats ON mo.id = pr_stats.manufacturing_order_id
+            WHERE mo.status = 'IN_PROGRESS' 
+                AND mo.delete_flag = 0
+                AND mo.produced_qty >= mo.planned_qty
+            ORDER BY mo.order_no
+        """
+        
+        try:
+            result = pd.read_sql(query, self.engine)
+            if result.empty:
+                return {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
+            
+            ready = result[result['close_status'] == 'READY']
+            blocked = result[result['close_status'] == 'BLOCKED']
+            
+            return {
+                'ready_count': len(ready),
+                'blocked_count': len(blocked),
+                'ready_orders': ready.to_dict('records') if not ready.empty else [],
+                'blocked_orders': blocked.to_dict('records') if not blocked.empty else [],
+            }
+        except Exception as e:
+            logger.error(f"Error getting ready-to-close orders: {e}")
+            return {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
+    
+    def get_order_status_for_receipt(self, receipt_id: int) -> Optional[str]:
+        """Get the MO status for a given receipt. Used for QC lock checks."""
+        query = """
+            SELECT mo.status
+            FROM production_receipts pr
+            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            WHERE pr.id = %s
+        """
+        try:
+            result = pd.read_sql(query, self.engine, params=(receipt_id,))
+            if not result.empty:
+                return result.iloc[0]['status']
+            return None
+        except Exception as e:
+            logger.error(f"Error getting order status for receipt {receipt_id}: {e}")
+            return None
