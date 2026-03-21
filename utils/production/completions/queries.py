@@ -28,6 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, DatabaseError
 
 from utils.db import get_db_engine
+from .common import PerformanceTimer
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +188,10 @@ class CompletionQueries:
         params.extend([page_size, offset])
         
         try:
+            import time as _t; _t0 = _t.perf_counter()
             result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            _ms = (_t.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_receipts: {_ms:.0f}ms ({len(result)} rows, page={page})")
             self._connection_error = None
             return result
         except (OperationalError, DatabaseError) as e:
@@ -506,7 +510,10 @@ class CompletionQueries:
         """
         
         try:
+            import time as _t; _t0 = _t.perf_counter()
             result = pd.read_sql(query, self.engine, params=tuple(unique_batches))
+            _ms = (_t.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_duplicate_batch_info: {_ms:.0f}ms ({len(unique_batches)} batches)")
             return dict(zip(result['batch_no'], result['order_count']))
         except Exception as e:
             logger.error(f"Error checking duplicate batches: {e}")
@@ -547,7 +554,10 @@ class CompletionQueries:
         """
         
         try:
+            import time as _t; _t0 = _t.perf_counter()
             result = pd.read_sql(query, self.engine, params=(today,))
+            _ms = (_t.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_live_stats: {_ms:.0f}ms")
             row = result.iloc[0]
             return {
                 'in_progress': int(row['in_progress']),
@@ -623,7 +633,10 @@ class CompletionQueries:
             params.append(f"%{batch_no}%")
         
         try:
+            import time as _t; _t0 = _t.perf_counter()
             result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
+            _ms = (_t.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_filtered_stats: {_ms:.0f}ms")
             row = result.iloc[0]
             
             total = int(row['total_count'])
@@ -805,3 +818,106 @@ class CompletionQueries:
         except Exception as e:
             logger.error(f"Error getting order status for receipt {receipt_id}: {e}")
             return None
+    
+    # ==================== Bulk Load (Client-Side Filtering) ====================
+    
+    def get_all_active_receipts(self, include_completed: bool = False) -> Optional[pd.DataFrame]:
+        """
+        Load ALL receipts in one query — no pagination, no filters.
+        Filtering, sorting, pagination done client-side with pandas.
+        
+        This replaces per-page get_receipts() + get_filtered_stats() + get_duplicate_batch_info()
+        with a SINGLE cached DB hit.
+        
+        Args:
+            include_completed: If True, include receipts from COMPLETED MOs
+        
+        Returns:
+            DataFrame with all receipt data, or None if connection error
+        """
+        query = """
+            SELECT 
+                pr.id,
+                pr.receipt_no,
+                pr.receipt_date,
+                pr.quantity,
+                pr.uom,
+                pr.batch_no,
+                pr.expired_date,
+                pr.quality_status,
+                pr.notes,
+                pr.created_date,
+                mo.order_no,
+                mo.id as order_id,
+                mo.order_date,
+                mo.scheduled_date,
+                mo.planned_qty,
+                mo.produced_qty,
+                mo.status as order_status,
+                DATEDIFF(NOW(), pr.created_date) as age_days,
+                p.id as product_id,
+                p.name as product_name,
+                p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
+                b.brand_name as brand_name,
+                w.id as warehouse_id,
+                w.name as warehouse_name,
+                CASE 
+                    WHEN mo.planned_qty > 0 
+                    THEN ROUND((mo.produced_qty / mo.planned_qty) * 100, 1)
+                    ELSE 0
+                END as yield_rate
+            FROM production_receipts pr
+            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            JOIN products p ON pr.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
+            JOIN warehouses w ON pr.warehouse_id = w.id
+            WHERE 1=1
+        """
+        
+        if not include_completed:
+            query += " AND mo.status != 'COMPLETED'"
+        
+        query += " ORDER BY pr.created_date DESC"
+        
+        try:
+            import time as _t; _t0 = _t.perf_counter()
+            result = pd.read_sql(query, self.engine)
+            _ms = (_t.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_all_active_receipts: {_ms:.0f}ms ({len(result)} rows, completed={include_completed})")
+            self._connection_error = None
+            return result
+        except (OperationalError, DatabaseError) as e:
+            self._connection_error = "Cannot connect to database. Please check your network/VPN connection."
+            logger.error(f"Database connection error in bulk load: {e}")
+            return None
+        except Exception as e:
+            self._connection_error = f"Database error: {str(e)}"
+            logger.error(f"Error in bulk load: {e}")
+            return None
+    
+    def get_all_duplicate_batches(self) -> Dict[str, int]:
+        """
+        Load ALL duplicate batch info in one query — cached, no per-page call needed.
+        
+        Returns:
+            Dict {batch_no: order_count} for batches appearing in >1 MO
+        """
+        query = """
+            SELECT batch_no, COUNT(DISTINCT manufacturing_order_id) as order_count
+            FROM production_receipts
+            WHERE batch_no IS NOT NULL AND batch_no != ''
+            GROUP BY batch_no
+            HAVING COUNT(DISTINCT manufacturing_order_id) > 1
+        """
+        
+        try:
+            import time as _t; _t0 = _t.perf_counter()
+            result = pd.read_sql(query, self.engine)
+            _ms = (_t.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_all_duplicate_batches: {_ms:.0f}ms ({len(result)} dups)")
+            return dict(zip(result['batch_no'], result['order_count']))
+        except Exception as e:
+            logger.error(f"Error loading all duplicate batches: {e}")
+            return {}

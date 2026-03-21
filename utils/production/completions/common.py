@@ -13,9 +13,11 @@ Changes:
 """
 
 import logging
+import time as _time
+from contextlib import contextmanager
 from datetime import date, timedelta, datetime
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, Tuple, Union, Optional, Any
+from typing import Dict, Tuple, Union, Optional, Any, List
 from io import BytesIO
 
 import pandas as pd
@@ -34,6 +36,79 @@ except ImportError:
         logging.warning("No timezone library available. Using system timezone.")
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Performance Debugging ====================
+
+class PerformanceTimer:
+    """
+    Lightweight timer for diagnosing page-load bottlenecks.
+    
+    Usage:
+        perf = PerformanceTimer("render_completions_tab")
+        with perf.step("load_receipts"):
+            df = ...
+        with perf.step("compute_stats"):
+            stats = ...
+        perf.summary()   # prints full tree to terminal
+    
+    Or as decorator:
+        @PerformanceTimer.track("get_receipts")
+        def get_receipts(...): ...
+    """
+    
+    _enabled = True  # flip to False in production
+    
+    def __init__(self, name: str):
+        self.name = name
+        self.steps: List[Tuple[str, float, str]] = []  # (label, ms, tag)
+        self._start = _time.perf_counter()
+    
+    @contextmanager
+    def step(self, label: str, tag: str = ""):
+        """Time a named step"""
+        if not self._enabled:
+            yield
+            return
+        t0 = _time.perf_counter()
+        yield
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
+        self.steps.append((label, elapsed_ms, tag))
+        if elapsed_ms > 200:
+            logger.warning(f"[PERF] ⚠️ SLOW: {label} = {elapsed_ms:.0f}ms {tag}")
+    
+    def summary(self):
+        """Print performance summary to terminal"""
+        if not self._enabled or not self.steps:
+            return
+        total_ms = (_time.perf_counter() - self._start) * 1000
+        
+        lines = [f"\n[PERF] ═══ {self.name} ═══"]
+        for i, (label, ms, tag) in enumerate(self.steps):
+            prefix = "├─" if i < len(self.steps) - 1 else "└─"
+            bar = "█" * min(int(ms / 50), 30)  # visual bar, 1 block = 50ms
+            slow = " ⚠️ SLOW" if ms > 500 else " ⏱" if ms > 200 else ""
+            tag_str = f" ({tag})" if tag else ""
+            lines.append(f"[PERF]   {prefix} {label}: {ms:.0f}ms {bar}{slow}{tag_str}")
+        
+        lines.append(f"[PERF] ═══ Total: {total_ms:.0f}ms ═══\n")
+        logger.info("\n".join(lines))
+    
+    @staticmethod
+    def track(label: str):
+        """Decorator for timing individual functions"""
+        def decorator(func):
+            def wrapper(*args, **kwargs):
+                if not PerformanceTimer._enabled:
+                    return func(*args, **kwargs)
+                t0 = _time.perf_counter()
+                result = func(*args, **kwargs)
+                ms = (_time.perf_counter() - t0) * 1000
+                slow = " ⚠️" if ms > 500 else ""
+                logger.info(f"[PERF] {label}: {ms:.0f}ms{slow}")
+                return result
+            return wrapper
+        return decorator
 
 
 # ==================== Constants ====================

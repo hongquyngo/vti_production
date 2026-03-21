@@ -3,25 +3,21 @@
 Main UI orchestrator for Production Receipts domain
 Renders the Production Receipts tab with unified metrics, filters, and receipts list
 
-Version: 4.2.0
+Version: 5.0.0
 Changes:
+- v5.0.0: Client-side filtering — MAJOR performance overhaul
+  - Single bulk DB query replaces per-page get_receipts + get_filtered_stats + get_duplicate_batch_info
+  - All filtering, pagination, stats computed client-side with pandas (zero DB round-trips)
+  - Dialog buttons use st.rerun(scope="fragment") where possible to avoid full-page rerun
+  - PerformanceTimer instrumentation throughout for profiling
 - v4.2.0: Dialog-based UI — eliminates full-page view switching
-  - Production Receipt / Complete MO open as @st.dialog overlays
-  - No more completions_view state, no "Back to Receipts" navigation
-  - Receipts page always renders — dialogs overlay on top
-  - Removed _render_close_order_view (moved to dialogs.py)
 - v4.1.0: Filter & Performance improvements
-  - Added date type filter: receipt_date, order_date, scheduled_date
-  - Added custom date range with date pickers alongside presets
-  - Show date label (dd/mm — dd/mm) when preset selected
-  - Cached lookup queries (products, warehouses) with TTL
-  - Cached live_stats and ready_to_close with short TTL
 - v4.0.0: Production Receipts refactoring
 """
 
 import logging
 from datetime import date
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
@@ -37,7 +33,8 @@ from .common import (
     format_number, create_status_indicator, get_yield_indicator,
     calculate_percentage, format_datetime_vn, get_vietnam_today,
     export_to_excel, get_date_filter_presets, CompletionConstants,
-    format_product_display, get_aging_indicator, format_date
+    format_product_display, get_aging_indicator, format_date,
+    PerformanceTimer
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +64,123 @@ def _cached_get_live_stats() -> Dict[str, int]:
 def _cached_get_ready_to_close() -> Dict[str, Any]:
     """Cache ready-to-close banner data — TTL 30s"""
     return CompletionQueries().get_ready_to_close_orders()
+
+
+# ── Bulk data cache — single DB query replaces 3 per-render queries ──
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_get_all_receipts(_include_completed: bool) -> Optional[pd.DataFrame]:
+    """
+    Cache ALL active receipts — TTL 30s.
+    Single query replaces: get_receipts + get_filtered_stats + get_duplicate_batch_info.
+    Filtering, pagination, stats all computed client-side.
+    """
+    return CompletionQueries().get_all_active_receipts(include_completed=_include_completed)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_get_all_duplicate_batches() -> Dict[str, int]:
+    """Cache ALL duplicate batch info — TTL 60s"""
+    return CompletionQueries().get_all_duplicate_batches()
+
+
+# ==================== Client-Side Filter Engine ====================
+
+def _apply_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Apply all filters client-side using pandas.
+    Replaces server-side WHERE clauses in get_receipts().
+    
+    Returns:
+        Filtered DataFrame (not paginated — full result set)
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
+    result = df.copy()
+    
+    # Date filter
+    date_field = filters.get('date_field', 'receipt_date')
+    from_date = filters.get('from_date')
+    to_date = filters.get('to_date')
+    
+    if date_field and from_date and to_date:
+        # Map filter field to DataFrame column
+        col_map = {
+            'receipt_date': 'receipt_date',
+            'order_date': 'order_date',
+            'scheduled_date': 'scheduled_date',
+        }
+        col_name = col_map.get(date_field, 'receipt_date')
+        
+        if col_name in result.columns:
+            dt_col = pd.to_datetime(result[col_name], errors='coerce')
+            from_ts = pd.Timestamp(from_date)
+            to_ts = pd.Timestamp(to_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            result = result[dt_col.between(from_ts, to_ts)]
+    
+    # Quality status
+    quality_status = filters.get('quality_status')
+    if quality_status:
+        result = result[result['quality_status'] == quality_status]
+    
+    # Product
+    product_id = filters.get('product_id')
+    if product_id:
+        result = result[result['product_id'] == product_id]
+    
+    # Warehouse
+    warehouse_id = filters.get('warehouse_id')
+    if warehouse_id:
+        result = result[result['warehouse_id'] == warehouse_id]
+    
+    # Order No (LIKE)
+    order_no = filters.get('order_no')
+    if order_no:
+        result = result[result['order_no'].str.contains(order_no, case=False, na=False)]
+    
+    # Batch No (LIKE)
+    batch_no = filters.get('batch_no')
+    if batch_no:
+        result = result[result['batch_no'].str.contains(batch_no, case=False, na=False)]
+    
+    return result
+
+
+def _compute_stats_client(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Compute summary statistics from filtered DataFrame.
+    Replaces get_filtered_stats() DB query.
+    """
+    if df.empty:
+        return {
+            'total_count': 0, 'total_quantity': 0,
+            'passed_count': 0, 'pending_count': 0, 'failed_count': 0,
+            'passed_qty': 0, 'pending_qty': 0, 'failed_qty': 0,
+            'pass_rate': 0,
+        }
+    
+    total = len(df)
+    passed = int((df['quality_status'] == 'PASSED').sum())
+    pending = int((df['quality_status'] == 'PENDING').sum())
+    failed = int((df['quality_status'] == 'FAILED').sum())
+    
+    total_qty = float(df['quantity'].sum())
+    passed_qty = float(df.loc[df['quality_status'] == 'PASSED', 'quantity'].sum())
+    pending_qty = float(df.loc[df['quality_status'] == 'PENDING', 'quantity'].sum())
+    failed_qty = float(df.loc[df['quality_status'] == 'FAILED', 'quantity'].sum())
+    
+    return {
+        'total_count': total,
+        'total_quantity': total_qty,
+        'passed_count': passed,
+        'pending_count': pending,
+        'failed_count': failed,
+        'passed_qty': passed_qty,
+        'pending_qty': pending_qty,
+        'failed_qty': failed_qty,
+        'pass_rate': round((passed / total * 100) if total > 0 else 0, 1),
+    }
 
 
 # ==================== Session State ====================
@@ -280,10 +394,21 @@ def _render_receipts_section(queries: CompletionQueries):
     """
     Fragment: filters + action bar + unified metrics + table.
     Reruns INDEPENDENTLY from the header.
+    
+    v5.0: All data loaded once from cache, filtered/paginated client-side.
     """
-    filters = _render_filter_bar(queries)
-    _render_action_bar(queries, filters)
-    _render_receipts_list(queries, filters)
+    perf = PerformanceTimer("receipts_fragment")
+    
+    with perf.step("render_filters"):
+        filters = _render_filter_bar(queries)
+    
+    with perf.step("render_action_bar"):
+        _render_action_bar(queries, filters)
+    
+    with perf.step("render_receipts_list"):
+        _render_receipts_list(queries, filters, perf)
+    
+    perf.summary()
 
 
 # ==================== Action Bar ====================
@@ -317,6 +442,8 @@ def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
             _cached_get_warehouses.clear()
             _cached_get_live_stats.clear()
             _cached_get_ready_to_close.clear()
+            _cached_get_all_receipts.clear()
+            _cached_get_all_duplicate_batches.clear()
             st.rerun()
 
     with col5:
@@ -400,16 +527,14 @@ def _render_ready_to_close_banner(queries: CompletionQueries):
 # ==================== Data Warnings ====================
 
 def _compute_warnings(receipts: pd.DataFrame,
-                      queries: CompletionQueries) -> pd.Series:
+                      dup_batches: Dict[str, int]) -> pd.Series:
     """
     Compute warning flags for each receipt row.
     Returns Series of warning emoji strings aligned with receipts index.
-    Includes aging indicators for PENDING receipts.
+    
+    v5.0: Uses pre-loaded dup_batches dict instead of per-page DB query.
     """
     today = pd.Timestamp(get_vietnam_today())
-
-    batch_list = receipts['batch_no'].dropna().tolist()
-    dup_batches = queries.get_duplicate_batch_info(batch_list)
 
     def _row_warnings(row):
         warnings = []
@@ -456,76 +581,76 @@ def _render_warnings_summary(warnings_col: pd.Series):
 
 # ==================== Receipts List ====================
 
-def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
+def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any],
+                         perf: Optional[PerformanceTimer] = None):
     """
     Render unified metrics + receipts table.
-
-    Layout:
-    1. Metrics row (from get_filtered_stats — all filtered data)
-    2. Warnings bar (from current page data)
-    3. Table (current page data)
-    4. Selected row actions
-    5. Pagination
+    
+    v5.0: Client-side filtering — single cached bulk query.
+    
+    Data pipeline:
+    1. _cached_get_all_receipts() → full DataFrame (cached 30s, 1 DB hit)
+    2. _apply_filters() → filtered DataFrame (pandas, zero DB)
+    3. _compute_stats_client() → stats dict (pandas, zero DB)
+    4. Paginate with iloc slice
+    5. _compute_warnings() with pre-loaded dup_batches (cached 60s, 1 DB hit)
     """
+    if perf is None:
+        perf = PerformanceTimer("receipts_list")
+    
     page_size = CompletionConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.completions_page
-    exclude_completed = filters.get('exclude_completed', True)
-    date_field = filters.get('date_field', 'receipt_date')
+    include_completed = not filters.get('exclude_completed', True)
 
     # Ready-to-close banner
-    _render_ready_to_close_banner(queries)
+    with perf.step("ready_to_close_banner"):
+        _render_ready_to_close_banner(queries)
 
-    # Get current page data
-    receipts = queries.get_receipts(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        quality_status=filters['quality_status'],
-        product_id=filters['product_id'],
-        warehouse_id=filters['warehouse_id'],
-        order_no=filters['order_no'],
-        batch_no=filters['batch_no'],
-        exclude_completed=exclude_completed,
-        date_field=date_field,
-        page=page,
-        page_size=page_size
-    )
-
+    # ── Step 1: Bulk load from cache (single DB query, TTL 30s) ──
+    with perf.step("bulk_load", "cache_hit_or_query"):
+        all_receipts = _cached_get_all_receipts(include_completed)
+    
     # Connection error check
-    if receipts is None:
+    if all_receipts is None:
         error_msg = queries.get_last_error() or "Cannot connect to database"
         st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
         st.info("💡 Check VPN/network connection or contact IT support")
         return
 
-    # Get stats for ALL filtered data (single query, not just current page)
-    stats = queries.get_filtered_stats(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        quality_status=filters['quality_status'],
-        product_id=filters['product_id'],
-        warehouse_id=filters['warehouse_id'],
-        order_no=filters['order_no'],
-        batch_no=filters['batch_no'],
-        exclude_completed=exclude_completed,
-        date_field=date_field
-    )
+    # ── Step 2: Client-side filtering (pandas — zero DB) ──
+    with perf.step("client_filter", f"{len(all_receipts)} → ?"):
+        filtered = _apply_filters(all_receipts, filters)
+    
+    logger.info(f"[PERF] client_filter: {len(all_receipts)} total → {len(filtered)} filtered")
 
+    # ── Step 3: Stats from filtered data (pandas — zero DB) ──
+    with perf.step("compute_stats"):
+        stats = _compute_stats_client(filtered)
+    
     total_count = stats['total_count']
 
     # Empty data check
-    if receipts.empty:
+    if filtered.empty:
         st.info("📭 No production receipts found matching the filters")
         return
 
-    # Avg yield from current page (order-level metric)
+    # ── Step 4: Paginate with iloc ──
+    with perf.step("paginate"):
+        offset = (page - 1) * page_size
+        receipts = filtered.iloc[offset:offset + page_size].reset_index(drop=True)
+    
+    # Avg yield from current page
     avg_yield = receipts['yield_rate'].mean() if not receipts.empty else 0
 
     # ── Unified Metrics ──
-    _render_metrics(stats, avg_yield)
+    with perf.step("render_metrics"):
+        _render_metrics(stats, avg_yield)
 
-    # ── Warnings ──
-    warnings_col = _compute_warnings(receipts, queries)
-    _render_warnings_summary(warnings_col)
+    # ── Warnings (pre-loaded dup_batches, zero DB) ──
+    with perf.step("compute_warnings"):
+        dup_batches = _cached_get_all_duplicate_batches()
+        warnings_col = _compute_warnings(receipts, dup_batches)
+        _render_warnings_summary(warnings_col)
 
     # ── Table ──
     st.markdown("### 📋 Receipts List")
@@ -695,23 +820,18 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
 # ==================== Excel Export ====================
 
 def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
-    """Export receipts to Excel"""
+    """Export receipts to Excel — uses cached bulk data, zero extra DB hit"""
     with st.spinner("Exporting..."):
-        receipts = queries.get_receipts(
-            from_date=filters['from_date'],
-            to_date=filters['to_date'],
-            quality_status=filters['quality_status'],
-            product_id=filters['product_id'],
-            warehouse_id=filters['warehouse_id'],
-            order_no=filters['order_no'],
-            batch_no=filters['batch_no'],
-            exclude_completed=filters.get('exclude_completed', True),
-            date_field=filters.get('date_field', 'receipt_date'),
-            page=1,
-            page_size=10000
-        )
-
-        if receipts is None or receipts.empty:
+        include_completed = not filters.get('exclude_completed', True)
+        all_receipts = _cached_get_all_receipts(include_completed)
+        
+        if all_receipts is None or all_receipts.empty:
+            st.warning("No receipts to export")
+            return
+        
+        receipts = _apply_filters(all_receipts, filters)
+        
+        if receipts.empty:
             st.warning("No receipts to export")
             return
 
@@ -774,10 +894,19 @@ def render_completions_tab():
     └──────────────────────────────────┘
     """
     _init_session_state()
-    check_pending_dialogs()
+    
+    perf = PerformanceTimer("render_completions_tab")
+    
+    with perf.step("check_pending_dialogs"):
+        check_pending_dialogs()
 
     queries = CompletionQueries()
 
     # Always render: Header (once) + Fragment (interactive)
-    _render_header(queries)
-    _render_receipts_section(queries)
+    with perf.step("render_header"):
+        _render_header(queries)
+    
+    with perf.step("render_receipts_section_call"):
+        _render_receipts_section(queries)
+    
+    perf.summary()
