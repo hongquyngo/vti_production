@@ -142,14 +142,14 @@ class CompletionForms:
         # ========== FORM ==========
         # Dynamic keys scoped to order_id: when MO switches, all widgets
         # are brand new with no cached state — value= params always apply.
-        st.markdown("### 🏭 Record Production Output")
-        st.caption("💡 Enter QC breakdown. Total = Passed + Pending + Failed.")
+        st.markdown("### 🏭 Production Receipt")
+        st.caption("💡 Enter quality classification. Total = Passed + Pending + Failed.")
         
         k = f"_{order_id}"  # key suffix for all widgets in this form
         
         with st.form(key=f"completion_form{k}", clear_on_submit=False):
-            # QC Breakdown — 3 columns
-            st.markdown("#### 📊 QC Breakdown")
+            # Quality Classification — 3 columns
+            st.markdown("#### 📊 Quality Classification")
             
             col1, col2, col3 = st.columns(3)
             
@@ -246,8 +246,8 @@ class CompletionForms:
             
             st.markdown("---")
             
-            # Output Preview
-            st.markdown("### 📊 Output Preview")
+            # Receipt Preview
+            st.markdown("### 📊 Receipt Preview")
             
             col1, col2, col3 = st.columns(3)
             
@@ -260,19 +260,19 @@ class CompletionForms:
                 st.info(f"**New Yield:** {new_yield}%")
             
             with col3:
-                st.info("**Status:** 🔄 Stays In Progress")
+                st.info("**Status:** MO remains open")
             
             # Inventory impact preview
             col1, col2, col3 = st.columns(3)
             with col1:
                 if passed_qty > 0:
-                    st.success(f"📗 **{format_number(passed_qty, 2)} {order['uom']}** → Inventory")
+                    st.success(f"📗 **{format_number(passed_qty, 2)} {order['uom']}** → FG Warehouse")
             with col2:
                 if pending_qty > 0:
                     st.warning(f"📙 **{format_number(pending_qty, 2)} {order['uom']}** → Awaiting QC")
             with col3:
                 if failed_qty > 0:
-                    st.error(f"📕 **{format_number(failed_qty, 2)} {order['uom']}** → Defective")
+                    st.error(f"📕 **{format_number(failed_qty, 2)} {order['uom']}** → Rejected")
             
             # Warnings
             remaining_qty = float(order['remaining_qty'])
@@ -295,7 +295,7 @@ class CompletionForms:
             
             with col1:
                 submit_btn = st.form_submit_button(
-                    "📦 Record Output",
+                    "📦 Confirm Receipt",
                     type="primary",
                     width='stretch'
                 )
@@ -356,19 +356,19 @@ class CompletionForms:
         receipts_text = "\n".join(receipt_lines) if receipt_lines else f"• {completion_info.get('receipt_no', 'N/A')}"
         
         st.success(f"""
-        📦 **Production Output Recorded!**
+        📦 **Production Receipt Created!**
         
-        **Receipts created:**
+        **Receipts:**
         {receipts_text}
         
         • Batch: **{completion_info.get('batch_no', 'N/A')}**
         • Total: **{format_number(completion_info.get('quantity', 0), 2)}**
-        • Order Status: **🔄 In Progress**
+        • MO Status: **Open** (receipt more or complete)
         """)
         
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("📦 Record Another Output", type="primary",
+            if st.button("📦 New Receipt", type="primary",
                        width='stretch', key="btn_another_completion"):
                 st.session_state.pop('completion_success', None)
                 st.session_state.pop('completion_info', None)
@@ -523,10 +523,10 @@ class CompletionForms:
 
 # ==================== Dialog Entry Point ====================
 
-@st.dialog("📦 Record Production Output", width="large")
+@st.dialog("📦 Production Receipt", width="large")
 def show_record_output_dialog():
     """
-    Dialog wrapper for Record Output form.
+    Dialog wrapper for Production Receipt form.
     Opens as overlay — no page navigation needed.
     Receipts list stays rendered behind the dialog.
     """

@@ -65,7 +65,7 @@ def show_receipt_details_dialog(receipt_id: int):
     st.markdown("---")
     
     # Output info
-    st.markdown("### 📦 Output Information")
+    st.markdown("### 📦 Receipt Information")
     
     # Product display with new format
     product_display = format_product_display(receipt)
@@ -104,7 +104,7 @@ def show_receipt_details_dialog(receipt_id: int):
     if receipt['planned_qty'] > 0:
         efficiency = calculate_percentage(receipt['produced_qty'], receipt['planned_qty'])
         st.progress(min(efficiency / 100, 1.0))
-        st.caption(f"Production Efficiency: {efficiency}%")
+        st.caption(f"Completion rate: {efficiency}%")
     
     # Notes
     if receipt.get('notes'):
@@ -157,7 +157,7 @@ def show_receipt_details_dialog(receipt_id: int):
             st.rerun()
     
     with col2:
-        if st.button("✏️ Update Quality", width='stretch',
+        if st.button("🔬 QC Decision", width='stretch',
                     key="detail_update_quality_btn"):
             # Set session state to open quality dialog after rerun
             st.session_state['open_quality_dialog'] = True
@@ -181,10 +181,10 @@ DEFECT_TYPES = [
     ('OTHER', '❓ Other - Khác'),
 ]
 
-@st.dialog("🔬 Update Quality Status", width="large")
+@st.dialog("🔬 QC Decision", width="large")
 def show_update_quality_dialog(receipt_id: int):
     """
-    Show quality update dialog — ONLY for PENDING receipts on IN_PROGRESS MOs.
+    Show quality decision dialog — ONLY for PENDING receipts on IN_PROGRESS MOs.
     
     Guards:
     - PASSED/FAILED receipts → locked, show message
@@ -207,7 +207,7 @@ def show_update_quality_dialog(receipt_id: int):
     
     # ===== GUARD: Check MO status =====
     if order_status == 'COMPLETED':
-        st.error("🔒 **Order is COMPLETED** — all QC is locked and cannot be changed.")
+        st.error("🔒 **MO is completed** — all QC decisions are locked.")
         st.info(f"Receipt: {receipt['receipt_no']} | Status: {create_status_indicator(current_status)}")
         if st.button("Close", width='stretch', key="qc_close_locked"):
             st.rerun()
@@ -216,7 +216,7 @@ def show_update_quality_dialog(receipt_id: int):
     # ===== GUARD: Check receipt status =====
     if current_status in ('PASSED', 'FAILED'):
         st.error(
-            f"🔒 **Receipt is {current_status}** — QC result is final and cannot be changed.\n\n"
+            f"🔒 **Receipt is {current_status}** — QC decision is final.\n\n"
             f"Only PENDING receipts can be updated."
         )
         st.info(f"Receipt: {receipt['receipt_no']} | Status: {create_status_indicator(current_status)}")
@@ -259,9 +259,9 @@ def show_update_quality_dialog(receipt_id: int):
     
     st.markdown("---")
     
-    # QC Result — PENDING can only go to PASSED or FAILED
-    st.markdown("### 📊 QC Result")
-    st.caption("Split this PENDING quantity into PASSED and/or FAILED. No quantity can remain PENDING.")
+    # QC Decision — PENDING can only go to PASSED or FAILED
+    st.markdown("### 📊 QC Decision")
+    st.caption("Classify this PENDING quantity as PASSED and/or FAILED. No quantity can remain PENDING.")
     
     col1, col2 = st.columns(2)
     
@@ -276,7 +276,7 @@ def show_update_quality_dialog(receipt_id: int):
             format="%.2f",
             key="input_passed_qty",
             label_visibility="collapsed",
-            help="Quantity that passed QC — will be added to inventory"
+            help="Quantity that passed QC — will be added to FG warehouse"
         )
     
     with col2:
@@ -290,7 +290,7 @@ def show_update_quality_dialog(receipt_id: int):
             format="%.2f",
             key="input_failed_qty",
             label_visibility="collapsed",
-            help="Quantity that failed QC — will NOT be added to inventory"
+            help="Quantity that failed QC — rejected, not added to inventory"
         )
     
     # Validation — must equal total, NO pending allowed
@@ -344,15 +344,15 @@ def show_update_quality_dialog(receipt_id: int):
     
     with col1:
         if passed_qty > 0:
-            st.success(f"📗 **{format_number(passed_qty, 2)} {receipt['uom']}**\n\n→ GOOD Inventory")
+            st.success(f"📗 **{format_number(passed_qty, 2)} {receipt['uom']}**\n\n→ FG Warehouse")
         else:
-            st.info("📗 No items to GOOD inventory")
+            st.info("📗 No items to FG warehouse")
     
     with col2:
         if failed_qty > 0:
-            st.error(f"📕 **{format_number(failed_qty, 2)} {receipt['uom']}**\n\n→ DEFECTIVE")
+            st.error(f"📕 **{format_number(failed_qty, 2)} {receipt['uom']}**\n\n→ Rejected")
         else:
-            st.info("📕 No failed items")
+            st.info("📕 No rejected items")
     
     # Split preview
     has_passed = passed_qty > 0
@@ -378,13 +378,13 @@ def show_update_quality_dialog(receipt_id: int):
         elif failed_qty > 0 and not defect_type:
             st.caption("⚠️ Please select defect type")
         
-        if st.button("✅ Update QC Result", type="primary", width='stretch',
+        if st.button("✅ Confirm QC Decision", type="primary", width='stretch',
                     disabled=update_disabled, key="qc_update_btn"):
             try:
                 audit_info = get_user_audit_info()
                 manager = CompletionManager()
                 
-                with st.spinner("Updating quality status..."):
+                with st.spinner("Recording QC decision..."):
                     # Use partial update — pending_qty = 0 (one-way, no back to PENDING)
                     result = manager.update_quality_status_partial(
                         receipt_id=receipt_id,
@@ -404,7 +404,7 @@ def show_update_quality_dialog(receipt_id: int):
                     if failed_qty > 0:
                         msg_parts.append(f"❌ {format_number(failed_qty, 2)} FAILED")
                     
-                    st.success(f"QC Updated: {' | '.join(msg_parts)}")
+                    st.success(f"QC Decision recorded: {' | '.join(msg_parts)}")
                     
                     new_receipts = result.get('new_receipts', [])
                     if new_receipts:
@@ -498,10 +498,10 @@ def show_pdf_dialog(receipt_id: int, receipt_no: str):
 
 # ==================== Close Order Dialog ====================
 
-@st.dialog("🔒 Close Manufacturing Order", width="medium")
+@st.dialog("🔒 Complete Manufacturing Order", width="medium")
 def show_close_order_dialog(order_id: int):
     """
-    Confirmation dialog for manually closing an MO.
+    Confirmation dialog for completing (closing) an MO.
     Shows validation results and requires explicit confirmation.
     """
     queries = CompletionQueries()
@@ -511,7 +511,7 @@ def show_close_order_dialog(order_id: int):
         st.error("❌ Could not validate order")
         return
     
-    st.markdown(f"### 🔒 Close Order: {validation.get('order_no', 'N/A')}")
+    st.markdown(f"### 🔒 Complete MO: {validation.get('order_no', 'N/A')}")
     
     # Order summary
     produced = validation.get('produced_qty', 0)
@@ -565,9 +565,9 @@ def show_close_order_dialog(order_id: int):
     if can_close:
         st.markdown("---")
         st.warning(
-            "⚠️ **This action is permanent.** After closing:\n"
-            "- No more production output can be recorded\n"
-            "- QC results cannot be changed\n"
+            "⚠️ **This action is permanent.** After completion:\n"
+            "- No more production receipts can be created\n"
+            "- QC decisions cannot be changed\n"
             "- Material issues/returns are blocked"
         )
     
@@ -577,20 +577,20 @@ def show_close_order_dialog(order_id: int):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🔒 Confirm Close", type="primary", width='stretch',
+        if st.button("🔒 Confirm Completion", type="primary", width='stretch',
                      disabled=not can_close, key="close_order_confirm_btn"):
             try:
                 audit_info = get_user_audit_info()
                 manager = CompletionManager()
                 
-                with st.spinner("Closing order..."):
+                with st.spinner("Completing MO..."):
                     result = manager.close_order(
                         order_id=order_id,
                         user_id=audit_info['user_id']
                     )
                 
                 if result.get('success'):
-                    st.success(f"🔒 Order **{result['order_no']}** has been closed.")
+                    st.success(f"🔒 MO **{result['order_no']}** has been completed.")
                     time.sleep(1.5)
                     st.rerun()
                 else:
@@ -598,35 +598,34 @@ def show_close_order_dialog(order_id: int):
                     
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
-                logger.error(f"Close order failed: {e}", exc_info=True)
+                logger.error(f"Complete MO failed: {e}", exc_info=True)
     
     with col2:
         if st.button("Cancel", width='stretch', key="close_order_cancel_btn"):
             st.rerun()
 
 
-# ==================== Close Order Select Dialog ====================
+# ==================== Complete MO Select Dialog ====================
 
-@st.dialog("🔒 Close Manufacturing Order", width="large")
+@st.dialog("🔒 Complete Manufacturing Order", width="large")
 def show_close_order_select_dialog():
     """
-    Dialog for selecting and closing orders.
-    Shows ready-to-close and blocked orders.
-    Replaces the old full-page close order view.
+    Dialog for selecting and completing MOs.
+    Shows ready-to-complete and blocked orders.
     """
     queries = CompletionQueries()
     
-    st.caption("Select an order to close. All QC must be resolved before closing.")
+    st.caption("Select an MO to complete. All QC must be resolved before completion.")
     
     ready_info = queries.get_ready_to_close_orders()
     
     if ready_info['ready_count'] == 0 and ready_info['blocked_count'] == 0:
-        st.info("📭 No orders are ready to close. Orders need to meet their production target first.")
+        st.info("📭 No MOs are ready to complete. Orders need to meet their production target first.")
         return
     
     # Show ready orders
     if ready_info['ready_count'] > 0:
-        st.success(f"✅ **{ready_info['ready_count']} order(s) ready to close**")
+        st.success(f"✅ **{ready_info['ready_count']} MO(s) ready to complete**")
         
         for order in ready_info['ready_orders']:
             with st.container(border=True):
@@ -644,7 +643,7 @@ def show_close_order_select_dialog():
                 with col2:
                     st.caption(f"Receipts: {order['receipt_count']}")
                 with col3:
-                    if st.button("🔒 Close", key=f"close_order_{order['id']}",
+                    if st.button("🔒 Complete", key=f"close_order_{order['id']}",
                                 width='stretch'):
                         # Use pending dialog pattern to avoid nested dialog
                         st.session_state['open_close_order_dialog'] = True
@@ -653,7 +652,7 @@ def show_close_order_select_dialog():
     
     # Show blocked orders
     if ready_info['blocked_count'] > 0:
-        st.warning(f"⏳ **{ready_info['blocked_count']} order(s) blocked by pending QC**")
+        st.warning(f"⏳ **{ready_info['blocked_count']} MO(s) blocked by pending QC**")
         
         for order in ready_info['blocked_orders']:
             st.caption(

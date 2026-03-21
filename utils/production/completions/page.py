@@ -6,7 +6,7 @@ Renders the Production Receipts tab with unified metrics, filters, and receipts 
 Version: 4.2.0
 Changes:
 - v4.2.0: Dialog-based UI — eliminates full-page view switching
-  - Record Output / Close Order open as @st.dialog overlays
+  - Production Receipt / Complete MO open as @st.dialog overlays
   - No more completions_view state, no "Back to Receipts" navigation
   - Receipts page always renders — dialogs overlay on top
   - Removed _render_close_order_view (moved to dialogs.py)
@@ -116,7 +116,7 @@ def _render_header(queries: CompletionQueries):
         st.subheader("📦 Production Receipts")
     with col2:
         ready = stats.get('ready_to_close', 0)
-        ready_badge = f" · 🔒 <b>{ready}</b> ready to close" if ready > 0 else ""
+        ready_badge = f" · 🔒 <b>{ready}</b> ready to complete" if ready > 0 else ""
         st.markdown(
             f"<div style='text-align:right; padding-top:10px; font-size:0.9em;'>"
             f"🔄 <b>{stats['in_progress']}</b> in progress &nbsp;·&nbsp; "
@@ -293,13 +293,13 @@ def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
     col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
 
     with col1:
-        if st.button("📦 Record Output", type="primary", width='stretch',
+        if st.button("📦 Production Receipt", type="primary", width='stretch',
                       key="btn_record_output"):
             st.session_state['open_record_output_dialog'] = True
             st.rerun()
 
     with col2:
-        if st.button("🔒 Close Order", width='stretch',
+        if st.button("🔒 Complete MO", width='stretch',
                       key="btn_close_order"):
             st.session_state['open_close_order_select_dialog'] = True
             st.rerun()
@@ -385,15 +385,15 @@ def _render_ready_to_close_banner(queries: CompletionQueries):
             orders_text += f" +{ready_info['ready_count'] - 5} more"
         
         st.success(
-            f"✅ **{ready_info['ready_count']} order(s) ready to close** — "
+            f"✅ **{ready_info['ready_count']} MO(s) ready to complete** — "
             f"production target met, all QC resolved. "
             f"({orders_text})"
         )
     
     if ready_info['blocked_count'] > 0:
         st.warning(
-            f"⏳ **{ready_info['blocked_count']} order(s) met target but have pending QC** — "
-            f"resolve QC before closing."
+            f"⏳ **{ready_info['blocked_count']} MO(s) met target but have pending QC** — "
+            f"resolve QC before completing."
         )
 
 
@@ -637,9 +637,9 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         
         qc_help = ""
         if order_status == 'COMPLETED':
-            qc_help = "🔒 Order is COMPLETED — QC locked"
+            qc_help = "🔒 MO is completed — QC locked"
         elif selected_receipt['quality_status'] != 'PENDING':
-            qc_help = f"🔒 QC is {selected_receipt['quality_status']} — final"
+            qc_help = f"🔒 QC decision is {selected_receipt['quality_status']} — final"
 
         col1, col2, col3, col4 = st.columns(4)
 
@@ -650,7 +650,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
 
         with col2:
             if can_update_qc:
-                if st.button("✏️ Update Quality",
+                if st.button("🔬 QC Decision",
                              width='stretch', key="btn_update_quality"):
                     show_update_quality_dialog(selected_receipt['id'])
             else:
@@ -764,9 +764,9 @@ def render_completions_tab():
     │  @st.fragment                    │
     │  ┌────────────────────────────┐  │
     │  │ Filters (+ show completed) │  │
-    │  │ Action Bar (Record/Close)  │  │  ← fragment reruns independently
-    │  │ Ready-to-Close Banner      │  │
-    │  │ Unified Metrics (6 cols)   │  │  Record Output / Close Order
+    │  │ Action Bar (Receipt/Complete)│  │  ← fragment reruns independently
+    │  │ Ready-to-Complete Banner    │  │
+    │  │ Unified Metrics (6 cols)   │  │  Production Receipt / Complete MO
     │  │ Warnings Bar               │  │  open as @st.dialog overlays
     │  │ Receipts Table + Actions   │  │  — no page navigation needed
     │  │ Pagination                 │  │
