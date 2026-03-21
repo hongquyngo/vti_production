@@ -52,6 +52,21 @@ DEFECT_TYPES = [
     ('OTHER', '❓ Other - Khác'),
 ]
 
+# Widget keys used inside the completion form
+_FORM_WIDGET_KEYS = [
+    'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
+    'form_batch_no', 'form_expiry_date', 'form_defect_type',
+    'form_completion_notes'
+]
+
+
+def _clear_form_widget_keys():
+    """Clear cached form widget keys from session state.
+    This forces Streamlit to use the value= parameter on next render.
+    """
+    for wkey in _FORM_WIDGET_KEYS:
+        st.session_state.pop(wkey, None)
+
 
 class CompletionForms:
     """Form components for Production Output Recording"""
@@ -113,15 +128,11 @@ class CompletionForms:
                 'notes': ''
             }
             
-            # Clear cached widget keys so Streamlit picks up new values
-            for wkey in [
-                'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
-                'form_batch_no', 'form_expiry_date', 'form_defect_type',
-                'form_completion_notes'
-            ]:
-                st.session_state.pop(wkey, None)
-            
-            st.rerun()
+            # Clear cached widget keys so Streamlit picks up new value= params.
+            # NO st.rerun() — keys are popped BEFORE form widgets are created
+            # in this render cycle, so value= parameter will be used correctly.
+            # (st.rerun() inside @st.dialog closes the dialog!)
+            _clear_form_widget_keys()
         
         form_data = st.session_state['completion_form_data']
         
@@ -300,13 +311,10 @@ class CompletionForms:
                 'defect_type_idx': 0,
                 'notes': ''
             }
-            # Clear cached widget keys so Streamlit picks up new values
-            for wkey in [
-                'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
-                'form_batch_no', 'form_expiry_date', 'form_defect_type',
-                'form_completion_notes'
-            ]:
-                st.session_state.pop(wkey, None)
+            _clear_form_widget_keys()
+            # st.rerun() inside @st.dialog closes the dialog,
+            # so set reopen flag first to immediately reopen with fresh values
+            st.session_state['open_record_output_dialog'] = True
             st.rerun()
         
         if submit_btn:
@@ -358,14 +366,8 @@ class CompletionForms:
                 st.session_state.pop('completion_success', None)
                 st.session_state.pop('completion_info', None)
                 st.session_state.pop('completion_order_id', None)
-                # Clear widget keys for fresh form
-                for wkey in [
-                    'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
-                    'form_batch_no', 'form_expiry_date', 'form_defect_type',
-                    'form_completion_notes'
-                ]:
-                    st.session_state.pop(wkey, None)
-                # Reopen dialog after rerun
+                _clear_form_widget_keys()
+                # Reopen dialog with fresh form
                 st.session_state['open_record_output_dialog'] = True
                 st.rerun()
         with col2:
@@ -500,14 +502,11 @@ class CompletionForms:
             # Clear form data
             st.session_state.pop('completion_form_data', None)
             st.session_state.pop('completion_order_id', None)
-            # Clear cached widget keys
-            for wkey in [
-                'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
-                'form_batch_no', 'form_expiry_date', 'form_defect_type',
-                'form_completion_notes'
-            ]:
-                st.session_state.pop(wkey, None)
+            _clear_form_widget_keys()
             
+            # Reopen dialog to show success message
+            # (st.rerun() closes the dialog, flag reopens it)
+            st.session_state['open_record_output_dialog'] = True
             st.rerun()
             
         except Exception as e:
