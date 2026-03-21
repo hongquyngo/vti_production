@@ -3,20 +3,19 @@
 Main UI orchestrator for Production Receipts domain
 Renders the Production Receipts tab with unified metrics, filters, and receipts list
 
-Version: 4.0.0
+Version: 4.1.0
 Changes:
+- v4.1.0: Filter & Performance improvements
+  - Added date type filter: receipt_date, order_date, scheduled_date
+  - Added custom date range with date pickers alongside presets
+  - Show date label (dd/mm — dd/mm) when preset selected
+  - Cached lookup queries (products, warehouses) with TTL
+  - Cached live_stats and ready_to_close with short TTL
 - v4.0.0: Production Receipts refactoring
-  - Renamed from "Completions" to "Production Receipts"
-  - Added "Show completed orders" filter (default: unchecked)
-  - Added Ready-to-Close banner for orders meeting close conditions
-  - Added Close Order button in action bar
-  - Update Quality button disabled for non-PENDING or COMPLETED MOs
-  - Added aging indicators in warnings column
-  - Updated header badges to include ready_to_close count
-- v3.0.0: Layout redesign
 """
 
 import logging
+from datetime import date
 from typing import Dict, Any
 
 import streamlit as st
@@ -33,10 +32,36 @@ from .common import (
     format_number, create_status_indicator, get_yield_indicator,
     calculate_percentage, format_datetime_vn, get_vietnam_today,
     export_to_excel, get_date_filter_presets, CompletionConstants,
-    format_product_display, get_aging_indicator
+    format_product_display, get_aging_indicator, format_date
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Cached Lookups (Performance) ====================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_get_products() -> pd.DataFrame:
+    """Cache product dropdown options — TTL 5 min"""
+    return CompletionQueries().get_products()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_get_warehouses() -> pd.DataFrame:
+    """Cache warehouse dropdown options — TTL 5 min"""
+    return CompletionQueries().get_warehouses()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_get_live_stats() -> Dict[str, int]:
+    """Cache header KPIs — TTL 30s"""
+    return CompletionQueries().get_live_stats()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_get_ready_to_close() -> Dict[str, Any]:
+    """Cache ready-to-close banner data — TTL 30s"""
+    return CompletionQueries().get_ready_to_close_orders()
 
 
 # ==================== Session State ====================
@@ -78,8 +103,9 @@ def _render_header(queries: CompletionQueries):
     Page header with title and live operational stats.
     Renders ONCE outside fragment — not affected by filter/pagination.
     Shows real-time KPIs: In Progress orders + Today's receipts + Ready to close.
+    Uses cached stats for performance.
     """
-    stats = queries.get_live_stats()
+    stats = _cached_get_live_stats()
 
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -105,25 +131,73 @@ def _render_help_button():
         render_help_guide()
 
 
+# ==================== Date Type Options ====================
+
+DATE_TYPE_OPTIONS = {
+    'receipt_date': '📦 Receipt Date',
+    'order_date': '📋 Order Date',
+    'scheduled_date': '📅 Scheduled Date',
+}
+
+
 # ==================== Filter Bar ====================
 
 def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
-    """Render filter bar and return selected filters"""
+    """Render filter bar with date type, preset/custom range, and cached lookups"""
     presets = get_date_filter_presets()
+    preset_keys = list(presets.keys()) + ["Custom"]
 
     with st.expander("🔍 Filters", expanded=False):
-        col1, col2, col3, col4 = st.columns(4)
+        # Row 1: Date Type + Date Range (preset or custom)
+        col1, col2, col3, col4 = st.columns([1.2, 1.2, 1, 1])
 
         with col1:
+            date_type = st.selectbox(
+                "Date Type",
+                options=list(DATE_TYPE_OPTIONS.keys()),
+                format_func=lambda x: DATE_TYPE_OPTIONS[x],
+                key="completion_date_type"
+            )
+
+        with col2:
             date_range = st.selectbox(
                 "Date Range",
-                options=list(presets.keys()),
+                options=preset_keys,
                 index=6,  # Last 30 Days
                 key="completion_date_range"
             )
-            from_date, to_date = presets[date_range]
 
-        with col2:
+        is_custom = (date_range == "Custom")
+
+        if is_custom:
+            today = get_vietnam_today()
+            with col3:
+                from_date = st.date_input(
+                    "From",
+                    value=today.replace(day=1),
+                    key="completion_custom_from"
+                )
+            with col4:
+                to_date = st.date_input(
+                    "To",
+                    value=today,
+                    key="completion_custom_to"
+                )
+        else:
+            from_date, to_date = presets[date_range]
+            # Show date label for preset
+            with col3:
+                st.markdown(
+                    f"<div style='padding-top:28px; font-size:0.85em; color:#666;'>"
+                    f"📅 {format_date(from_date, '%d/%m/%Y')} — {format_date(to_date, '%d/%m/%Y')}"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+        # Row 2: Quality, Product, Warehouse
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
             quality_options = ['All'] + [q[0] for q in CompletionConstants.QUALITY_STATUSES]
             quality_status = st.selectbox(
                 "Quality Status",
@@ -131,8 +205,8 @@ def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
                 key="completion_quality_filter"
             )
 
-        with col3:
-            products = queries.get_products()
+        with col2:
+            products = _cached_get_products()
             product_options = (
                 ["All Products"] + products['name'].tolist()
                 if not products.empty else ["All Products"]
@@ -145,8 +219,8 @@ def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
             if selected_product != "All Products" and not products.empty:
                 product_id = int(products[products['name'] == selected_product]['id'].iloc[0])
 
-        with col4:
-            warehouses = queries.get_warehouses()
+        with col3:
+            warehouses = _cached_get_warehouses()
             warehouse_options = (
                 ["All Warehouses"] + warehouses['name'].tolist()
                 if not warehouses.empty else ["All Warehouses"]
@@ -159,7 +233,8 @@ def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
             if selected_warehouse != "All Warehouses" and not warehouses.empty:
                 warehouse_id = int(warehouses[warehouses['name'] == selected_warehouse]['id'].iloc[0])
 
-        col5, col6 = st.columns(2)
+        # Row 3: Text search + show completed toggle
+        col5, col6, col7 = st.columns([2, 2, 1])
         with col5:
             order_no = st.text_input(
                 "🔍 Order No",
@@ -172,17 +247,19 @@ def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
                 placeholder="Search by batch number...",
                 key="completion_batch_filter"
             )
-        
-        show_completed = st.checkbox(
-            "Show completed orders",
-            value=False,
-            key="completion_show_completed",
-            help="Include receipts from COMPLETED manufacturing orders"
-        )
+        with col7:
+            st.markdown("<div style='padding-top:20px'></div>", unsafe_allow_html=True)
+            show_completed = st.checkbox(
+                "Show completed",
+                value=False,
+                key="completion_show_completed",
+                help="Include receipts from COMPLETED manufacturing orders"
+            )
 
     return {
         'from_date': from_date,
         'to_date': to_date,
+        'date_field': date_type,
         'quality_status': quality_status if quality_status != 'All' else None,
         'product_id': product_id,
         'warehouse_id': warehouse_id,
@@ -231,6 +308,11 @@ def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
     with col4:
         if st.button("🔄 Refresh", width='stretch',
                       key="btn_refresh_completions"):
+            # Clear cached lookups to force fresh data
+            _cached_get_products.clear()
+            _cached_get_warehouses.clear()
+            _cached_get_live_stats.clear()
+            _cached_get_ready_to_close.clear()
             st.rerun()
 
     with col5:
@@ -289,7 +371,7 @@ def _render_metrics(stats: Dict[str, Any], avg_yield: float):
 
 def _render_ready_to_close_banner(queries: CompletionQueries):
     """Render banner showing orders ready to close or blocked by pending QC."""
-    ready_info = queries.get_ready_to_close_orders()
+    ready_info = _cached_get_ready_to_close()
     
     if ready_info['ready_count'] > 0:
         orders_text = ", ".join(
@@ -384,6 +466,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     page_size = CompletionConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.completions_page
     exclude_completed = filters.get('exclude_completed', True)
+    date_field = filters.get('date_field', 'receipt_date')
 
     # Ready-to-close banner
     _render_ready_to_close_banner(queries)
@@ -398,6 +481,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         order_no=filters['order_no'],
         batch_no=filters['batch_no'],
         exclude_completed=exclude_completed,
+        date_field=date_field,
         page=page,
         page_size=page_size
     )
@@ -418,7 +502,8 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         warehouse_id=filters['warehouse_id'],
         order_no=filters['order_no'],
         batch_no=filters['batch_no'],
-        exclude_completed=exclude_completed
+        exclude_completed=exclude_completed,
+        date_field=date_field
     )
 
     total_count = stats['total_count']
@@ -617,6 +702,7 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
             order_no=filters['order_no'],
             batch_no=filters['batch_no'],
             exclude_completed=filters.get('exclude_completed', True),
+            date_field=filters.get('date_field', 'receipt_date'),
             page=1,
             page_size=10000
         )
@@ -668,7 +754,7 @@ def _render_close_order_view(queries: CompletionQueries):
     st.subheader("🔒 Close Manufacturing Order")
     st.caption("Select an order to close. All QC must be resolved before closing.")
     
-    ready_info = queries.get_ready_to_close_orders()
+    ready_info = _cached_get_ready_to_close()
     
     if ready_info['ready_count'] == 0 and ready_info['blocked_count'] == 0:
         st.info("📭 No orders are ready to close. Orders need to meet their production target first.")

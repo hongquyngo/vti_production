@@ -3,8 +3,11 @@
 Form components for Production Receipts domain
 Record production output with QC breakdown (passed/pending/failed)
 
-Version: 4.0.0
+Version: 4.1.0
 Changes:
+- v4.1.0: Fix form not refreshing when switching MO
+  - Clear cached widget keys on order change and reset
+  - Trigger st.rerun() after clearing to force fresh render
 - v4.0.0: Production Receipts refactoring
   - Replaced single quality_status selectbox with 3 QC quantity inputs
   - produced_qty derived from sum of passed + pending + failed
@@ -105,6 +108,16 @@ class CompletionForms:
                 'defect_type_idx': 0,
                 'notes': ''
             }
+            
+            # Clear cached widget keys so Streamlit picks up new values
+            for wkey in [
+                'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
+                'form_batch_no', 'form_expiry_date', 'form_defect_type',
+                'form_completion_notes'
+            ]:
+                st.session_state.pop(wkey, None)
+            
+            st.rerun()
         
         form_data = st.session_state['completion_form_data']
         
@@ -283,6 +296,13 @@ class CompletionForms:
                 'defect_type_idx': 0,
                 'notes': ''
             }
+            # Clear cached widget keys so Streamlit picks up new values
+            for wkey in [
+                'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
+                'form_batch_no', 'form_expiry_date', 'form_defect_type',
+                'form_completion_notes'
+            ]:
+                st.session_state.pop(wkey, None)
             st.rerun()
         
         if submit_btn:
@@ -467,6 +487,13 @@ class CompletionForms:
             # Clear form data
             st.session_state.pop('completion_form_data', None)
             st.session_state.pop('completion_order_id', None)
+            # Clear cached widget keys
+            for wkey in [
+                'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
+                'form_batch_no', 'form_expiry_date', 'form_defect_type',
+                'form_completion_notes'
+            ]:
+                st.session_state.pop(wkey, None)
             
             st.rerun()
             

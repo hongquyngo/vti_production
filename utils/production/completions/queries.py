@@ -3,8 +3,12 @@
 Database queries for Production Receipts domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 2.0.0
+Version: 2.1.0
 Changes:
+- v2.1.0: Date filter improvements
+  - Added DATE_FIELD_MAP for multi-column date filtering
+  - Added date_field param to get_receipts() and get_filtered_stats()
+  - Supports receipt_date, order_date, scheduled_date filtering
 - v2.0.0: Production Receipts refactoring
   - Added order_status, receipt age_days to get_receipts()
   - Added exclude_completed filter to get_receipts() and get_filtered_stats()
@@ -31,6 +35,13 @@ logger = logging.getLogger(__name__)
 class DatabaseConnectionError(Exception):
     """Custom exception for database connection errors"""
     pass
+
+
+DATE_FIELD_MAP = {
+    'receipt_date': 'DATE(pr.receipt_date)',
+    'order_date': 'DATE(mo.order_date)',
+    'scheduled_date': 'DATE(mo.scheduled_date)',
+}
 
 
 class CompletionQueries:
@@ -78,6 +89,7 @@ class CompletionQueries:
                     order_no: Optional[str] = None,
                     batch_no: Optional[str] = None,
                     exclude_completed: bool = True,
+                    date_field: str = 'receipt_date',
                     page: int = 1,
                     page_size: int = 20) -> Optional[pd.DataFrame]:
         """
@@ -85,6 +97,7 @@ class CompletionQueries:
         
         Args:
             exclude_completed: If True, hide receipts from COMPLETED MOs (default)
+            date_field: Which date column to filter on ('receipt_date', 'order_date', 'scheduled_date')
         
         Returns:
             DataFrame with receipt list, or None if connection error
@@ -132,15 +145,18 @@ class CompletionQueries:
         
         params = []
         
+        # Resolve date column from field mapping
+        date_column = DATE_FIELD_MAP.get(date_field, 'DATE(pr.receipt_date)')
+        
         if exclude_completed:
             query += " AND mo.status != 'COMPLETED'"
         
         if from_date:
-            query += " AND DATE(pr.receipt_date) >= %s"
+            query += f" AND {date_column} >= %s"
             params.append(from_date)
         
         if to_date:
-            query += " AND DATE(pr.receipt_date) <= %s"
+            query += f" AND {date_column} <= %s"
             params.append(to_date)
         
         if quality_status:
@@ -552,7 +568,8 @@ class CompletionQueries:
                            warehouse_id: Optional[int] = None,
                            order_no: Optional[str] = None,
                            batch_no: Optional[str] = None,
-                           exclude_completed: bool = True) -> Dict[str, Any]:
+                           exclude_completed: bool = True,
+                           date_field: str = 'receipt_date') -> Dict[str, Any]:
         """
         Get summary statistics for ALL filtered receipts (not just current page).
         Single query returning count, quantity, quality breakdown.
@@ -577,14 +594,17 @@ class CompletionQueries:
         
         params = []
         
+        # Resolve date column from field mapping
+        date_column = DATE_FIELD_MAP.get(date_field, 'DATE(pr.receipt_date)')
+        
         if exclude_completed:
             query += " AND mo.status != 'COMPLETED'"
         
         if from_date:
-            query += " AND DATE(pr.receipt_date) >= %s"
+            query += f" AND {date_column} >= %s"
             params.append(from_date)
         if to_date:
-            query += " AND DATE(pr.receipt_date) <= %s"
+            query += f" AND {date_column} <= %s"
             params.append(to_date)
         if quality_status:
             query += " AND pr.quality_status = %s"
