@@ -1,13 +1,19 @@
 # utils/db.py
 """
-Database connection management with singleton pattern
+Database Connection Management
 
-Version: 1.1.0
-Changes:
-- Added singleton pattern to reuse engine instead of creating new one each time
-- Added connection pool configuration from APP_CONFIG
-- Added connection health check
-- Added auto-reconnect with pool_pre_ping
+Version: 3.0.0 (Combined)
+Features:
+- Singleton pattern with thread-safe double-checked locking
+- Connection pooling with auto-reconnect
+- Health check utilities
+- Query execution helpers (V1)
+- Context managers for transactions (V1)
+- Pool status with invalidatedcount (V2)
+
+Compatibility:
+- V1: context managers, query helpers (execute_query, execute_update, etc.)
+- V2/V3: direct DB_CONFIG/APP_CONFIG imports, invalidatedcount in pool status
 """
 
 import pandas as pd
@@ -17,60 +23,78 @@ from sqlalchemy.exc import OperationalError, DatabaseError
 from urllib.parse import quote_plus
 import logging
 import threading
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any, List
+from contextlib import contextmanager
 
-from .config import DB_CONFIG, APP_CONFIG
+from .config import config, DB_CONFIG, APP_CONFIG
 
 logger = logging.getLogger(__name__)
 
-# Singleton engine instance
+# ==================== SINGLETON ENGINE ====================
+
 _engine = None
 _engine_lock = threading.Lock()
 
 
 def get_db_engine():
     """
-    Create and return SQLAlchemy database engine (singleton pattern)
+    Get SQLAlchemy database engine (singleton pattern)
     
-    Returns the same engine instance across all calls to avoid
-    creating multiple connections and exhausting the connection pool.
+    Thread-safe implementation using double-checked locking.
+    Reuses the same engine across all calls to prevent
+    connection pool exhaustion.
+    
+    Returns:
+        SQLAlchemy Engine instance
     """
     global _engine
     
-    # Double-checked locking pattern for thread safety
     if _engine is None:
         with _engine_lock:
             if _engine is None:
-                logger.info("🔌 Creating database engine (singleton)...")
-                
-                user = DB_CONFIG["user"]
-                password = quote_plus(str(DB_CONFIG["password"]))
-                host = DB_CONFIG["host"]
-                port = DB_CONFIG["port"]
-                database = DB_CONFIG["database"]
-                
-                url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
-                logger.info(f"🔐 SQLAlchemy URL: mysql+pymysql://{user}:***@{host}:{port}/{database}")
-                
-                # Get pool settings from APP_CONFIG
-                pool_size = APP_CONFIG.get("DB_POOL_SIZE", 5)
-                pool_recycle = APP_CONFIG.get("DB_POOL_RECYCLE", 3600)
-                
-                _engine = create_engine(
-                    url,
-                    poolclass=QueuePool,
-                    pool_size=pool_size,        # Number of connections to keep open
-                    max_overflow=10,            # Additional connections when pool is full
-                    pool_timeout=30,            # Seconds to wait for available connection
-                    pool_recycle=pool_recycle,  # Recycle connections after N seconds
-                    pool_pre_ping=True,         # Test connection before using (auto-reconnect)
-                    echo=False                  # Set to True for SQL debugging
-                )
-                
-                logger.info(f"✅ Database engine created (pool_size={pool_size}, recycle={pool_recycle}s)")
+                _engine = _create_engine()
     
     return _engine
 
+
+def _create_engine():
+    """Create new database engine with configured settings"""
+    # Support both config object (V1) and direct imports (V2/V3)
+    db_config = config.get_db_config() if hasattr(config, 'get_db_config') else DB_CONFIG
+    app_config = config.app_config if hasattr(config, 'app_config') else APP_CONFIG
+    
+    # Build connection URL
+    user = db_config["user"]
+    password = quote_plus(str(db_config["password"]))
+    host = db_config["host"]
+    port = db_config["port"]
+    database = db_config["database"]
+    
+    url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
+    
+    logger.info(f"🔌 Creating database engine: mysql+pymysql://{user}:***@{host}:{port}/{database}")
+    
+    # Pool settings
+    pool_size = app_config.get("DB_POOL_SIZE", 5)
+    pool_recycle = app_config.get("DB_POOL_RECYCLE", 3600)
+    
+    engine = create_engine(
+        url,
+        poolclass=QueuePool,
+        pool_size=pool_size,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_recycle=pool_recycle,
+        pool_pre_ping=True,  # Auto-reconnect on stale connections
+        echo=False
+    )
+    
+    logger.info(f"✅ Database engine created (pool_size={pool_size}, recycle={pool_recycle}s)")
+    
+    return engine
+
+
+# ==================== CONNECTION MANAGEMENT ====================
 
 def check_db_connection() -> Tuple[bool, Optional[str]]:
     """
@@ -96,9 +120,10 @@ def check_db_connection() -> Tuple[bool, Optional[str]]:
 
 def reset_db_engine():
     """
-    Reset the database engine (useful for reconnection after errors)
+    Reset the database engine (force new connection)
     
-    Call this if you need to force a new connection after persistent errors.
+    Call this after persistent connection errors or
+    when you need to reconnect with different settings.
     """
     global _engine
     
@@ -114,9 +139,9 @@ def reset_db_engine():
     logger.info("🔄 Database engine reset - will reconnect on next query")
 
 
-def get_connection_pool_status() -> dict:
+def get_connection_pool_status() -> Dict[str, Any]:
     """
-    Get current connection pool status for debugging
+    Get connection pool statistics for monitoring
     
     Returns:
         Dictionary with pool statistics
@@ -126,13 +151,156 @@ def get_connection_pool_status() -> dict:
     
     try:
         pool = _engine.pool
-        return {
+        status = {
             "status": "active",
             "pool_size": pool.size(),
             "checked_in": pool.checkedin(),
             "checked_out": pool.checkedout(),
             "overflow": pool.overflow(),
-            "invalid": pool.invalidatedcount() if hasattr(pool, 'invalidatedcount') else 'N/A'
         }
+        # V2: Add invalidatedcount if available
+        if hasattr(pool, 'invalidatedcount'):
+            status["invalid"] = pool.invalidatedcount()
+        return status
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+# ==================== CONTEXT MANAGERS (V1) ====================
+
+@contextmanager
+def get_connection():
+    """
+    Context manager for database connections
+    
+    Usage:
+        with get_connection() as conn:
+            result = conn.execute(text("SELECT * FROM table"))
+    """
+    engine = get_db_engine()
+    conn = engine.connect()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def get_transaction():
+    """
+    Context manager for database transactions
+    
+    Usage:
+        with get_transaction() as conn:
+            conn.execute(text("INSERT INTO ..."))
+            conn.execute(text("UPDATE ..."))
+            # Auto-commit on success, auto-rollback on exception
+    """
+    engine = get_db_engine()
+    conn = engine.connect()
+    trans = conn.begin()
+    try:
+        yield conn
+        trans.commit()
+    except Exception:
+        trans.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# ==================== QUERY HELPERS (V1) ====================
+
+def execute_query(query: str, params: Dict = None) -> List[Dict]:
+    """
+    Execute SELECT query and return results as list of dicts
+    
+    Args:
+        query: SQL query string
+        params: Query parameters
+        
+    Returns:
+        List of dictionaries
+    """
+    engine = get_db_engine()
+    
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params or {})
+        return [dict(row._mapping) for row in result]
+
+
+def execute_query_df(query: str, params: Dict = None) -> pd.DataFrame:
+    """
+    Execute SELECT query and return results as DataFrame
+    
+    Args:
+        query: SQL query string
+        params: Query parameters
+        
+    Returns:
+        pandas DataFrame
+    """
+    engine = get_db_engine()
+    return pd.read_sql(text(query), engine, params=params or {})
+
+
+def execute_update(query: str, params: Dict = None) -> int:
+    """
+    Execute INSERT/UPDATE/DELETE query
+    
+    Args:
+        query: SQL query string
+        params: Query parameters
+        
+    Returns:
+        Number of affected rows
+    """
+    engine = get_db_engine()
+    
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params or {})
+        conn.commit()
+        return result.rowcount
+
+
+def execute_many(query: str, params_list: List[Dict]) -> int:
+    """
+    Execute query with multiple parameter sets
+    
+    Args:
+        query: SQL query string
+        params_list: List of parameter dictionaries
+        
+    Returns:
+        Total number of affected rows
+    """
+    engine = get_db_engine()
+    total_rows = 0
+    
+    with engine.connect() as conn:
+        for params in params_list:
+            result = conn.execute(text(query), params)
+            total_rows += result.rowcount
+        conn.commit()
+    
+    return total_rows
+
+
+# ==================== EXPORTS ====================
+
+__all__ = [
+    'get_db_engine',
+    'check_db_connection',
+    'reset_db_engine',
+    'get_connection_pool_status',
+    'get_connection',
+    'get_transaction',
+    'execute_query',
+    'execute_query_df',
+    'execute_update',
+    'execute_many',
+]
