@@ -613,7 +613,6 @@ class OrderPivotView:
                 avg = total_value / num_rows
                 st.metric(f"📈 Avg per {row_dim_label}", format_number(avg, 0))
         
-        st.markdown("---")
         col1, col2 = st.columns([1, 3])
         
         with col1:
@@ -629,7 +628,6 @@ class OrderPivotView:
         if pivot_df is None or pivot_df.empty or not cell_data_map:
             return
         
-        st.markdown("---")
         st.markdown("### 🔍 Drill-Down")
         st.caption("Select a row and period to see detailed orders")
         

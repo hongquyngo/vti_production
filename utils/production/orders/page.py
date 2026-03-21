@@ -46,7 +46,7 @@ def _init_session_state():
     """Initialize session state for orders tab"""
     defaults = {
         'orders_page': 1,
-        'orders_view': 'pivot',  # 'list', 'create', or 'pivot'
+        'orders_view': 'list',  # 'list', 'create', or 'pivot'
         'orders_conflicts_only': False,
         'orders_conflict_check_active_only': True,
         'orders_date_type': 'scheduled',
@@ -59,13 +59,13 @@ def _init_session_state():
 # ==================== View Switcher ====================
 
 def _render_view_switcher() -> str:
-    """Render view switcher tabs for List/Pivot views"""
+    """Render view switcher tabs for List/Pivot views with Create Order button"""
     current_view = st.session_state.get('orders_view', 'list')
     
     if current_view == 'create':
         return current_view
     
-    col1, col2, col3 = st.columns([1, 1, 4])
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 3])
     
     with col1:
         list_selected = current_view == 'list'
@@ -90,6 +90,12 @@ def _render_view_switcher() -> str:
             if not pivot_selected:
                 st.session_state.orders_view = 'pivot'
                 st.rerun()
+    
+    with col3:
+        if st.button("➕ Create Order", use_container_width=True,
+                     key="btn_create_order_top"):
+            st.session_state.orders_view = 'create'
+            st.rerun()
     
     return current_view
 
@@ -498,20 +504,14 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
 # ==================== Action Bar ====================
 
 def _render_action_bar(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render action bar with bulk actions"""
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+    """Render action bar with export and refresh"""
+    col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
-        if st.button("➕ Create Order", type="primary", use_container_width=True,
-                    key="btn_create_order"):
-            st.session_state.orders_view = 'create'
-            st.rerun()
-    
-    with col2:
         if st.button("📊 Export Excel", use_container_width=True, key="btn_export_excel"):
             _export_orders_excel(queries, filters)
     
-    with col3:
+    with col2:
         if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_orders"):
             st.rerun()
 
