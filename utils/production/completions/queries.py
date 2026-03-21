@@ -1013,9 +1013,16 @@ class CompletionQueries:
         ready = target_met[target_met['pending_count'] == 0]
         blocked = target_met[target_met['pending_count'] > 0]
         
+        # Rename order_id → id for dialog compatibility (dialogs.py uses order['id'])
+        def _to_records(df):
+            if df.empty:
+                return []
+            out = df.rename(columns={'order_id': 'id'})
+            return out.to_dict('records')
+        
         return {
             'ready_count': len(ready),
             'blocked_count': len(blocked),
-            'ready_orders': ready.to_dict('records') if not ready.empty else [],
-            'blocked_orders': blocked.to_dict('records') if not blocked.empty else [],
+            'ready_orders': _to_records(ready),
+            'blocked_orders': _to_records(blocked),
         }
