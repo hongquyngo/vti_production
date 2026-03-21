@@ -3,12 +3,16 @@
 Main UI orchestrator for Production Receipts domain
 Renders the Production Receipts tab with unified metrics, filters, and receipts list
 
-Version: 5.0.0
+Version: 5.0.1
 Changes:
+- v5.0.1: Fix dialog-opening buttons inside @st.fragment
+  - st.rerun() inside @st.fragment defaults to scope="fragment" (Streamlit ≥1.37)
+  - check_pending_dialogs() runs at page-level → needs scope="app" to trigger
+  - Fixed: Production Receipt, Complete MO, Refresh buttons now use st.rerun(scope="app")
 - v5.0.0: Client-side filtering — MAJOR performance overhaul
   - Single bulk DB query replaces per-page get_receipts + get_filtered_stats + get_duplicate_batch_info
   - All filtering, pagination, stats computed client-side with pandas (zero DB round-trips)
-  - Dialog buttons use st.rerun(scope="fragment") where possible to avoid full-page rerun
+  - Dialog buttons use st.rerun(scope="app") to trigger page-level check_pending_dialogs()
   - PerformanceTimer instrumentation throughout for profiling
 - v4.2.0: Dialog-based UI — eliminates full-page view switching
 - v4.1.0: Filter & Performance improvements
@@ -441,13 +445,13 @@ def _render_action_bar(filters: Dict[str, Any]):
         if st.button("📦 Production Receipt", type="primary", width='stretch',
                       key="btn_record_output"):
             st.session_state['open_record_output_dialog'] = True
-            st.rerun()
+            st.rerun(scope="app")  # Must be app-level: check_pending_dialogs() is outside fragment
 
     with col2:
         if st.button("🔒 Complete MO", width='stretch',
                       key="btn_close_order"):
             st.session_state['open_close_order_select_dialog'] = True
-            st.rerun()
+            st.rerun(scope="app")  # Must be app-level: check_pending_dialogs() is outside fragment
 
     with col3:
         if st.button("📊 Export Excel", width='stretch',
@@ -459,7 +463,7 @@ def _render_action_bar(filters: Dict[str, Any]):
                       key="btn_refresh_completions"):
             # Clear bootstrap cache to force fresh data
             _cached_bootstrap.clear()
-            st.rerun()
+            st.rerun(scope="app")  # Must be app-level: cache clear affects page-level bootstrap
 
     with col5:
         _render_help_button()

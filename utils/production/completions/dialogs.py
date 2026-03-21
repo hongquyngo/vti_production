@@ -3,8 +3,11 @@
 Dialog components for Production Receipts domain
 Receipt detail, quality update (with guards), PDF export, close order dialogs
 
-Version: 4.2.0
+Version: 4.2.1
 Changes:
+- v4.2.1: Fix check_pending_dialogs() — use elif chain instead of sequential if
+  - Streamlit allows only 1 dialog per render cycle
+  - Sequential if could attempt to open multiple dialogs, losing flags silently
 - v4.2.0: Dialog-based UI flow
   - NEW: show_close_order_select_dialog() — replaces close order page view
   - Updated check_pending_dialogs() for close order select → confirm flow
@@ -668,6 +671,10 @@ def check_pending_dialogs():
     Check if there's a pending dialog to open.
     Call this at the start of the page render.
     This prevents nested dialog errors.
+    
+    Uses elif chain: Streamlit allows only ONE dialog per render cycle.
+    If multiple flags are set (edge case), only the first is opened;
+    the rest are consumed to prevent stale flags persisting forever.
     """
     # Check for PDF dialog
     if st.session_state.get('open_receipt_pdf_dialog'):
@@ -678,26 +685,26 @@ def check_pending_dialogs():
             show_pdf_dialog(receipt_id, receipt_no)
     
     # Check for quality dialog
-    if st.session_state.get('open_quality_dialog'):
+    elif st.session_state.get('open_quality_dialog'):
         receipt_id = st.session_state.pop('quality_receipt_id', None)
         st.session_state.pop('open_quality_dialog', None)
         if receipt_id:
             show_update_quality_dialog(receipt_id)
     
     # Check for close order confirm dialog (from close order select dialog)
-    if st.session_state.get('open_close_order_dialog'):
+    elif st.session_state.get('open_close_order_dialog'):
         order_id = st.session_state.pop('close_order_id', None)
         st.session_state.pop('open_close_order_dialog', None)
         if order_id:
             show_close_order_dialog(order_id)
     
     # Check for close order select dialog
-    if st.session_state.get('open_close_order_select_dialog'):
+    elif st.session_state.get('open_close_order_select_dialog'):
         st.session_state.pop('open_close_order_select_dialog', None)
         show_close_order_select_dialog()
     
     # Check for record output dialog
-    if st.session_state.get('open_record_output_dialog'):
+    elif st.session_state.get('open_record_output_dialog'):
         st.session_state.pop('open_record_output_dialog', None)
         from .forms import show_record_output_dialog  # lazy import to avoid circular
         show_record_output_dialog()
