@@ -891,138 +891,68 @@ class CompletionQueries:
             logger.error(f"Error in bulk load: {e}")
             return None
     
-    def _get_header_data(self) -> Dict[str, Any]:
+    def _get_in_progress_count(self) -> int:
+        """Single scalar query — count of IN_PROGRESS MOs (includes those with 0 receipts)."""
+        query = """
+            SELECT COUNT(*) as cnt FROM manufacturing_orders
+            WHERE delete_flag = 0 AND status = 'IN_PROGRESS'
         """
-        Stats + ready-to-close using pd.read_sql(string, engine).
-        This exact pattern worked at 609ms in testing — do NOT change to
-        explicit conn.execute() or text() which caused 1482ms regression.
-        """
-        from .common import get_vietnam_today
-        today = get_vietnam_today()
-        
-        stats_query = """
-            SELECT 
-                (SELECT COUNT(*) FROM manufacturing_orders 
-                 WHERE delete_flag = 0 AND status = 'IN_PROGRESS') as in_progress,
-                (SELECT COUNT(*) FROM production_receipts 
-                 WHERE DATE(receipt_date) = %s) as today_count
-        """
-        
-        ready_query = """
-            SELECT
-                mo.id,
-                mo.order_no,
-                mo.produced_qty,
-                mo.planned_qty,
-                mo.uom,
-                p.name AS product_name,
-                COALESCE(pr_stats.pending_count, 0) AS pending_count,
-                COALESCE(pr_stats.receipt_count, 0) AS receipt_count,
-                CASE 
-                    WHEN COALESCE(pr_stats.pending_count, 0) = 0 
-                         AND COALESCE(pr_stats.receipt_count, 0) > 0
-                    THEN 'READY'
-                    ELSE 'BLOCKED'
-                END AS close_status
-            FROM manufacturing_orders mo
-            JOIN products p ON mo.product_id = p.id
-            LEFT JOIN (
-                SELECT 
-                    manufacturing_order_id,
-                    COUNT(*) AS receipt_count,
-                    SUM(CASE WHEN quality_status = 'PENDING' THEN 1 ELSE 0 END) AS pending_count
-                FROM production_receipts
-                GROUP BY manufacturing_order_id
-            ) pr_stats ON mo.id = pr_stats.manufacturing_order_id
-            WHERE mo.status = 'IN_PROGRESS' 
-                AND mo.delete_flag = 0
-                AND mo.produced_qty >= mo.planned_qty
-            ORDER BY mo.order_no
-        """
-        
         try:
             import time as _t; _t0 = _t.perf_counter()
-            
-            # IMPORTANT: use pd.read_sql(string, engine) — NOT conn.execute(text())
-            # The engine-based approach auto-manages connections and was 2.4x faster in testing.
-            stats_result = pd.read_sql(stats_query, self.engine, params=(today,))
-            ready_result = pd.read_sql(ready_query, self.engine)
-            
+            result = pd.read_sql(query, self.engine)
             _ms = (_t.perf_counter() - _t0) * 1000
-            logger.info(f"[PERF] _get_header_data: {_ms:.0f}ms (stats+ready via engine)")
-            
-            # Parse stats
-            stats_row = stats_result.iloc[0]
-            live_stats = {
-                'in_progress': int(stats_row['in_progress']),
-                'today_count': int(stats_row['today_count']),
-            }
-            
-            # Parse ready-to-close
-            if ready_result.empty:
-                ready_info = {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
-            else:
-                ready = ready_result[ready_result['close_status'] == 'READY']
-                blocked = ready_result[ready_result['close_status'] == 'BLOCKED']
-                ready_info = {
-                    'ready_count': len(ready),
-                    'blocked_count': len(blocked),
-                    'ready_orders': ready.to_dict('records') if not ready.empty else [],
-                    'blocked_orders': blocked.to_dict('records') if not blocked.empty else [],
-                }
-            
-            live_stats['ready_to_close'] = ready_info['ready_count']
-            
-            return {
-                'live_stats': live_stats,
-                'ready_to_close': ready_info,
-            }
-            
+            logger.info(f"[PERF] _get_in_progress_count: {_ms:.0f}ms")
+            return int(result.iloc[0]['cnt'])
         except Exception as e:
-            logger.error(f"Error getting header data: {e}")
-            return {
-                'live_stats': {'in_progress': 0, 'today_count': 0, 'ready_to_close': 0},
-                'ready_to_close': {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []},
-            }
+            logger.error(f"Error getting in_progress count: {e}")
+            return 0
     
-    # ==================== Parallel Bootstrap ====================
+    # ==================== Bootstrap (Sequential, No Threading) ====================
     
     def bootstrap_all(self, include_completed: bool = False) -> Dict[str, Any]:
         """
-        Load ALL page data in 2 parallel threads.
+        Load page data: 1 bulk query + 1 tiny query, then derive the rest.
         
-        Thread 1: get_all_active_receipts  ~236ms ─┐ pd.read_sql(str, engine)
-        Thread 2: _get_header_data         ~600ms ─┘ pd.read_sql(str, engine) × 2
-                                      max(236, 600) ≈ 620ms total
+        NO threading — MySQL connector + pd.read_sql has 2-3x regression under
+        ThreadPoolExecutor (tested: 609ms sequential → 1569ms threaded).
         
-        NOTE: pd.read_sql(string, engine) auto-manages connection checkout/return.
-        Do NOT replace with explicit conn.execute(text()) — causes 2.4x regression.
+        Pipeline:
+          1. get_all_active_receipts()   ~190ms  (bulk data)
+          2. _get_in_progress_count()    ~170ms  (1 scalar — can't derive from receipts)
+          3. Derive today_count          ~0ms    (pandas filter on receipts)
+          4. Derive ready_to_close       ~0ms    (pandas groupby on receipts)
+                                         ─────
+                                    Total ~360ms
         """
-        from concurrent.futures import ThreadPoolExecutor
         import time as _t
         
         _t0 = _t.perf_counter()
         
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            fut_receipts = executor.submit(
-                self.get_all_active_receipts, include_completed
-            )
-            fut_header = executor.submit(self._get_header_data)
-            
-            try:
-                receipts = fut_receipts.result(timeout=30)
-            except Exception as e:
-                logger.error(f"Bootstrap receipts failed: {e}")
-                receipts = None
-            
-            try:
-                header = fut_header.result(timeout=30)
-            except Exception as e:
-                logger.error(f"Bootstrap header failed: {e}")
-                header = {
-                    'live_stats': {'in_progress': 0, 'today_count': 0, 'ready_to_close': 0},
-                    'ready_to_close': {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []},
-                }
+        # ── Query 1: bulk receipts (~190ms) ──
+        receipts = self.get_all_active_receipts(include_completed=include_completed)
+        
+        # ── Query 2: in_progress count (~170ms) ──
+        in_progress = self._get_in_progress_count()
+        
+        # ── Derive today_count from receipts (0ms) ──
+        today_count = 0
+        if receipts is not None and not receipts.empty:
+            from .common import get_vietnam_today
+            today = get_vietnam_today()
+            today_ts = pd.Timestamp(today)
+            today_end = today_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            receipt_dates = pd.to_datetime(receipts['receipt_date'], errors='coerce')
+            today_count = int(receipt_dates.between(today_ts, today_end).sum())
+        
+        # ── Derive ready_to_close from receipts (0ms) ──
+        ready_info = self._derive_ready_to_close(receipts)
+        
+        # ── Assemble header ──
+        live_stats = {
+            'in_progress': in_progress,
+            'today_count': today_count,
+            'ready_to_close': ready_info['ready_count'],
+        }
         
         connection_error = None
         if receipts is None:
@@ -1030,10 +960,62 @@ class CompletionQueries:
         
         _ms = (_t.perf_counter() - _t0) * 1000
         n_rows = len(receipts) if receipts is not None else 0
-        logger.info(f"[PERF] bootstrap_all: {_ms:.0f}ms total (2 threads, 2 conns, {n_rows} receipts)")
+        logger.info(f"[PERF] bootstrap_all: {_ms:.0f}ms total (sequential, {n_rows} receipts)")
         
         return {
             'receipts': receipts,
-            'header': header,
+            'header': {
+                'live_stats': live_stats,
+                'ready_to_close': ready_info,
+            },
             'connection_error': connection_error,
+        }
+    
+    @staticmethod
+    def _derive_ready_to_close(receipts: Optional[pd.DataFrame]) -> Dict[str, Any]:
+        """
+        Derive ready-to-close info from receipts DataFrame.
+        Replaces the heavy ready_to_close SQL query.
+        
+        Logic: Group receipts by order → check:
+        - order_status = IN_PROGRESS
+        - produced_qty >= planned_qty
+        - pending_count = 0 → READY
+        - pending_count > 0 → BLOCKED
+        """
+        empty = {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
+        
+        if receipts is None or receipts.empty:
+            return empty
+        
+        # Only IN_PROGRESS orders
+        ip = receipts[receipts['order_status'] == 'IN_PROGRESS']
+        if ip.empty:
+            return empty
+        
+        # Group by order
+        order_stats = ip.groupby('order_id').agg(
+            order_no=('order_no', 'first'),
+            product_name=('product_name', 'first'),
+            produced_qty=('produced_qty', 'first'),
+            planned_qty=('planned_qty', 'first'),
+            uom=('uom', 'first'),
+            receipt_count=('id', 'count'),
+            pending_count=('quality_status', lambda x: (x == 'PENDING').sum()),
+        ).reset_index()
+        
+        # Filter: produced >= planned (target met)
+        target_met = order_stats[order_stats['produced_qty'] >= order_stats['planned_qty']]
+        
+        if target_met.empty:
+            return empty
+        
+        ready = target_met[target_met['pending_count'] == 0]
+        blocked = target_met[target_met['pending_count'] > 0]
+        
+        return {
+            'ready_count': len(ready),
+            'blocked_count': len(blocked),
+            'ready_orders': ready.to_dict('records') if not ready.empty else [],
+            'blocked_orders': blocked.to_dict('records') if not blocked.empty else [],
         }
