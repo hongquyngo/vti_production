@@ -52,20 +52,23 @@ DEFECT_TYPES = [
     ('OTHER', '❓ Other - Khác'),
 ]
 
-# Widget keys used inside the completion form
-_FORM_WIDGET_KEYS = [
+# Base widget key names used inside the completion form
+_FORM_WIDGET_BASES = [
     'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
     'form_batch_no', 'form_expiry_date', 'form_defect_type',
     'form_completion_notes'
 ]
 
 
-def _clear_form_widget_keys():
+def _clear_form_widget_keys(order_id=None):
     """Clear cached form widget keys from session state.
-    This forces Streamlit to use the value= parameter on next render.
+    With dynamic keys (scoped to order_id), clears the specific suffixed keys.
+    Also clears any legacy static keys for safety.
     """
-    for wkey in _FORM_WIDGET_KEYS:
-        st.session_state.pop(wkey, None)
+    for base in _FORM_WIDGET_BASES:
+        st.session_state.pop(base, None)  # legacy static key
+        if order_id is not None:
+            st.session_state.pop(f"{base}_{order_id}", None)
 
 
 class CompletionForms:
@@ -128,19 +131,23 @@ class CompletionForms:
                 'notes': ''
             }
             
-            # Clear cached widget keys so Streamlit picks up new value= params.
+            # Clear cached widget keys for this order_id in case user is revisiting.
             # NO st.rerun() — keys are popped BEFORE form widgets are created
             # in this render cycle, so value= parameter will be used correctly.
             # (st.rerun() inside @st.dialog closes the dialog!)
-            _clear_form_widget_keys()
+            _clear_form_widget_keys(order_id)
         
         form_data = st.session_state['completion_form_data']
         
         # ========== FORM ==========
+        # Dynamic keys scoped to order_id: when MO switches, all widgets
+        # are brand new with no cached state — value= params always apply.
         st.markdown("### 🏭 Record Production Output")
         st.caption("💡 Enter QC breakdown. Total = Passed + Pending + Failed.")
         
-        with st.form(key="completion_form", clear_on_submit=False):
+        k = f"_{order_id}"  # key suffix for all widgets in this form
+        
+        with st.form(key=f"completion_form{k}", clear_on_submit=False):
             # QC Breakdown — 3 columns
             st.markdown("#### 📊 QC Breakdown")
             
@@ -154,7 +161,7 @@ class CompletionForms:
                     value=float(form_data['passed_qty']),
                     step=1.0,
                     format="%.2f",
-                    key="form_passed_qty",
+                    key=f"form_passed_qty{k}",
                     label_visibility="collapsed",
                     help="Quantity that passed QC — will be added to inventory"
                 )
@@ -167,7 +174,7 @@ class CompletionForms:
                     value=float(form_data['pending_qty']),
                     step=1.0,
                     format="%.2f",
-                    key="form_pending_qty",
+                    key=f"form_pending_qty{k}",
                     label_visibility="collapsed",
                     help="Quantity awaiting QC — NOT in inventory until resolved"
                 )
@@ -180,7 +187,7 @@ class CompletionForms:
                     value=float(form_data['failed_qty']),
                     step=1.0,
                     format="%.2f",
-                    key="form_failed_qty",
+                    key=f"form_failed_qty{k}",
                     label_visibility="collapsed",
                     help="Quantity that failed QC — will NOT be added to inventory"
                 )
@@ -202,13 +209,13 @@ class CompletionForms:
                 batch_no = st.text_input(
                     "Batch Number",
                     value=form_data['batch_no'],
-                    key="form_batch_no"
+                    key=f"form_batch_no{k}"
                 )
                 
                 expired_date = st.date_input(
                     "Expiry Date",
                     value=form_data['expired_date'],
-                    key="form_expiry_date"
+                    key=f"form_expiry_date{k}"
                 )
             
             with col2:
@@ -223,7 +230,7 @@ class CompletionForms:
                         options=defect_options,
                         format_func=lambda x: defect_labels.get(x, x),
                         index=form_data.get('defect_type_idx', 0),
-                        key="form_defect_type",
+                        key=f"form_defect_type{k}",
                         help="Required when there are failed items"
                     )
                 else:
@@ -234,7 +241,7 @@ class CompletionForms:
                     value=form_data['notes'],
                     height=100,
                     placeholder="Optional notes about this production batch...",
-                    key="form_completion_notes"
+                    key=f"form_completion_notes{k}"
                 )
             
             st.markdown("---")
@@ -311,7 +318,7 @@ class CompletionForms:
                 'defect_type_idx': 0,
                 'notes': ''
             }
-            _clear_form_widget_keys()
+            _clear_form_widget_keys(order_id)
             # st.rerun() inside @st.dialog closes the dialog,
             # so set reopen flag first to immediately reopen with fresh values
             st.session_state['open_record_output_dialog'] = True
@@ -365,8 +372,8 @@ class CompletionForms:
                        width='stretch', key="btn_another_completion"):
                 st.session_state.pop('completion_success', None)
                 st.session_state.pop('completion_info', None)
-                st.session_state.pop('completion_order_id', None)
-                _clear_form_widget_keys()
+                old_order_id = st.session_state.pop('completion_order_id', None)
+                _clear_form_widget_keys(old_order_id)
                 # Reopen dialog with fresh form
                 st.session_state['open_record_output_dialog'] = True
                 st.rerun()
@@ -501,8 +508,8 @@ class CompletionForms:
             
             # Clear form data
             st.session_state.pop('completion_form_data', None)
-            st.session_state.pop('completion_order_id', None)
-            _clear_form_widget_keys()
+            old_order_id = st.session_state.pop('completion_order_id', None)
+            _clear_form_widget_keys(old_order_id)
             
             # Reopen dialog to show success message
             # (st.rerun() closes the dialog, flag reopens it)
