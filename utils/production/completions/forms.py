@@ -262,13 +262,13 @@ class CompletionForms:
                 submit_btn = st.form_submit_button(
                     "📦 Record Output",
                     type="primary",
-                    use_container_width=True
+                    width='stretch'
                 )
             
             with col2:
                 reset_btn = st.form_submit_button(
                     "🔄 Reset",
-                    use_container_width=True
+                    width='stretch'
                 )
         
         # Handle form submission
@@ -330,12 +330,12 @@ class CompletionForms:
         col1, col2 = st.columns(2)
         with col1:
             if st.button("📦 Record Another Output", type="primary",
-                       use_container_width=True, key="btn_another_completion"):
+                       width='stretch', key="btn_another_completion"):
                 st.session_state.pop('completion_success', None)
                 st.session_state.pop('completion_info', None)
                 st.rerun()
         with col2:
-            if st.button("📋 View Receipts", use_container_width=True, 
+            if st.button("📋 View Receipts", width='stretch', 
                        key="btn_view_receipts"):
                 st.session_state.completions_view = 'receipts'
                 st.session_state.pop('completion_success', None)
@@ -396,7 +396,7 @@ class CompletionForms:
                             'batch_no': 'Batch',
                             'quality_status': 'Quality'
                         }),
-                        use_container_width=True,
+                        width='stretch',
                         hide_index=True
                     )
     

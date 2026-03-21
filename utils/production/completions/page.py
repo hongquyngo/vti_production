@@ -101,7 +101,7 @@ def _render_header(queries: CompletionQueries):
 
 def _render_help_button():
     """Render help button that opens the full user guide dialog."""
-    if st.button("📚 Help", use_container_width=True, key="btn_help_guide"):
+    if st.button("📚 Help", width='stretch', key="btn_help_guide"):
         render_help_guide()
 
 
@@ -212,24 +212,24 @@ def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
     col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
 
     with col1:
-        if st.button("📦 Record Output", type="primary", use_container_width=True,
+        if st.button("📦 Record Output", type="primary", width='stretch',
                       key="btn_record_output"):
             st.session_state.completions_view = 'create'
             st.rerun()
 
     with col2:
-        if st.button("🔒 Close Order", use_container_width=True,
+        if st.button("🔒 Close Order", width='stretch',
                       key="btn_close_order"):
             st.session_state.completions_view = 'close_order'
             st.rerun()
 
     with col3:
-        if st.button("📊 Export Excel", use_container_width=True,
+        if st.button("📊 Export Excel", width='stretch',
                       key="btn_export_receipts"):
             _export_receipts_excel(queries, filters)
 
     with col4:
-        if st.button("🔄 Refresh", use_container_width=True,
+        if st.button("🔄 Refresh", width='stretch',
                       key="btn_refresh_completions"):
             st.rerun()
 
@@ -491,7 +491,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
             'yield_display': 'Yield',
             'warehouse_name': 'Warehouse'
         }),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         disabled=['⚠️', 'Receipt No', 'Receipt Date', 'Order Date', 'Scheduled Date', 'Order No',
                   'Product', 'Quantity', 'Batch', 'Quality', 'Yield', 'Warehouse'],
@@ -556,22 +556,22 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
 
         with col1:
             if st.button("👁️ View Details", type="primary",
-                         use_container_width=True, key="btn_view_receipt"):
+                         width='stretch', key="btn_view_receipt"):
                 show_receipt_details_dialog(selected_receipt['id'])
 
         with col2:
             if can_update_qc:
                 if st.button("✏️ Update Quality",
-                             use_container_width=True, key="btn_update_quality"):
+                             width='stretch', key="btn_update_quality"):
                     show_update_quality_dialog(selected_receipt['id'])
             else:
                 st.button("🔒 QC Locked",
-                         use_container_width=True, key="btn_update_quality",
+                         width='stretch', key="btn_update_quality",
                          disabled=True, help=qc_help)
 
         with col3:
             if st.button("📄 Export PDF",
-                         use_container_width=True, key="btn_pdf_receipt"):
+                         width='stretch', key="btn_pdf_receipt"):
                 show_pdf_dialog(selected_receipt['id'], selected_receipt['receipt_no'])
     else:
         st.info("💡 Tick checkbox to select a receipt and perform actions")
@@ -695,7 +695,7 @@ def _render_close_order_view(queries: CompletionQueries):
                     st.caption(f"Receipts: {order['receipt_count']}")
                 with col3:
                     if st.button("🔒 Close", key=f"close_order_{order['id']}",
-                                use_container_width=True):
+                                width='stretch'):
                         show_close_order_dialog(int(order['id']))
     
     # Show blocked orders

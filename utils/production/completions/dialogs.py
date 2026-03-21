@@ -100,7 +100,7 @@ def show_receipt_details_dialog(receipt_id: int):
     # Progress
     if receipt['planned_qty'] > 0:
         efficiency = calculate_percentage(receipt['produced_qty'], receipt['planned_qty'])
-        st.progress(efficiency / 100)
+        st.progress(min(efficiency / 100, 1.0))
         st.caption(f"Production Efficiency: {efficiency}%")
     
     # Notes
@@ -133,7 +133,7 @@ def show_receipt_details_dialog(receipt_id: int):
                     'uom': 'UOM',
                     'status': 'Status'
                 }),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True
             )
         else:
@@ -145,7 +145,7 @@ def show_receipt_details_dialog(receipt_id: int):
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button("📄 Export PDF", type="primary", use_container_width=True,
+        if st.button("📄 Export PDF", type="primary", width='stretch',
                     key="detail_export_pdf_btn"):
             # Set session state to open PDF dialog after rerun (avoid nested dialog)
             st.session_state['open_receipt_pdf_dialog'] = True
@@ -154,7 +154,7 @@ def show_receipt_details_dialog(receipt_id: int):
             st.rerun()
     
     with col2:
-        if st.button("✏️ Update Quality", use_container_width=True,
+        if st.button("✏️ Update Quality", width='stretch',
                     key="detail_update_quality_btn"):
             # Set session state to open quality dialog after rerun
             st.session_state['open_quality_dialog'] = True
@@ -162,7 +162,7 @@ def show_receipt_details_dialog(receipt_id: int):
             st.rerun()
     
     with col3:
-        if st.button("✖️ Close", use_container_width=True, key="detail_close_btn"):
+        if st.button("✖️ Close", width='stretch', key="detail_close_btn"):
             st.rerun()
 
 
@@ -206,7 +206,7 @@ def show_update_quality_dialog(receipt_id: int):
     if order_status == 'COMPLETED':
         st.error("🔒 **Order is COMPLETED** — all QC is locked and cannot be changed.")
         st.info(f"Receipt: {receipt['receipt_no']} | Status: {create_status_indicator(current_status)}")
-        if st.button("Close", use_container_width=True, key="qc_close_locked"):
+        if st.button("Close", width='stretch', key="qc_close_locked"):
             st.rerun()
         return
     
@@ -217,7 +217,7 @@ def show_update_quality_dialog(receipt_id: int):
             f"Only PENDING receipts can be updated."
         )
         st.info(f"Receipt: {receipt['receipt_no']} | Status: {create_status_indicator(current_status)}")
-        if st.button("Close", use_container_width=True, key="qc_close_final"):
+        if st.button("Close", width='stretch', key="qc_close_final"):
             st.rerun()
         return
     
@@ -375,7 +375,7 @@ def show_update_quality_dialog(receipt_id: int):
         elif failed_qty > 0 and not defect_type:
             st.caption("⚠️ Please select defect type")
         
-        if st.button("✅ Update QC Result", type="primary", use_container_width=True,
+        if st.button("✅ Update QC Result", type="primary", width='stretch',
                     disabled=update_disabled, key="qc_update_btn"):
             try:
                 audit_info = get_user_audit_info()
@@ -418,7 +418,7 @@ def show_update_quality_dialog(receipt_id: int):
                 logger.error(f"Quality update failed: {e}", exc_info=True)
     
     with col2:
-        if st.button("❌ Cancel", use_container_width=True, key="qc_cancel_btn"):
+        if st.button("❌ Cancel", width='stretch', key="qc_cancel_btn"):
             st.rerun()
 
 
@@ -460,7 +460,7 @@ def show_pdf_dialog(receipt_id: int, receipt_no: str):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("📥 Generate PDF", type="primary", use_container_width=True,
+        if st.button("📥 Generate PDF", type="primary", width='stretch',
                     key="generate_pdf_btn"):
             with st.spinner("Generating PDF..."):
                 try:
@@ -489,7 +489,7 @@ def show_pdf_dialog(receipt_id: int, receipt_no: str):
                     logger.error(f"PDF generation failed: {e}", exc_info=True)
     
     with col2:
-        if st.button("✖️ Cancel", use_container_width=True, key="pdf_cancel_btn"):
+        if st.button("✖️ Cancel", width='stretch', key="pdf_cancel_btn"):
             st.rerun()
 
 
@@ -574,7 +574,7 @@ def show_close_order_dialog(order_id: int):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🔒 Confirm Close", type="primary", use_container_width=True,
+        if st.button("🔒 Confirm Close", type="primary", width='stretch',
                      disabled=not can_close, key="close_order_confirm_btn"):
             try:
                 audit_info = get_user_audit_info()
@@ -598,7 +598,7 @@ def show_close_order_dialog(order_id: int):
                 logger.error(f"Close order failed: {e}", exc_info=True)
     
     with col2:
-        if st.button("Cancel", use_container_width=True, key="close_order_cancel_btn"):
+        if st.button("Cancel", width='stretch', key="close_order_cancel_btn"):
             st.rerun()
 
 
