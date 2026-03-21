@@ -28,14 +28,14 @@ import streamlit as st
 import pandas as pd
 
 from .queries import OverviewQueries
-from .dashboard import render_dashboard
+from .dashboard import render_dashboard_from_data
 from .common import (
     format_number, format_percentage, format_date, format_datetime_vn,
     format_product_display, create_status_indicator, get_health_indicator,
     get_health_color, calculate_percentage, get_vietnam_today, get_vietnam_now,
     get_date_presets, get_preset_label, export_to_excel,
     OverviewConstants, HealthStatus, calculate_days_variance, get_variance_display,
-    calculate_health_status,
+    calculate_health_status, PerformanceTimer,
     # Date type / Pivot helpers
     DateType, PeriodType, DimensionType, MeasureType,
     DATE_TYPE_LABELS, PERIOD_LABELS, DIMENSION_LABELS, MEASURE_LABELS,
@@ -48,6 +48,30 @@ from .common import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Cached Queries (per filter combo) ====================
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_metrics(_from_date, _to_date, _date_type) -> Dict[str, Any]:
+    """Cache dashboard metrics — keyed by filter params (TTL 30s)."""
+    import time as _t; _t0 = _t.perf_counter()
+    result = OverviewQueries().get_overview_metrics(_from_date, _to_date, date_type=_date_type)
+    logger.info(f"[PERF] _cached_metrics: {(_t.perf_counter() - _t0) * 1000:.0f}ms")
+    return result
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_materials_for_export(_from_date, _to_date, _status, _search, _date_type):
+    """Cache materials export data — keyed by filter params (TTL 30s)."""
+    import time as _t; _t0 = _t.perf_counter()
+    result = OverviewQueries().get_materials_for_export(
+        from_date=_from_date, to_date=_to_date, status=_status,
+        search=_search, date_type=_date_type
+    )
+    n = len(result) if result is not None else 0
+    logger.info(f"[PERF] _cached_materials_for_export: {(_t.perf_counter() - _t0) * 1000:.0f}ms ({n} rows)")
+    return result
 
 
 # ==================== Session State ====================
@@ -209,6 +233,8 @@ def _render_action_bar(queries: OverviewQueries, filters: Dict[str, Any]):
     
     with col2:
         if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_overview"):
+            _cached_metrics.clear()
+            _cached_materials_for_export.clear()
             st.rerun()
     
     with col3:
@@ -1041,13 +1067,10 @@ def _render_detail_view(queries: OverviewQueries, filters: Dict[str, Any]):
     """Render the Detail View tab (original production data table + analytics)"""
     date_type = filters.get('date_type')
     
-    # Get data for analytics + table
-    df = queries.get_materials_for_export(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        status=filters['status'],
-        search=filters['search'],
-        date_type=date_type
+    # Get data from cache (30s TTL, keyed by filter params)
+    df = _cached_materials_for_export(
+        filters['from_date'], filters['to_date'],
+        filters['status'], filters['search'], date_type
     )
     
     # Analytics section
@@ -1106,9 +1129,11 @@ def _render_detail_view(queries: OverviewQueries, filters: Dict[str, Any]):
 def render_overview_tab():
     """
     Main function to render the Production Overview tab.
-    Uses tabs for Detail View and Pivot View.
+    v6.0: Cached queries per filter combo (TTL 30s).
     """
     _init_session_state()
+    
+    perf = PerformanceTimer("render_overview_tab")
     
     queries = OverviewQueries()
     
@@ -1130,54 +1155,31 @@ def render_overview_tab():
 
 ---
 
-**📊 Pivot View Measures**
-
-*MO-level (Order / Scheduled / Completion Date):*
-| Measure | Meaning |
-|---|---|
-| **MO Count** | Number of Manufacturing Orders |
-| **Planned Qty** | Target production quantity |
-| **Produced Qty** | Total output from all receipts (**includes** PASSED + FAILED + PENDING QC) |
-| **Yield %** | Produced ÷ Planned × 100 |
-
-*Receipt-level (Receipt Date):*
-| Measure | Meaning |
-|---|---|
-| **Receipt Qty** | Total received quantity (all QC statuses) |
-| **QC Passed Qty** | Only PASSED receipts → **stocked into inventory** |
-| **QC Failed Qty** | Failed QC — **not** in inventory |
-| **QC Pending Qty** | Awaiting QC inspection |
-| **Pass Rate %** | Passed ÷ Total receipts × 100 |
-
----
-
-**⚠️ Produced Qty vs QC Passed Qty**
-- `Produced Qty` = everything produced (PASSED + FAILED + PENDING)
-- `QC Passed Qty` = only QC-approved → actual stock in
-- To see actual inventory intake, use **Receipt Date** + **QC Passed Qty**
-
----
-
 **📋 Detail View** — 1 row = 1 material issue detail (batch-level)
 **📊 Pivot View** — aggregated cross-tab by time period × dimension
 **📥 MISA Export** — aggregated by MO + material code (in Detail View → Export)
 """)
     
-    # Shared filters (Date Type, Date Range, Status, Search)
-    filters = _render_filter_bar()
+    # Shared filters
+    with perf.step("render_filters"):
+        filters = _render_filter_bar()
     
-    # Dashboard KPIs
-    render_dashboard(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        date_type=filters.get('date_type')
-    )
+    # Dashboard — cached per filter combo
+    with perf.step("render_dashboard"):
+        metrics = _cached_metrics(
+            filters['from_date'], filters['to_date'], filters.get('date_type')
+        )
+        render_dashboard_from_data(metrics, date_type=filters.get('date_type'))
     
-    # Tabs: Detail View and Pivot View
+    # Tabs
     tab_detail, tab_pivot = st.tabs(["📋 Detail View", "📊 Pivot View"])
     
     with tab_detail:
-        _render_detail_view(queries, filters)
+        with perf.step("render_detail_view"):
+            _render_detail_view(queries, filters)
     
     with tab_pivot:
-        _render_pivot_view(queries, filters)
+        with perf.step("render_pivot_view"):
+            _render_pivot_view(queries, filters)
+    
+    perf.summary()

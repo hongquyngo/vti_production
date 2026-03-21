@@ -8,7 +8,7 @@ Version: 1.0.0
 
 from .page import render_overview_tab
 from .queries import OverviewQueries
-from .dashboard import render_dashboard, OverviewDashboard
+from .dashboard import render_dashboard, render_dashboard_from_data
 from .common import (
     OverviewConstants,
     HealthStatus,
@@ -33,7 +33,8 @@ __all__ = [
     'render_overview_tab',
     'OverviewQueries',
     'render_dashboard',
-    'OverviewDashboard',
+    'render_dashboard_from_data',
+    
     'OverviewConstants',
     'HealthStatus',
     'DateType',

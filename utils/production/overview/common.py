@@ -17,6 +17,8 @@ Changes:
 """
 
 import logging
+import time as _time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Tuple, Union, Optional, List, Any
@@ -49,6 +51,28 @@ except ImportError:
         logging.warning("No timezone library available. Using system timezone.")
 
 logger = logging.getLogger(__name__)
+
+
+class PerformanceTimer:
+    """Lightweight timer."""
+    _enabled = True
+    def __init__(self, name): self.name = name; self.steps = []; self._start = _time.perf_counter()
+    @contextmanager
+    def step(self, label, tag=""):
+        if not self._enabled: yield; return
+        t0 = _time.perf_counter(); yield; ms = (_time.perf_counter() - t0) * 1000
+        self.steps.append((label, ms, tag))
+        if ms > 200: logger.warning(f"[PERF] SLOW: {label} = {ms:.0f}ms {tag}")
+    def summary(self):
+        if not self._enabled or not self.steps: return
+        total_ms = (_time.perf_counter() - self._start) * 1000
+        lines = [f"\n[PERF] === {self.name} ==="]
+        for i, (l, ms, t) in enumerate(self.steps):
+            p = "+-" if i < len(self.steps) - 1 else "\\-"
+            s = " SLOW" if ms > 500 else "" if ms <= 200 else " slow"
+            lines.append(f"[PERF]   {p} {l}: {ms:.0f}ms{s}" + (f" ({t})" if t else ""))
+        lines.append(f"[PERF] === Total: {total_ms:.0f}ms ===\n")
+        logger.info("\n".join(lines))
 
 
 # ==================== Constants ====================
