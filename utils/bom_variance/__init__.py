@@ -28,6 +28,8 @@ from .config import (
     MATERIAL_TYPES, 
     BOM_TYPES, 
     VARIANCE_DIRECTIONS,
+    MO_STATUS_OPTIONS,
+    MO_STATUS_DEFAULT,
     init_session_state,
     get_config,
     clear_data_cache,
@@ -56,6 +58,8 @@ __all__ = [
     'MATERIAL_TYPES',
     'BOM_TYPES',
     'VARIANCE_DIRECTIONS',
+    'MO_STATUS_OPTIONS',
+    'MO_STATUS_DEFAULT',
     
     # Session state helpers
     'init_session_state',

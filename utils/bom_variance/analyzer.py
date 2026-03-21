@@ -58,7 +58,8 @@ class VarianceAnalyzer:
             date_from=self.config.date_from,
             date_to=self.config.date_to,
             min_mo_count=self.config.min_mo_count,
-            variance_threshold=self.config.variance_threshold
+            variance_threshold=self.config.variance_threshold,
+            mo_statuses=self.config.mo_statuses
         )
     
     def get_variance_data(
@@ -81,7 +82,8 @@ class VarianceAnalyzer:
             date_from=self.config.date_from,
             date_to=self.config.date_to,
             min_mo_count=self.config.min_mo_count,
-            variance_threshold=self.config.variance_threshold
+            variance_threshold=self.config.variance_threshold,
+            mo_statuses=self.config.mo_statuses
         )
         
         if not include_no_data and not df.empty:
@@ -104,7 +106,8 @@ class VarianceAnalyzer:
             date_to=self.config.date_to,
             min_mo_count=self.config.min_mo_count,
             variance_threshold=self.config.variance_threshold,
-            limit=limit
+            limit=limit,
+            mo_statuses=self.config.mo_statuses
         )
     
     def get_bom_list(self) -> pd.DataFrame:
@@ -117,7 +120,8 @@ class VarianceAnalyzer:
         return self.queries.get_bom_list_for_analysis(
             date_from=self.config.date_from,
             date_to=self.config.date_to,
-            min_mo_count=self.config.min_mo_count
+            min_mo_count=self.config.min_mo_count,
+            mo_statuses=self.config.mo_statuses
         )
     
     # ==================== Variance Distribution ====================

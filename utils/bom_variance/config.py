@@ -23,6 +23,10 @@ MATERIAL_TYPES = ['RAW_MATERIAL', 'PACKAGING', 'CONSUMABLE']
 BOM_TYPES = ['CUTTING', 'KITTING', 'REPACKING']
 VARIANCE_DIRECTIONS = ['All', 'Under-used', 'On-target', 'Over-used', 'High Variance']
 
+# MO statuses available for variance analysis
+MO_STATUS_OPTIONS = ['COMPLETED', 'IN_PROGRESS', 'CONFIRMED']
+MO_STATUS_DEFAULT = ['COMPLETED']
+
 
 # ==================== Enums ====================
 
@@ -62,6 +66,7 @@ class VarianceConfig:
     date_from: Optional[date] = None
     date_to: Optional[date] = None
     default_months: int = 3
+    mo_statuses: Optional[List[str]] = None
     
     def __post_init__(self):
         """Set default date range if not provided"""
@@ -70,6 +75,9 @@ class VarianceConfig:
         
         if self.date_from is None:
             self.date_from = self.date_to - timedelta(days=self.default_months * 30)
+        
+        if self.mo_statuses is None:
+            self.mo_statuses = list(MO_STATUS_DEFAULT)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary"""
@@ -80,7 +88,8 @@ class VarianceConfig:
             'cv_threshold': self.cv_threshold,
             'date_from': self.date_from,
             'date_to': self.date_to,
-            'default_months': self.default_months
+            'default_months': self.default_months,
+            'mo_statuses': self.mo_statuses
         }
     
     @classmethod
@@ -93,7 +102,8 @@ class VarianceConfig:
             cv_threshold=data.get('cv_threshold', 15.0),
             date_from=data.get('date_from'),
             date_to=data.get('date_to'),
-            default_months=data.get('default_months', 3)
+            default_months=data.get('default_months', 3),
+            mo_statuses=data.get('mo_statuses', list(MO_STATUS_DEFAULT))
         )
 
 

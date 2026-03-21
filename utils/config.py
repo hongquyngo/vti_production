@@ -42,7 +42,14 @@ class Config:
         import streamlit as st
         
         # Database configuration
-        self.db_config = dict(st.secrets["DB_CONFIG"])
+        db_secrets = dict(st.secrets["DB_CONFIG"])
+        self.db_config = {
+            "host": db_secrets.get("host"),
+            "port": int(db_secrets.get("port", 3306)),
+            "user": db_secrets.get("user"),
+            "password": db_secrets.get("password"),
+            "database": db_secrets.get("database", "vietape")
+        }
         
         # API Keys
         self.api_keys = {
@@ -52,16 +59,18 @@ class Config:
         # Google Cloud Service Account
         self.google_service_account = dict(st.secrets.get("gcp_service_account", {}))
         
-        # Email configuration - Support multiple accounts
+        # Email configuration - Single ERP email account
         email_config = st.secrets.get("EMAIL", {})
+        erp_sender = email_config.get("ERP_EMAIL_SENDER")
+        erp_password = email_config.get("ERP_EMAIL_PASSWORD")
         self.email_config = {
             "inbound": {
-                "sender": email_config.get("INBOUND_EMAIL_SENDER"),
-                "password": email_config.get("INBOUND_EMAIL_PASSWORD")
+                "sender": erp_sender,
+                "password": erp_password
             },
             "outbound": {
-                "sender": email_config.get("OUTBOUND_EMAIL_SENDER"),
-                "password": email_config.get("OUTBOUND_EMAIL_PASSWORD")
+                "sender": erp_sender,
+                "password": erp_password
             },
             "smtp": {
                 "host": email_config.get("SMTP_HOST", "smtp.gmail.com"),
@@ -93,7 +102,7 @@ class Config:
             "port": int(os.getenv("DB_PORT", "3306")),
             "user": os.getenv("DB_USER"),
             "password": os.getenv("DB_PASSWORD"),
-            "database": os.getenv("DB_NAME", os.getenv("DB_DATABASE", "prostechvn"))
+            "database": os.getenv("DB_NAME", "vietape")
         }
         
         # Validate required DB config
@@ -115,15 +124,17 @@ class Config:
             except Exception as e:
                 logger.warning(f"Could not load Google credentials from {credentials_path}: {e}")
         
-        # Email configuration - Support multiple accounts
+        # Email configuration - Single ERP email account
+        erp_sender = os.getenv("ERP_EMAIL_SENDER")
+        erp_password = os.getenv("ERP_EMAIL_PASSWORD")
         self.email_config = {
             "inbound": {
-                "sender": os.getenv("INBOUND_EMAIL_SENDER"),
-                "password": os.getenv("INBOUND_EMAIL_PASSWORD")
+                "sender": erp_sender,
+                "password": erp_password
             },
             "outbound": {
-                "sender": os.getenv("OUTBOUND_EMAIL_SENDER"),
-                "password": os.getenv("OUTBOUND_EMAIL_PASSWORD")
+                "sender": erp_sender,
+                "password": erp_password
             },
             "smtp": {
                 "host": os.getenv("SMTP_HOST", "smtp.gmail.com"),
@@ -177,8 +188,7 @@ class Config:
         logger.info(f"✅ Google Service Account: {'Loaded' if self.google_service_account else 'Missing'}")
         logger.info(f"✅ AWS S3 Bucket: {self.aws_config.get('bucket_name', 'Not configured')}")
         logger.info(f"✅ AWS Access Key: {'Configured' if self.aws_config.get('access_key_id') else 'Missing'}")
-        logger.info(f"✅ Inbound Email: {self.email_config['inbound']['sender'] or 'Not configured'}")
-        logger.info(f"✅ Outbound Email: {self.email_config['outbound']['sender'] or 'Not configured'}")
+        logger.info(f"✅ ERP Email: {self.email_config['outbound']['sender'] or 'Not configured'}")
         
     def get_db_config(self) -> Dict[str, Any]:
         """Get database configuration"""
@@ -224,9 +234,10 @@ EXCHANGE_RATE_API_KEY = config.api_keys.get("exchange_rate")
 GOOGLE_SERVICE_ACCOUNT_JSON = config.google_service_account
 APP_CONFIG = config.app_config
 
-# Module-specific email configs
+# Module-specific email configs (both point to same ERP email)
 INBOUND_EMAIL_CONFIG = config.get_email_config("inbound")
 OUTBOUND_EMAIL_CONFIG = config.get_email_config("outbound")
+ERP_EMAIL_CONFIG = config.get_email_config("outbound")
 
 # For backward compatibility - single email config
 EMAIL_SENDER = config.email_config.get("outbound", {}).get("sender")
@@ -245,6 +256,7 @@ __all__ = [
     'APP_CONFIG',
     'EMAIL_SENDER',
     'EMAIL_PASSWORD',
+    'ERP_EMAIL_CONFIG',
     'INBOUND_EMAIL_CONFIG',
     'OUTBOUND_EMAIL_CONFIG'
 ]

@@ -404,7 +404,8 @@ def render_consumption_trend_chart(
             bom_id=bom_id,
             material_id=material_id,
             date_from=config.date_from,
-            date_to=config.date_to
+            date_to=config.date_to,
+            mo_statuses=config.mo_statuses
         )
     except Exception as e:
         st.error(f"Error loading MO data: {e}")
@@ -494,7 +495,8 @@ def render_consumption_distribution_chart(
             bom_id=bom_id,
             material_id=material_id,
             date_from=config.date_from,
-            date_to=config.date_to
+            date_to=config.date_to,
+            mo_statuses=config.mo_statuses
         )
     except Exception as e:
         st.error(f"Error loading MO data: {e}")
@@ -620,7 +622,8 @@ def render_mo_history_table(bom_id: int, material_id: int, analyzer):
                 bom_id=bom_id,
                 material_id=material_id,
                 date_from=config.date_from,
-                date_to=config.date_to
+                date_to=config.date_to,
+                mo_statuses=config.mo_statuses
             )
         except Exception as e:
             st.error(f"Error loading MO history: {e}")

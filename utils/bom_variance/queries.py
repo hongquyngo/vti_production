@@ -52,6 +52,34 @@ class VarianceQueries:
     def __init__(self):
         self.engine = get_db_engine()
     
+    @staticmethod
+    def _build_status_clause(
+        mo_statuses: Optional[List[str]],
+        params: dict,
+        prefix: str = 'mo_status'
+    ) -> str:
+        """
+        Build SQL IN clause for MO status filter
+        
+        Args:
+            mo_statuses: List of statuses, defaults to ['COMPLETED'] if None/empty
+            params: Query params dict (will be mutated to add status params)
+            prefix: Param name prefix to avoid collisions
+            
+        Returns:
+            SQL fragment like "(:mo_status_0, :mo_status_1)"
+        """
+        if not mo_statuses:
+            mo_statuses = ['COMPLETED']
+        
+        placeholders = []
+        for i, status in enumerate(mo_statuses):
+            key = f'{prefix}_{i}'
+            placeholders.append(f':{key}')
+            params[key] = status
+        
+        return f"({', '.join(placeholders)})"
+    
     # ==================== Actual Consumption Queries ====================
     
     def get_mo_consumption_summary(
@@ -59,7 +87,8 @@ class VarianceQueries:
         bom_id: Optional[int] = None,
         date_from: Optional[date] = None,
         date_to: Optional[date] = None,
-        min_mo_count: int = 1
+        min_mo_count: int = 1,
+        mo_statuses: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         Get aggregated actual consumption per BOM per Material
@@ -82,7 +111,11 @@ class VarianceQueries:
             - mo_count, total_produced, total_consumed
             - avg_per_unit, stddev_per_unit, cv_percent (coefficient of variation)
         """
-        query = """
+        params = {}
+        status_clause = self._build_status_clause(mo_statuses, params, 'mos1')
+        status_clause2 = self._build_status_clause(mo_statuses, params, 'mos2')
+        
+        query = f"""
             WITH 
             -- Get actual issued quantities
             issued_data AS (
@@ -95,7 +128,7 @@ class VarianceQueries:
                 FROM manufacturing_orders mo
                 JOIN material_issues mi ON mo.id = mi.manufacturing_order_id
                 JOIN material_issue_details mid ON mi.id = mid.material_issue_id
-                WHERE mo.status = 'COMPLETED' 
+                WHERE mo.status IN {status_clause}
                   AND mo.delete_flag = 0
                   AND mi.status = 'CONFIRMED'
                 GROUP BY mo.id, mo.bom_header_id, mid.material_id, mid.is_alternative
@@ -109,7 +142,7 @@ class VarianceQueries:
                 FROM manufacturing_orders mo
                 JOIN material_returns mr ON mo.id = mr.manufacturing_order_id
                 JOIN material_return_details mrd ON mr.id = mrd.material_return_id
-                WHERE mo.status = 'COMPLETED'
+                WHERE mo.status IN {status_clause2}
                   AND mo.delete_flag = 0
                   AND mr.status = 'CONFIRMED'
                 GROUP BY mo.id, mrd.material_id
@@ -169,8 +202,6 @@ class VarianceQueries:
             WHERE bh.delete_flag = 0
         """
         
-        params = {}
-        
         if bom_id:
             query += " AND mc.bom_header_id = :bom_id"
             params['bom_id'] = int(bom_id)
@@ -220,7 +251,8 @@ class VarianceQueries:
         bom_id: int,
         material_id: Optional[int] = None,
         date_from: Optional[date] = None,
-        date_to: Optional[date] = None
+        date_to: Optional[date] = None,
+        mo_statuses: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         Get detailed consumption per MO for a specific BOM
@@ -235,7 +267,12 @@ class VarianceQueries:
         Returns:
             DataFrame with per-MO consumption data
         """
-        query = """
+        params = {'bom_id': int(bom_id)}
+        status_clause = self._build_status_clause(mo_statuses, params, 'mos1')
+        status_clause2 = self._build_status_clause(mo_statuses, params, 'mos2')
+        status_clause3 = self._build_status_clause(mo_statuses, params, 'mos3')
+        
+        query = f"""
             WITH 
             -- Get actual issued quantities per MO per material
             issued_data AS (
@@ -248,7 +285,7 @@ class VarianceQueries:
                 JOIN material_issues mi ON mo.id = mi.manufacturing_order_id
                 JOIN material_issue_details mid ON mi.id = mid.material_issue_id
                 WHERE mo.bom_header_id = :bom_id
-                  AND mo.status = 'COMPLETED'
+                  AND mo.status IN {status_clause}
                   AND mo.delete_flag = 0
                   AND mi.status = 'CONFIRMED'
                 GROUP BY mo.id, mid.material_id, mid.is_alternative
@@ -263,7 +300,7 @@ class VarianceQueries:
                 JOIN material_returns mr ON mo.id = mr.manufacturing_order_id
                 JOIN material_return_details mrd ON mr.id = mrd.material_return_id
                 WHERE mo.bom_header_id = :bom_id
-                  AND mo.status = 'COMPLETED'
+                  AND mo.status IN {status_clause2}
                   AND mo.delete_flag = 0
                   AND mr.status = 'CONFIRMED'
                 GROUP BY mo.id, mrd.material_id
@@ -302,12 +339,10 @@ class VarianceQueries:
             LEFT JOIN returned_data r ON mo.id = r.mo_id AND i.material_id = r.material_id
             LEFT JOIN production_data pr ON mo.id = pr.mo_id
             WHERE mo.bom_header_id = :bom_id
-              AND mo.status = 'COMPLETED'
+              AND mo.status IN {status_clause3}
               AND mo.delete_flag = 0
               AND COALESCE(pr.passed_qty, 0) > 0
         """
-        
-        params = {'bom_id': int(bom_id)}
         
         if material_id:
             query += " AND i.material_id = :material_id"
@@ -335,7 +370,8 @@ class VarianceQueries:
         self,
         bom_id: Optional[int] = None,
         date_from: Optional[date] = None,
-        date_to: Optional[date] = None
+        date_to: Optional[date] = None,
+        mo_statuses: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         Get summary of alternative material usage
@@ -346,7 +382,10 @@ class VarianceQueries:
         Returns:
             DataFrame with alternative usage statistics
         """
-        query = """
+        params = {}
+        status_clause = self._build_status_clause(mo_statuses, params, 'mos1')
+        
+        query = f"""
             SELECT 
                 mo.bom_header_id,
                 bh.bom_code,
@@ -373,12 +412,10 @@ class VarianceQueries:
                 AND bd.material_id = mom.material_id
             LEFT JOIN bom_material_alternatives bma ON bma.bom_detail_id = bd.id
                 AND bma.alternative_material_id = mid.material_id
-            WHERE mo.status = 'COMPLETED'
+            WHERE mo.status IN {status_clause}
               AND mo.delete_flag = 0
               AND mi.status = 'CONFIRMED'
         """
-        
-        params = {}
         
         if bom_id:
             query += " AND mo.bom_header_id = :bom_id"
@@ -484,7 +521,8 @@ class VarianceQueries:
         date_from: Optional[date] = None,
         date_to: Optional[date] = None,
         min_mo_count: int = 3,
-        variance_threshold: float = 5.0
+        variance_threshold: float = 5.0,
+        mo_statuses: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         Get comprehensive variance comparison: BOM theoretical vs actual consumption
@@ -504,7 +542,8 @@ class VarianceQueries:
             date_from: Start date for actual data
             date_to: End date for actual data
             min_mo_count: Minimum MOs required for reliable statistics
-            variance_threshold: Flag items with variance above this % 
+            variance_threshold: Flag items with variance above this %
+            mo_statuses: List of MO statuses to include (default: ['COMPLETED'])
             
         Returns:
             DataFrame with variance analysis including:
@@ -514,7 +553,11 @@ class VarianceQueries:
             - Mixed MO stats (mo_count_mixed, avg consumption in mixed)
             - Flags (has_high_variance, has_mixed_usage)
         """
-        query = """
+        params = {'min_mo_count': min_mo_count}
+        status_clause = self._build_status_clause(mo_statuses, params, 'mos1')
+        status_clause2 = self._build_status_clause(mo_statuses, params, 'mos2')
+        
+        query = f"""
             WITH 
             -- Step 1: Get actual issued quantities from material_issue_details
             issued_data AS (
@@ -530,7 +573,7 @@ class VarianceQueries:
                 JOIN material_issues mi ON mo.id = mi.manufacturing_order_id
                 JOIN material_issue_details mid ON mi.id = mid.material_issue_id
                 JOIN manufacturing_order_materials mom ON mid.manufacturing_order_material_id = mom.id
-                WHERE mo.status = 'COMPLETED' 
+                WHERE mo.status IN {status_clause}
                   AND mo.delete_flag = 0
                   AND mi.status = 'CONFIRMED'
                 GROUP BY mo.id, mo.bom_header_id, mo.completion_date, 
@@ -546,7 +589,7 @@ class VarianceQueries:
                 FROM manufacturing_orders mo
                 JOIN material_returns mr ON mo.id = mr.manufacturing_order_id
                 JOIN material_return_details mrd ON mr.id = mrd.material_return_id
-                WHERE mo.status = 'COMPLETED'
+                WHERE mo.status IN {status_clause2}
                   AND mo.delete_flag = 0
                   AND mr.status = 'CONFIRMED'
                 GROUP BY mo.id, mrd.material_id
@@ -635,8 +678,6 @@ class VarianceQueries:
                 WHERE (is_alternative = 0 AND usage_mode = 'PRIMARY_ONLY')
                    OR (is_alternative = 1 AND usage_mode = 'ALTERNATIVE_ONLY')
         """
-        
-        params = {'min_mo_count': min_mo_count}
         
         # Date filters for pure_stats
         if bom_id:
@@ -896,7 +937,8 @@ class VarianceQueries:
         date_from: Optional[date] = None,
         date_to: Optional[date] = None,
         min_mo_count: int = 3,
-        variance_threshold: float = 5.0
+        variance_threshold: float = 5.0,
+        mo_statuses: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         Get summary statistics for dashboard metrics
@@ -909,7 +951,8 @@ class VarianceQueries:
             date_from=date_from,
             date_to=date_to,
             min_mo_count=min_mo_count,
-            variance_threshold=variance_threshold
+            variance_threshold=variance_threshold,
+            mo_statuses=mo_statuses
         )
         
         if variance_df.empty:
@@ -959,7 +1002,8 @@ class VarianceQueries:
         date_to: Optional[date] = None,
         min_mo_count: int = 3,
         variance_threshold: float = 5.0,
-        limit: int = 10
+        limit: int = 10,
+        mo_statuses: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         Get top N materials with highest variance for quick review
@@ -971,7 +1015,8 @@ class VarianceQueries:
             date_from=date_from,
             date_to=date_to,
             min_mo_count=min_mo_count,
-            variance_threshold=variance_threshold
+            variance_threshold=variance_threshold,
+            mo_statuses=mo_statuses
         )
         
         if variance_df.empty:
@@ -992,15 +1037,19 @@ class VarianceQueries:
         self,
         date_from: Optional[date] = None,
         date_to: Optional[date] = None,
-        min_mo_count: int = 1
+        min_mo_count: int = 1,
+        mo_statuses: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
-        Get list of BOMs that have completed MOs for analysis
+        Get list of BOMs that have MOs matching selected statuses for analysis
         
         Returns:
             DataFrame with BOM list and MO counts
         """
-        query = """
+        params = {'min_mo_count': min_mo_count}
+        status_clause = self._build_status_clause(mo_statuses, params, 'mos1')
+        
+        query = f"""
             SELECT 
                 bh.id as bom_header_id,
                 bh.bom_code,
@@ -1023,12 +1072,10 @@ class VarianceQueries:
                 FROM production_receipts
                 GROUP BY manufacturing_order_id
             ) pr ON mo.id = pr.manufacturing_order_id
-            WHERE mo.status = 'COMPLETED'
+            WHERE mo.status IN {status_clause}
               AND mo.delete_flag = 0
               AND bh.delete_flag = 0
         """
-        
-        params = {'min_mo_count': min_mo_count}
         
         if date_from:
             query += " AND mo.completion_date >= :date_from"

@@ -21,7 +21,8 @@ from typing import Dict, Any, List, Optional
 
 from .config import (
     MATERIAL_TYPES, BOM_TYPES, VARIANCE_DIRECTIONS,
-    get_config, reset_filters,
+    MO_STATUS_OPTIONS, MO_STATUS_DEFAULT,
+    get_config, reset_filters, clear_data_cache,
     format_product_display, format_bom_display, format_variance_display,
     format_bom_display_full, create_bom_options_from_df,
     extract_code_from_option, extract_bom_code_from_option
@@ -409,105 +410,105 @@ def render_filters_section(full_data: pd.DataFrame):
     filter_label = f"🔍 Filters ({active_filters} active)" if active_filters > 0 else "🔍 Filters"
     
     with st.expander(filter_label, expanded=st.session_state['filters_expanded']):
-        # Row 1: Category Filters
-        st.markdown("##### Category Filters")
-        col1, col2, col3 = st.columns([1, 1, 1.5])
+        
+        # ── Row 1: Category Filters (4 columns, compact) ──
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
         
         with col1:
-            # Material Type multiselect with counts
             material_options = [
                 f"{t} ({counts['material_types'].get(t, 0)})" 
                 for t in MATERIAL_TYPES
             ]
-            
-            current_material_types = st.session_state['filter_material_types']
             current_material_values = [
                 f"{t} ({counts['material_types'].get(t, 0)})" 
-                for t in current_material_types
+                for t in st.session_state['filter_material_types']
                 if t in MATERIAL_TYPES
             ]
-            
             selected_materials = st.multiselect(
                 "Material Type",
                 options=material_options,
                 default=current_material_values,
                 key="ms_material_type",
-                placeholder="All material types",
-                help="Filter by material type"
+                placeholder="All material types"
             )
-            
             st.session_state['filter_material_types'] = [
                 opt.split(' (')[0] for opt in selected_materials
             ]
         
         with col2:
-            # BOM Type multiselect with counts
             bom_type_options = [
                 f"{t} ({counts['bom_types'].get(t, 0)})" 
                 for t in BOM_TYPES
             ]
-            
-            current_bom_types = st.session_state['filter_bom_types']
             current_bom_type_values = [
                 f"{t} ({counts['bom_types'].get(t, 0)})" 
-                for t in current_bom_types
+                for t in st.session_state['filter_bom_types']
                 if t in BOM_TYPES
             ]
-            
             selected_bom_types = st.multiselect(
                 "BOM Type",
                 options=bom_type_options,
                 default=current_bom_type_values,
                 key="ms_bom_type",
-                placeholder="All BOM types",
-                help="Filter by BOM type"
+                placeholder="All BOM types"
             )
-            
             st.session_state['filter_bom_types'] = [
                 opt.split(' (')[0] for opt in selected_bom_types
             ]
         
         with col3:
-            # Variance Direction radio with counts
             direction_options = [
                 f"{d} ({counts['variance_directions'].get(d, 0)})"
                 for d in VARIANCE_DIRECTIONS
             ]
-            
             current_direction = st.session_state['filter_variance_direction']
             current_idx = VARIANCE_DIRECTIONS.index(current_direction) if current_direction in VARIANCE_DIRECTIONS else 0
             
-            selected_direction = st.radio(
+            selected_direction = st.selectbox(
                 "Variance Direction",
                 options=direction_options,
                 index=current_idx,
-                key="radio_variance_direction",
-                horizontal=True,
-                help=f"Based on threshold: ±{threshold}%"
+                key="sel_variance_direction",
+                help=f"Threshold: ±{threshold}%"
             )
-            
             st.session_state['filter_variance_direction'] = selected_direction.split(' (')[0]
         
-        st.markdown("---")
-        
-        # Row 2: Entity Filters
-        st.markdown(f"##### Entity Filters ({counts['entities']['products']} products, {counts['entities']['boms']} BOMs, {counts['entities']['materials']} materials)")
-        col4, col5 = st.columns(2)
-        
         with col4:
+            # MO Status config
+            current_mo_statuses = config.mo_statuses or list(MO_STATUS_DEFAULT)
+            selected_mo_statuses = st.multiselect(
+                "MO Status",
+                options=MO_STATUS_OPTIONS,
+                default=current_mo_statuses,
+                key="ms_mo_status",
+                help="Which MO statuses to include in analysis. Default: COMPLETED only."
+            )
+            # Update config if changed
+            if selected_mo_statuses and set(selected_mo_statuses) != set(current_mo_statuses):
+                config.mo_statuses = selected_mo_statuses
+                clear_data_cache()  # Force reload from DB with new statuses
+        
+        # ── Row 2: Entity Filters (3 columns) ──
+        st.markdown(
+            f"<div style='font-size:0.85em; color:#888; margin: 4px 0 2px 0;'>"
+            f"{counts['entities']['products']} products · {counts['entities']['boms']} BOMs · {counts['entities']['materials']} materials"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+        col5, col6, col7 = st.columns(3)
+        
+        with col5:
             product_options = create_product_options(filter_options['products'])
-            
             selected_products = st.multiselect(
                 "Output Product",
                 options=product_options,
                 default=st.session_state['filter_products'],
                 key="ms_products",
-                placeholder="Search products by code, name, brand...",
-                help="Filter by output product (cascades to BOM filter)"
+                placeholder="Search products..."
             )
             st.session_state['filter_products'] = selected_products
         
-        with col5:
+        with col6:
             selected_product_codes = [extract_code_from_option(p) for p in selected_products]
             cascaded_boms = get_cascaded_bom_options(full_data, selected_product_codes)
             bom_options, bom_code_map = create_bom_options(cascaded_boms)
@@ -520,52 +521,39 @@ def render_filters_section(full_data: pd.DataFrame):
                 options=bom_options,
                 default=valid_bom_selections,
                 key="ms_boms",
-                placeholder="Search BOMs by code, name...",
-                help="Filter by specific BOM" + (" (filtered by selected products)" if selected_products else "")
+                placeholder="Search BOMs..." + (" (filtered)" if selected_products else "")
             )
             st.session_state['filter_boms'] = selected_boms
         
-        # Row 3: Material Filter
-        col6, col7 = st.columns([2, 1])
-        
-        with col6:
+        with col7:
             material_options = create_material_options(filter_options['materials'])
-            
             selected_mat = st.multiselect(
                 "Material",
                 options=material_options,
                 default=st.session_state['filter_materials'],
                 key="ms_materials",
-                placeholder="Search materials by code, name, brand...",
-                help="Filter by specific material"
+                placeholder="Search materials..."
             )
             st.session_state['filter_materials'] = selected_mat
         
-        with col7:
-            st.markdown("<br>", unsafe_allow_html=True)
-            qf_col1, qf_col2 = st.columns(2)
-            
-            with qf_col1:
-                high_var = st.toggle(
-                    "🔴 High Variance",
-                    value=st.session_state['filter_high_variance_only'],
-                    key="toggle_high_var",
-                    help="Show only high variance items"
-                )
-                st.session_state['filter_high_variance_only'] = high_var
-            
-            with qf_col2:
-                zero_actual = st.toggle(
-                    "⚠️ Zero Actual",
-                    value=st.session_state['filter_zero_actual_only'],
-                    key="toggle_zero_actual",
-                    help="Show only items with zero actual consumption"
-                )
-                st.session_state['filter_zero_actual_only'] = zero_actual
+        # ── Row 3: Quick toggles + Action buttons (single row) ──
+        t_col1, t_col2, spacer, btn_col1, btn_col2 = st.columns([0.8, 0.8, 0.4, 1, 1])
         
-        # Action Buttons Row
-        st.markdown("---")
-        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
+        with t_col1:
+            high_var = st.toggle(
+                "🔴 High Variance",
+                value=st.session_state['filter_high_variance_only'],
+                key="toggle_high_var"
+            )
+            st.session_state['filter_high_variance_only'] = high_var
+        
+        with t_col2:
+            zero_actual = st.toggle(
+                "⚠️ Zero Actual",
+                value=st.session_state['filter_zero_actual_only'],
+                key="toggle_zero_actual"
+            )
+            st.session_state['filter_zero_actual_only'] = zero_actual
         
         with btn_col1:
             if st.button("🔄 Reset All", use_container_width=True, help="Reset all filters to default"):
