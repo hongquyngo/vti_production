@@ -1,22 +1,20 @@
 # utils/production/completions/page.py
 """
 Main UI orchestrator for Completions domain
-Renders the Completions tab with dashboard, completion form, and receipts list
+Renders the Completions tab with unified metrics, filters, and receipts list
 
-Version: 2.1.0
+Version: 3.0.0
 Changes:
+- v3.0.0: Layout redesign — removed duplicate metrics & quality breakdowns
+  - Removed separate dashboard section (all-time metrics not actionable)
+  - Removed 2x Quality Breakdown expanders (redundant)
+  - Added get_live_stats() for header badges (In Progress + Today)
+  - Added get_filtered_stats() for accurate metrics across ALL filtered data
+  - Single unified metrics row: count, qty, passed, pending, failed, yield
+  - Table visible without scrolling (~240px overhead vs ~600px before)
 - v2.1.0: Post-validation warnings in Receipts List table
-  - Added ⚠️ Alerts column: 🔁 duplicate batch, 📅 expired, 📈 overproduction, ⏳ pending QC
-  - Warning summary bar above table when issues found
-  - Bulk duplicate batch check via single DB query per page load
-- v2.0.0: Help → popover (no full page rerun), @st.fragment for receipts section
-  - Removed full-page Help view, replaced with st.popover in action bar
-  - Wrapped filters + action bar + receipts list in @st.fragment
-  - Pagination & row selection use st.rerun(scope="fragment") instead of full rerun
-  - Dashboard renders once, unaffected by filter/select/pagination interactions
-- v1.3.0: Added Scheduled Date column (ngày dự kiến hoàn thành sản xuất)
-- v1.2.0: Improved product display, Added Order Date column
-- v1.1.0: Added Help section with validation rules and calculation formulas
+- v2.0.0: Help → popover, @st.fragment for receipts section
+- v1.3.0: Added Scheduled Date column
 
 Requires: Streamlit >= 1.37 (for @st.fragment and st.rerun(scope=...))
 """
@@ -28,7 +26,6 @@ import streamlit as st
 import pandas as pd
 
 from .queries import CompletionQueries
-from .dashboard import render_dashboard
 from .forms import render_completion_form
 from .dialogs import (
     show_receipt_details_dialog, show_update_quality_dialog,
@@ -59,12 +56,7 @@ def _init_session_state():
 # ==================== Helper Functions ====================
 
 def _format_product_display_row(row) -> str:
-    """
-    Format product display for DataFrame row.
-    Wrapper around common.format_product_display() for apply() usage.
-
-    Format: PT_CODE (LEGACY|NEW) | NAME | PKG_SIZE (BRAND)
-    """
+    """Format product display for DataFrame row (apply() usage)"""
     return format_product_display(row.to_dict() if hasattr(row, 'to_dict') else dict(row))
 
 
@@ -72,7 +64,6 @@ def _format_date_display(dt, fmt: str = '%d-%b-%Y') -> str:
     """Format date for display"""
     if pd.isna(dt) or dt is None:
         return ''
-
     try:
         if isinstance(dt, str):
             from datetime import datetime
@@ -82,18 +73,40 @@ def _format_date_display(dt, fmt: str = '%d-%b-%Y') -> str:
         return str(dt)[:10] if dt else ''
 
 
+# ==================== Header ====================
+
+def _render_header(queries: CompletionQueries):
+    """
+    Page header with title and live operational stats.
+    Renders ONCE outside fragment — not affected by filter/pagination.
+    Shows real-time KPIs: In Progress orders + Today's receipts.
+    """
+    stats = queries.get_live_stats()
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.subheader("✅ Production Completions")
+    with col2:
+        st.markdown(
+            f"<div style='text-align:right; padding-top:10px; font-size:0.9em;'>"
+            f"🔄 <b>{stats['in_progress']}</b> in progress &nbsp;·&nbsp; "
+            f"📅 <b>{stats['today_count']}</b> today"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+
 # ==================== Help Popover ====================
 
 def _render_help_popover():
     """
     Render full help as st.popover — no page rerun needed.
-    Contains all original help content: validation rules, formulas,
-    quality flow, inventory impact, alerts, and terminology.
+    Contains validation rules, formulas, quality flow,
+    inventory impact, alerts, and terminology.
     """
     with st.popover("❓ Help", use_container_width=True):
         st.markdown("### 📚 Production Completion Help")
 
-        # ── 1. Validation Rules ──
         st.markdown("#### 🔒 Validation Rules")
         st.markdown("Để hoàn thành (complete) một Production Order:")
         st.markdown("""\
@@ -109,21 +122,18 @@ def _render_help_popover():
 
         st.markdown("""\
 > 💡 **Raw Materials:** Chỉ kiểm tra `RAW_MATERIAL` (hoặc NULL).  
-> PACKAGING & CONSUMABLE không bắt buộc.  
-> Cho phép issue thiếu/thừa (sai số cân đo, hao hụt, điều chỉnh công thức).\
+> PACKAGING & CONSUMABLE không bắt buộc.\
 """)
 
         st.markdown("---")
 
-        # ── 2. Alert Warnings (⚠️ column) ──
         st.markdown("#### ⚠️ Alert Warnings")
-        st.markdown("Cột ⚠️ trong bảng Receipts hiển thị cảnh báo tự động:")
         st.markdown("""\
 | Icon | Cảnh báo | Mô tả |
 |------|---------|-------|
 | 🔁 | Duplicate Batch | Batch number trùng với order khác |
 | 📅 | Expired | Sản phẩm đã quá hạn sử dụng |
-| 📈 | Overproduction | Yield rate > 100% (sản xuất vượt kế hoạch) |
+| 📈 | Overproduction | Yield rate > 100% |
 | ⏳ | Pending QC | Chưa kiểm tra chất lượng |\
 """)
 
@@ -134,99 +144,69 @@ def _render_help_popover():
 
         st.markdown("---")
 
-        # ── 3. Calculation Formulas ──
         st.markdown("#### 📐 Calculation Formulas")
         st.markdown("""\
 | Công thức | Cách tính |
 |-----------|-----------|
-| **Progress** | Produced Qty ÷ Planned Qty × 100% |
-| **Remaining** | Planned Qty − Produced Qty |
+| **Progress** | Produced ÷ Planned × 100% |
+| **Remaining** | Planned − Produced |
 | **Max Input** | Remaining × 1.5 |
-| **Yield Rate** | Produced Qty ÷ Planned Qty × 100% |
-| **Pass Rate** | PASSED Qty ÷ Total Qty × 100% |\
-""")
-
-        st.markdown("""\
-| Yield Rate | Indicator |
-|------------|-----------|
-| ≥ 95% | ✅ Excellent |
-| 85–94% | ⚠️ Acceptable |
-| < 85% | ❌ Below Target |\
+| **Yield Rate** | Produced ÷ Planned × 100% |
+| **Pass Rate** | PASSED Count ÷ Total Count × 100% |\
 """)
 
         st.markdown("---")
 
-        # ── 4. Quality Status Flow ──
         st.markdown("#### 🔄 Quality Status Flow")
         st.markdown("""\
-```
-PENDING (mặc định) → QC Check → PASSED hoặc FAILED
-```\
-""")
-
-        st.markdown("""\
-| Status | Mô tả | Inventory Impact |
-|--------|-------|-----------------|
-| ⏳ PENDING | Chờ kiểm tra chất lượng | ❌ Không cập nhật tồn kho |
-| ✅ PASSED | Đạt yêu cầu | ✅ Cộng vào tồn kho |
-| ❌ FAILED | Không đạt | ❌ Không cập nhật tồn kho |\
+| Status | Inventory Impact |
+|--------|-----------------|
+| ⏳ PENDING | ❌ Không cập nhật tồn kho |
+| ✅ PASSED | ✅ Cộng vào tồn kho |
+| ❌ FAILED | ❌ Không cập nhật tồn kho |\
 """)
 
         st.markdown("---")
 
-        # ── 5. Inventory Impact (QC Update) ──
         st.markdown("#### 📦 Inventory Impact khi cập nhật QC")
         st.markdown("""\
-| Thay đổi | Inventory Action |
-|----------|-----------------|
+| Thay đổi | Action |
+|----------|--------|
 | PENDING → **PASSED** | ➕ Tạo `stockInProduction` |
 | PENDING → FAILED | Không thay đổi |
-| **PASSED** → PENDING | ➖ Xóa khỏi tồn kho (`remain = 0`) |
-| **PASSED** → FAILED | ➖ Xóa khỏi tồn kho (`remain = 0`) |
+| **PASSED** → PENDING | ➖ Set `remain = 0` |
+| **PASSED** → FAILED | ➖ Set `remain = 0` |
 | FAILED → **PASSED** | ➕ Tạo `stockInProduction` |
 | FAILED → PENDING | Không thay đổi |\
 """)
 
         st.markdown("---")
 
-        # ── 6. Partial QC ──
         st.markdown("#### 🔬 Partial QC (Chia tách receipt)")
         st.markdown("""\
 | # | Kịch bản | Kết quả |
 |---|----------|---------|
-| 1 | 100% PASSED | Original receipt → PASSED |
-| 2 | 100% PENDING | Original receipt → PENDING |
-| 3 | 100% FAILED | Original receipt → FAILED |
-| 4 | PASSED + FAILED | Split thành 2 receipts |
-| 5 | PASSED + PENDING | Split thành 2 receipts |
-| 6 | PENDING + FAILED | Split thành 2 receipts |
-| 7 | PASSED + PENDING + FAILED | Split thành 3 receipts |\
+| 1 | 100% PASSED | Original → PASSED |
+| 2 | 100% PENDING | Original → PENDING |
+| 3 | 100% FAILED | Original → FAILED |
+| 4-7 | Mixed | Split thành 2-3 receipts |\
 """)
 
         st.markdown("""\
-> **Nguyên tắc split:** Original receipt giữ status priority cao nhất.  
-> Priority: PASSED > PENDING > FAILED.  
-> Tạo receipt mới (có `parent_receipt_id`) cho phần còn lại.\
+> **Priority:** PASSED > PENDING > FAILED.  
+> Original receipt giữ status priority cao nhất.\
 """)
 
         st.markdown("---")
 
-        # ── 7. Terminology ──
         st.markdown("#### 📖 Thuật ngữ")
         st.markdown("""\
-| Thuật ngữ | Tiếng Việt | Mô tả |
-|-----------|-----------|-------|
-| MO | Lệnh sản xuất | Lệnh sản xuất từ BOM |
-| PR | Phiếu nhập kho | Ghi nhận thành phẩm |
-| Planned Qty | SL kế hoạch | Mục tiêu sản xuất |
-| Produced Qty | SL đã SX | Tổng từ nhiều receipts |
-| Remaining | SL còn lại | Planned − Produced |
-| Yield Rate | Tỷ lệ hoàn thành | Produced ÷ Planned × 100% |
-| Batch No | Mã lô | Truy xuất nguồn gốc |
-| RAW_MATERIAL | NVL chính | Bắt buộc issue |
-| PACKAGING | Bao bì | Không bắt buộc issue |
-| CONSUMABLE | Vật tư tiêu hao | Không bắt buộc issue |
-| stockInProduction | Nhập kho SX | Loại inventory từ SX |\
+| Thuật ngữ | Mô tả |
+|-----------|-------|
+| MO | Lệnh sản xuất |
+| PR | Phiếu nhập kho thành phẩm |
+| Yield Rate | Produced ÷ Planned × 100% |
+| stockInProduction | Loại inventory từ SX |\
 """)
 
         st.caption("💬 Liên hệ team IT hoặc sử dụng nút 👎 để báo lỗi.")
@@ -316,80 +296,119 @@ def _render_filter_bar(queries: CompletionQueries) -> Dict[str, Any]:
 @st.fragment
 def _render_receipts_section(queries: CompletionQueries):
     """
-    Fragment: filters + action bar + receipts list.
-
-    Reruns INDEPENDENTLY from the rest of the page.
-    Filter changes, row selection, and pagination only rerun this fragment,
-    leaving the dashboard and header untouched.
-
-    Uses st.rerun(scope="fragment") for fragment-scoped reruns (pagination, selection).
-    Uses st.rerun() (full page) only for view changes (Record Output) and full Refresh.
+    Fragment: filters + action bar + unified metrics + table.
+    Reruns INDEPENDENTLY from the header.
     """
     filters = _render_filter_bar(queries)
     _render_action_bar(queries, filters)
     _render_receipts_list(queries, filters)
 
 
+# ==================== Action Bar ====================
+
+def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
+    """Render action bar with help popover"""
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+
+    with col1:
+        if st.button("✅ Record Output", type="primary", use_container_width=True,
+                      key="btn_record_output"):
+            st.session_state.completions_view = 'create'
+            st.rerun()
+
+    with col2:
+        if st.button("📊 Export Excel", use_container_width=True,
+                      key="btn_export_receipts"):
+            _export_receipts_excel(queries, filters)
+
+    with col3:
+        if st.button("🔄 Refresh", use_container_width=True,
+                      key="btn_refresh_completions"):
+            st.rerun()
+
+    with col4:
+        _render_help_popover()
+
+
+# ==================== Unified Metrics ====================
+
+def _render_metrics(stats: Dict[str, Any], avg_yield: float):
+    """
+    Single unified metrics row — replaces both dashboard metrics
+    and receipts list summary + quality breakdown.
+    Stats for ALL filtered data (not just current page).
+    """
+    with st.container(border=True):
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+        with c1:
+            st.metric("📦 Receipts", format_number(stats['total_count'], 0))
+
+        with c2:
+            st.metric("📊 Quantity", format_number(stats['total_quantity'], 0))
+
+        with c3:
+            st.metric(
+                "✅ Passed",
+                format_number(stats['passed_count'], 0),
+                delta=f"{stats['pass_rate']}%",
+                delta_color="off"
+            )
+
+        with c4:
+            pending = stats['pending_count']
+            st.metric(
+                "⏳ Pending",
+                format_number(pending, 0),
+                delta="needs QC" if pending > 0 else None,
+                delta_color="off"
+            )
+
+        with c5:
+            st.metric(
+                "❌ Failed",
+                format_number(stats['failed_count'], 0),
+            )
+
+        with c6:
+            yield_indicator = get_yield_indicator(avg_yield) if avg_yield > 0 else ""
+            st.metric(
+                "📈 Yield",
+                f"{avg_yield:.1f}% {yield_indicator}" if avg_yield > 0 else "N/A"
+            )
+
+
 # ==================== Data Warnings ====================
-
-# Warning type definitions: (code, emoji, description)
-_WARNING_TYPES = {
-    'DUP': ('🔁', 'Duplicate batch across orders'),
-    'EXP': ('📅', 'Expired product (past expiry date)'),
-    'OVER': ('📈', 'Overproduction (yield > 100%)'),
-    'QC': ('⏳', 'Pending QC'),
-}
-
 
 def _compute_warnings(receipts: pd.DataFrame,
                       queries: CompletionQueries) -> pd.Series:
     """
     Compute warning flags for each receipt row.
-    Returns a Series of warning strings (emoji codes) aligned with receipts index.
-    
-    Warning types:
-        🔁  Duplicate batch_no across different manufacturing orders
-        📅  Product expired (expired_date < today)
-        📈  Overproduction (order yield_rate > 100%)
-        ⏳  QC still pending
+    Returns Series of warning emoji strings aligned with receipts index.
     """
     today = pd.Timestamp(get_vietnam_today())
 
-    # Bulk check: which batch_nos are used in multiple orders
     batch_list = receipts['batch_no'].dropna().tolist()
     dup_batches = queries.get_duplicate_batch_info(batch_list)
 
     def _row_warnings(row):
         warnings = []
-
-        # 1. Duplicate batch (cross-order)
         if row.get('batch_no') and row['batch_no'] in dup_batches:
             warnings.append('🔁')
-
-        # 2. Expired
         if pd.notna(row.get('expired_date')):
-            exp = pd.Timestamp(row['expired_date'])
-            if exp < today:
+            if pd.Timestamp(row['expired_date']) < today:
                 warnings.append('📅')
-
-        # 3. Overproduction
         if row.get('yield_rate', 0) > 100:
             warnings.append('📈')
-
-        # 4. QC Pending
         if row.get('quality_status') == 'PENDING':
             warnings.append('⏳')
-
         return ' '.join(warnings)
 
     return receipts.apply(_row_warnings, axis=1)
 
 
-def _render_warnings_summary(receipts: pd.DataFrame, warnings_col: pd.Series):
-    """
-    Render compact warning summary above the receipts table.
-    Only shown when there are warnings in the current page.
-    """
+def _render_warnings_summary(warnings_col: pd.Series):
+    """Render compact warning summary above the receipts table."""
     if warnings_col.str.len().sum() == 0:
         return
 
@@ -400,11 +419,7 @@ def _render_warnings_summary(receipts: pd.DataFrame, warnings_col: pd.Series):
         '⏳': (warnings_col.str.contains('⏳', na=False).sum(), 'pending QC'),
     }
 
-    parts = []
-    for emoji, (count, label) in counts.items():
-        if count > 0:
-            parts.append(f"{emoji} {count} {label}")
-
+    parts = [f"{e} {c} {l}" for e, (c, l) in counts.items() if c > 0]
     total_affected = (warnings_col.str.len() > 0).sum()
 
     st.warning(
@@ -415,10 +430,20 @@ def _render_warnings_summary(receipts: pd.DataFrame, warnings_col: pd.Series):
 # ==================== Receipts List ====================
 
 def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
-    """Render production receipts list with improved product display and dates"""
+    """
+    Render unified metrics + receipts table.
+
+    Layout:
+    1. Metrics row (from get_filtered_stats — all filtered data)
+    2. Warnings bar (from current page data)
+    3. Table (current page data)
+    4. Selected row actions
+    5. Pagination
+    """
     page_size = CompletionConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.completions_page
 
+    # Get current page data
     receipts = queries.get_receipts(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
@@ -431,14 +456,15 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         page_size=page_size
     )
 
-    # Check for connection error (returns None)
+    # Connection error check
     if receipts is None:
         error_msg = queries.get_last_error() or "Cannot connect to database"
         st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
         st.info("💡 Check VPN/network connection or contact IT support")
         return
 
-    total_count = queries.get_receipts_count(
+    # Get stats for ALL filtered data (single query, not just current page)
+    stats = queries.get_filtered_stats(
         from_date=filters['from_date'],
         to_date=filters['to_date'],
         quality_status=filters['quality_status'],
@@ -448,76 +474,39 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         batch_no=filters['batch_no']
     )
 
-    # Check for empty data (returns empty DataFrame)
+    total_count = stats['total_count']
+
+    # Empty data check
     if receipts.empty:
         st.info("📭 No production receipts found matching the filters")
         return
 
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # Avg yield from current page (order-level metric)
+    avg_yield = receipts['yield_rate'].mean() if not receipts.empty else 0
 
-    with col1:
-        st.metric("Total Receipts", len(receipts))
+    # ── Unified Metrics ──
+    _render_metrics(stats, avg_yield)
 
-    with col2:
-        total_qty = receipts['quantity'].sum()
-        st.metric("Total Quantity", format_number(total_qty, 0))
+    # ── Warnings ──
+    warnings_col = _compute_warnings(receipts, queries)
+    _render_warnings_summary(warnings_col)
 
-    with col3:
-        passed = len(receipts[receipts['quality_status'] == 'PASSED'])
-        pass_rate = calculate_percentage(passed, len(receipts), 1)
-        indicator = get_yield_indicator(pass_rate)
-        st.metric("Pass Rate", f"{pass_rate}% {indicator}")
-
-    with col4:
-        avg_yield = receipts['yield_rate'].mean()
-        yield_indicator = get_yield_indicator(avg_yield)
-        st.metric("Avg Yield Rate", f"{avg_yield:.1f}% {yield_indicator}")
-
-    # Quality breakdown expander
-    with st.expander("📈 Quality Breakdown", expanded=False):
-        qcol1, qcol2, qcol3 = st.columns(3)
-        total_receipts = len(receipts)
-        passed_count = len(receipts[receipts['quality_status'] == 'PASSED'])
-        pending_count = len(receipts[receipts['quality_status'] == 'PENDING'])
-        failed_count = len(receipts[receipts['quality_status'] == 'FAILED'])
-
-        with qcol1:
-            st.metric("✅ PASSED", passed_count,
-                       f"{calculate_percentage(passed_count, total_receipts)}%")
-        with qcol2:
-            st.metric("⏳ PENDING", pending_count,
-                       f"{calculate_percentage(pending_count, total_receipts)}%")
-        with qcol3:
-            st.metric("❌ FAILED", failed_count,
-                       f"{calculate_percentage(failed_count, total_receipts)}%")
-
-    st.markdown("---")
+    # ── Table ──
     st.markdown("### 📋 Receipts List")
 
-    # Compute warnings for current page data
-    warnings_col = _compute_warnings(receipts, queries)
-
-    # Show summary warning bar if any issues found
-    _render_warnings_summary(receipts, warnings_col)
-
-    # Initialize selected index in session state
     if 'completions_selected_idx' not in st.session_state:
         st.session_state.completions_selected_idx = None
 
-    # Prepare display
     display_df = receipts.copy()
-
-    # Add warnings column
     display_df['alerts'] = warnings_col
 
-    # Set Select column based on session state (single selection)
+    # Single selection
     display_df['Select'] = False
     if (st.session_state.completions_selected_idx is not None
             and st.session_state.completions_selected_idx < len(display_df)):
         display_df.loc[st.session_state.completions_selected_idx, 'Select'] = True
 
-    # Format dates: Receipt Date, Order Date, and Scheduled Date
+    # Format columns
     display_df['receipt_date_display'] = display_df['receipt_date'].apply(
         lambda x: format_datetime_vn(x, '%d-%b-%Y')
     )
@@ -527,11 +516,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     display_df['scheduled_date_display'] = display_df['scheduled_date'].apply(
         lambda x: _format_date_display(x, '%d-%b-%Y')
     )
-
-    # Format Product: pt_code | name (package_size)
     display_df['product_display'] = display_df.apply(_format_product_display_row, axis=1)
-
-    # Format other columns
     display_df['quality_display'] = display_df['quality_status'].apply(create_status_indicator)
     display_df['yield_display'] = display_df['yield_rate'].apply(
         lambda x: f"{x:.1f}% {get_yield_indicator(x)}"
@@ -540,7 +525,6 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
         lambda x: f"{format_number(x['quantity'], 0)} {x['uom']}", axis=1
     )
 
-    # Create editable dataframe with selection
     edited_df = st.data_editor(
         display_df[[
             'Select', 'alerts', 'receipt_no', 'receipt_date_display', 'order_date_display',
@@ -566,30 +550,24 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
                   'Product', 'Quantity', 'Batch', 'Quality', 'Yield', 'Warehouse'],
         column_config={
             'Select': st.column_config.CheckboxColumn(
-                '✓',
-                help='Select row to perform actions',
-                default=False,
-                width='small'
+                '✓', help='Select row', default=False, width='small'
             ),
             '⚠️': st.column_config.TextColumn(
                 '⚠️',
-                help='🔁 Duplicate batch · 📅 Expired · 📈 Overproduction · ⏳ Pending QC',
+                help='🔁 Duplicate · 📅 Expired · 📈 Over · ⏳ QC',
                 width='small'
             ),
             'Product': st.column_config.TextColumn(
-                'Product',
-                help='pt_code | name (package_size)',
-                width='large'
+                'Product', help='pt_code | name (package_size)', width='large'
             )
         },
         key="completions_table_editor"
     )
 
-    # Handle single selection - find newly selected row
+    # Handle single selection
     selected_indices = edited_df[edited_df['Select'] == True].index.tolist()
 
     if selected_indices:
-        # If multiple selected (user clicked new one), keep only the newest
         if len(selected_indices) > 1:
             new_selection = [idx for idx in selected_indices
                             if idx != st.session_state.completions_selected_idx]
@@ -601,12 +579,11 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     else:
         st.session_state.completions_selected_idx = None
 
-    # Action buttons - only show when row is selected
+    # Action buttons for selected row
     if st.session_state.completions_selected_idx is not None:
         selected_receipt = receipts.iloc[st.session_state.completions_selected_idx]
 
         st.markdown("---")
-        # Show selected receipt info with improved product display
         product_info = format_product_display(selected_receipt.to_dict())
         st.markdown(
             f"**Selected:** `{selected_receipt['receipt_no']}` "
@@ -647,7 +624,7 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
     with col2:
         st.markdown(
             f"<div style='text-align:center'>"
-            f"Page {page} of {total_pages} | Total: {total_count} receipts"
+            f"Page {page} of {total_pages} · {total_count} receipts total"
             f"</div>",
             unsafe_allow_html=True
         )
@@ -659,34 +636,10 @@ def _render_receipts_list(queries: CompletionQueries, filters: Dict[str, Any]):
             st.rerun(scope="fragment")
 
 
-# ==================== Action Bar ====================
-
-def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
-    """Render action bar with help popover"""
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-
-    with col1:
-        if st.button("✅ Record Output", type="primary", use_container_width=True,
-                      key="btn_record_output"):
-            st.session_state.completions_view = 'create'
-            st.rerun()  # Full rerun — switches to create view
-
-    with col2:
-        if st.button("📊 Export Excel", use_container_width=True,
-                      key="btn_export_receipts"):
-            _export_receipts_excel(queries, filters)
-
-    with col3:
-        if st.button("🔄 Refresh", use_container_width=True,
-                      key="btn_refresh_completions"):
-            st.rerun()  # Full rerun — refreshes dashboard + data
-
-    with col4:
-        _render_help_popover()
-
+# ==================== Excel Export ====================
 
 def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
-    """Export receipts to Excel with improved product display"""
+    """Export receipts to Excel"""
     with st.spinner("Exporting..."):
         receipts = queries.get_receipts(
             from_date=filters['from_date'],
@@ -704,13 +657,8 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
             st.warning("No receipts to export")
             return
 
-        # Create export dataframe with improved columns
         export_df = receipts.copy()
-
-        # Format product display
         export_df['Product'] = export_df.apply(_format_product_display_row, axis=1)
-
-        # Format dates
         export_df['Receipt Date'] = export_df['receipt_date'].apply(
             lambda x: format_datetime_vn(x, '%d/%m/%Y %H:%M') if pd.notna(x) else ''
         )
@@ -721,7 +669,6 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
             lambda x: _format_date_display(x, '%d/%m/%Y') if pd.notna(x) else ''
         )
 
-        # Select and rename columns — include legacy code and brand for detailed export
         export_df = export_df[[
             'receipt_no', 'Receipt Date', 'Order Date', 'Scheduled Date', 'order_no',
             'Product', 'pt_code', 'legacy_pt_code', 'brand_name', 'quantity', 'uom',
@@ -735,7 +682,6 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
         ]
 
         excel_data = export_to_excel(export_df)
-
         filename = f"Production_Receipts_{get_vietnam_today().strftime('%Y%m%d')}.xlsx"
 
         st.download_button(
@@ -752,23 +698,23 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
 def render_completions_tab():
     """
     Main function to render the Completions tab.
-    Called from the main Production page.
 
-    Layout:
+    Layout v3.0 (Redesigned):
     ┌──────────────────────────────────┐
-    │  Header + Dashboard              │  ← renders once
+    │  Header + Live Badges            │  ← renders once
     ├──────────────────────────────────┤
     │  @st.fragment                    │
     │  ┌────────────────────────────┐  │
-    │  │ Filters                    │  │  ← fragment reruns independently
-    │  │ Action Bar (+ Help popover)│  │    on filter change, row select,
-    │  │ Receipts List + Pagination │  │    or pagination click
+    │  │ Filters (expander)         │  │
+    │  │ Action Bar (+ Help popover)│  │  ← fragment reruns independently
+    │  │ Unified Metrics (6 cols)   │  │
+    │  │ Warnings Bar               │  │
+    │  │ Receipts Table + Actions   │  │
+    │  │ Pagination                 │  │
     │  └────────────────────────────┘  │
     └──────────────────────────────────┘
     """
     _init_session_state()
-
-    # Check for pending dialogs (must be at page level, before fragment)
     check_pending_dialogs()
 
     queries = CompletionQueries()
@@ -784,11 +730,6 @@ def render_completions_tab():
         render_completion_form()
         return
 
-    # Receipts view
-    st.subheader("✅ Production Completions")
-
-    # Dashboard — outside fragment, renders once
-    render_dashboard()
-
-    # Fragment: filters + action bar + receipts list
+    # Receipts view — Header (once) + Fragment (interactive)
+    _render_header(queries)
     _render_receipts_section(queries)

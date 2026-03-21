@@ -171,59 +171,6 @@ class CompletionQueries:
             logger.error(f"Error getting receipts: {e}")
             return None
     
-    def get_receipts_count(self,
-                          from_date: Optional[date] = None,
-                          to_date: Optional[date] = None,
-                          quality_status: Optional[str] = None,
-                          product_id: Optional[int] = None,
-                          warehouse_id: Optional[int] = None,
-                          order_no: Optional[str] = None,
-                          batch_no: Optional[str] = None) -> int:
-        """Get total count of receipts matching filters"""
-        query = """
-            SELECT COUNT(*) as total
-            FROM production_receipts pr
-            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
-            WHERE 1=1
-        """
-        
-        params = []
-        
-        if from_date:
-            query += " AND DATE(pr.receipt_date) >= %s"
-            params.append(from_date)
-        
-        if to_date:
-            query += " AND DATE(pr.receipt_date) <= %s"
-            params.append(to_date)
-        
-        if quality_status:
-            query += " AND pr.quality_status = %s"
-            params.append(quality_status)
-        
-        if product_id:
-            query += " AND pr.product_id = %s"
-            params.append(product_id)
-        
-        if warehouse_id:
-            query += " AND pr.warehouse_id = %s"
-            params.append(warehouse_id)
-        
-        if order_no:
-            query += " AND mo.order_no LIKE %s"
-            params.append(f"%{order_no}%")
-        
-        if batch_no:
-            query += " AND pr.batch_no LIKE %s"
-            params.append(f"%{batch_no}%")
-        
-        try:
-            result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
-            return int(result['total'].iloc[0])
-        except Exception as e:
-            logger.error(f"Error getting receipts count: {e}")
-            return 0
-    
     def get_receipt_details(self, receipt_id: int) -> Optional[Dict[str, Any]]:
         """Get full receipt details including order and product info"""
         query = """
@@ -537,110 +484,117 @@ class CompletionQueries:
             logger.error(f"Error checking duplicate batches: {e}")
             return {}
     
-    # ==================== Dashboard Metrics ====================
+    # ==================== Live Stats (Lightweight) ====================
     
-    def get_completion_metrics(self, from_date: Optional[date] = None,
-                              to_date: Optional[date] = None) -> Dict[str, Any]:
-        """Get completion metrics for dashboard"""
+    def get_live_stats(self) -> Dict[str, int]:
+        """
+        Lightweight query for header live KPIs.
+        Returns in_progress orders count and today's receipts count.
+        Called outside fragment — renders once per page load.
+        """
         from .common import get_vietnam_today
-        
         today = get_vietnam_today()
         
-        base_query = """
+        query = """
             SELECT 
-                COUNT(*) as total_receipts,
-                SUM(CASE WHEN DATE(receipt_date) = %s THEN 1 ELSE 0 END) as today_receipts,
-                COALESCE(SUM(quantity), 0) as total_quantity,
-                COALESCE(SUM(CASE WHEN quality_status = 'PASSED' THEN quantity ELSE 0 END), 0) as passed_qty,
-                COALESCE(SUM(CASE WHEN quality_status = 'PENDING' THEN quantity ELSE 0 END), 0) as pending_qty,
-                COALESCE(SUM(CASE WHEN quality_status = 'FAILED' THEN quantity ELSE 0 END), 0) as failed_qty
-            FROM production_receipts
-            WHERE 1=1
+                (SELECT COUNT(*) FROM manufacturing_orders 
+                 WHERE delete_flag = 0 AND status = 'IN_PROGRESS') as in_progress,
+                (SELECT COUNT(*) FROM production_receipts 
+                 WHERE DATE(receipt_date) = %s) as today_count
         """
-        
-        params = [today]
-        
-        if from_date:
-            base_query += " AND DATE(receipt_date) >= %s"
-            params.append(from_date)
-        
-        if to_date:
-            base_query += " AND DATE(receipt_date) <= %s"
-            params.append(to_date)
-        
-        # In-progress orders count
-        orders_query = """
-            SELECT COUNT(*) as in_progress_orders
-            FROM manufacturing_orders
-            WHERE delete_flag = 0
-                AND status = 'IN_PROGRESS'
-        """
-        
-        # Quality breakdown
-        quality_query = """
-            SELECT 
-                quality_status,
-                COUNT(*) as count,
-                COALESCE(SUM(quantity), 0) as quantity
-            FROM production_receipts
-            WHERE 1=1
-        """
-        
-        if from_date:
-            quality_query += " AND DATE(receipt_date) >= %s"
-        if to_date:
-            quality_query += " AND DATE(receipt_date) <= %s"
-        
-        quality_query += " GROUP BY quality_status"
         
         try:
-            result = pd.read_sql(base_query, self.engine, params=tuple(params))
-            orders = pd.read_sql(orders_query, self.engine)
-            
-            quality_params = []
-            if from_date:
-                quality_params.append(from_date)
-            if to_date:
-                quality_params.append(to_date)
-            quality = pd.read_sql(quality_query, self.engine,
-                                 params=tuple(quality_params) if quality_params else None)
-            
+            result = pd.read_sql(query, self.engine, params=(today,))
+            row = result.iloc[0]
+            return {
+                'in_progress': int(row['in_progress']),
+                'today_count': int(row['today_count'])
+            }
+        except Exception as e:
+            logger.error(f"Error getting live stats: {e}")
+            return {'in_progress': 0, 'today_count': 0}
+    
+    # ==================== Filtered Stats (All Matching Data) ====================
+    
+    def get_filtered_stats(self,
+                           from_date: Optional[date] = None,
+                           to_date: Optional[date] = None,
+                           quality_status: Optional[str] = None,
+                           product_id: Optional[int] = None,
+                           warehouse_id: Optional[int] = None,
+                           order_no: Optional[str] = None,
+                           batch_no: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get summary statistics for ALL filtered receipts (not just current page).
+        Single query returning count, quantity, quality breakdown.
+        
+        Returns:
+            Dict with total_count, total_quantity, passed/pending/failed counts
+        """
+        query = """
+            SELECT 
+                COUNT(*) as total_count,
+                COALESCE(SUM(pr.quantity), 0) as total_quantity,
+                SUM(CASE WHEN pr.quality_status = 'PASSED' THEN 1 ELSE 0 END) as passed_count,
+                SUM(CASE WHEN pr.quality_status = 'PENDING' THEN 1 ELSE 0 END) as pending_count,
+                SUM(CASE WHEN pr.quality_status = 'FAILED' THEN 1 ELSE 0 END) as failed_count,
+                COALESCE(SUM(CASE WHEN pr.quality_status = 'PASSED' THEN pr.quantity ELSE 0 END), 0) as passed_qty,
+                COALESCE(SUM(CASE WHEN pr.quality_status = 'PENDING' THEN pr.quantity ELSE 0 END), 0) as pending_qty,
+                COALESCE(SUM(CASE WHEN pr.quality_status = 'FAILED' THEN pr.quantity ELSE 0 END), 0) as failed_qty
+            FROM production_receipts pr
+            JOIN manufacturing_orders mo ON pr.manufacturing_order_id = mo.id
+            WHERE 1=1
+        """
+        
+        params = []
+        
+        if from_date:
+            query += " AND DATE(pr.receipt_date) >= %s"
+            params.append(from_date)
+        if to_date:
+            query += " AND DATE(pr.receipt_date) <= %s"
+            params.append(to_date)
+        if quality_status:
+            query += " AND pr.quality_status = %s"
+            params.append(quality_status)
+        if product_id:
+            query += " AND pr.product_id = %s"
+            params.append(product_id)
+        if warehouse_id:
+            query += " AND pr.warehouse_id = %s"
+            params.append(warehouse_id)
+        if order_no:
+            query += " AND mo.order_no LIKE %s"
+            params.append(f"%{order_no}%")
+        if batch_no:
+            query += " AND pr.batch_no LIKE %s"
+            params.append(f"%{batch_no}%")
+        
+        try:
+            result = pd.read_sql(query, self.engine, params=tuple(params) if params else None)
             row = result.iloc[0]
             
+            total = int(row['total_count'])
+            passed = int(row['passed_count'])
             total_qty = float(row['total_quantity'])
             passed_qty = float(row['passed_qty'])
-            pass_rate = round((passed_qty / total_qty * 100) if total_qty > 0 else 0, 1)
-            
-            quality_breakdown = {}
-            if not quality.empty:
-                for _, qrow in quality.iterrows():
-                    quality_breakdown[qrow['quality_status']] = {
-                        'count': int(qrow['count']),
-                        'quantity': float(qrow['quantity'])
-                    }
             
             return {
-                'total_receipts': int(row['total_receipts']),
-                'today_receipts': int(row['today_receipts']),
+                'total_count': total,
                 'total_quantity': total_qty,
+                'passed_count': passed,
+                'pending_count': int(row['pending_count']),
+                'failed_count': int(row['failed_count']),
                 'passed_qty': passed_qty,
                 'pending_qty': float(row['pending_qty']),
                 'failed_qty': float(row['failed_qty']),
-                'pass_rate': pass_rate,
-                'in_progress_orders': int(orders.iloc[0]['in_progress_orders']),
-                'quality_breakdown': quality_breakdown
+                'pass_rate': round((passed / total * 100) if total > 0 else 0, 1),
             }
-            
         except Exception as e:
-            logger.error(f"Error getting completion metrics: {e}")
+            logger.error(f"Error getting filtered stats: {e}")
             return {
-                'total_receipts': 0,
-                'today_receipts': 0,
-                'total_quantity': 0,
-                'passed_qty': 0,
-                'pending_qty': 0,
-                'failed_qty': 0,
+                'total_count': 0, 'total_quantity': 0,
+                'passed_count': 0, 'pending_count': 0, 'failed_count': 0,
+                'passed_qty': 0, 'pending_qty': 0, 'failed_qty': 0,
                 'pass_rate': 0,
-                'in_progress_orders': 0,
-                'quality_breakdown': {}
             }
