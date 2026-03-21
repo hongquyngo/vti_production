@@ -429,7 +429,7 @@ Hiển thị trong form Record Output:
 | Phiếu nhập TP | `PR-YYYYMMDD-XXX` | PR-20260321-001 |
 | Phiếu xuất NVL | `MI-YYYYMMDD-XXX` | MI-20260321-001 |
 | Phiếu trả NVL | `MR-YYYYMMDD-XXX` | MR-20260321-001 |
-| Mã lô | `BATCH-YYYYMMDD-HHMM` | BATCH-20260321-1430 |
+| Mã lô | `VTI-YYYYMMDD-HHMM` | VTI-20260321-1430 |
 """)
 
         st.markdown("### Loại lỗi — Defect Types")

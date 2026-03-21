@@ -400,7 +400,7 @@ def get_user_audit_info() -> Dict[str, Any]:
 
 def generate_batch_no() -> str:
     """Generate default batch number"""
-    return f"BATCH-{get_vietnam_now().strftime('%Y%m%d-%H%M')}"
+    return f"VTI-{get_vietnam_now().strftime('%Y%m%d-%H%M')}"
 
 
 # ==================== Product Display Formatting ====================
