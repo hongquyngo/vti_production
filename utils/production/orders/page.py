@@ -72,7 +72,7 @@ def _render_view_switcher() -> str:
         if st.button(
             "📋 List View",
             type="primary" if list_selected else "secondary",
-            use_container_width=True,
+            width='stretch',
             key="btn_view_list"
         ):
             if not list_selected:
@@ -84,7 +84,7 @@ def _render_view_switcher() -> str:
         if st.button(
             "📊 Pivot View",
             type="primary" if pivot_selected else "secondary",
-            use_container_width=True,
+            width='stretch',
             key="btn_view_pivot"
         ):
             if not pivot_selected:
@@ -92,7 +92,7 @@ def _render_view_switcher() -> str:
                 st.rerun()
     
     with col3:
-        if st.button("➕ Create Order", use_container_width=True,
+        if st.button("➕ Create Order", width='stretch',
                      key="btn_create_order_top"):
             st.session_state.orders_view = 'create'
             st.rerun()
@@ -115,7 +115,9 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
     
     date_type = st.session_state.get('orders_date_type', 'scheduled')
     default_from, default_to = get_default_date_range(date_type)
-    default_statuses = ['DRAFT', 'CONFIRMED', 'IN_PROGRESS']
+    desired_defaults = ['DRAFT', 'CONFIRMED', 'IN_PROGRESS']
+    available_statuses = filter_options['statuses']
+    default_statuses = [s for s in desired_defaults if s in available_statuses]
     
     with st.expander("🔍 Filters", expanded=True):
         st.markdown("##### 📋 Status & Type")
@@ -124,7 +126,7 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
         with col1:
             status_list = st.multiselect(
                 "Status",
-                options=filter_options['statuses'],
+                options=available_statuses,
                 default=default_statuses,
                 key="order_filter_status",
                 help="Select one or more statuses. Empty = All statuses"
@@ -427,7 +429,7 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
     
     selection = st.dataframe(
         table_df,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         selection_mode="single-row",
         on_select="rerun",
@@ -455,30 +457,30 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         
         with col1:
-            if st.button("👁️ View", type="primary", use_container_width=True, key="btn_view_order"):
+            if st.button("👁️ View", type="primary", width='stretch', key="btn_view_order"):
                 show_detail_dialog(order_id)
         
         with col2:
-            if st.button("✏️ Edit", use_container_width=True, key="btn_edit_order",
+            if st.button("✏️ Edit", width='stretch', key="btn_edit_order",
                         disabled=not OrderValidator.can_edit(status)):
                 show_edit_dialog(order_id)
         
         with col3:
-            if st.button("✅ Confirm", use_container_width=True, key="btn_confirm_order",
+            if st.button("✅ Confirm", width='stretch', key="btn_confirm_order",
                         disabled=not OrderValidator.can_confirm(status)):
                 show_confirm_dialog(order_id, order_no)
         
         with col4:
-            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_order",
+            if st.button("❌ Cancel", width='stretch', key="btn_cancel_order",
                         disabled=not OrderValidator.can_cancel(status)):
                 show_cancel_dialog(order_id, order_no)
         
         with col5:
-            if st.button("📄 PDF", use_container_width=True, key="btn_pdf_order"):
+            if st.button("📄 PDF", width='stretch', key="btn_pdf_order"):
                 show_pdf_dialog(order_id, order_no)
         
         with col6:
-            if st.button("🗑️ Delete", use_container_width=True, key="btn_delete_order",
+            if st.button("🗑️ Delete", width='stretch', key="btn_delete_order",
                         disabled=status not in ['DRAFT', 'CANCELLED']):
                 show_delete_dialog(order_id, order_no)
     else:
@@ -508,11 +510,11 @@ def _render_action_bar(queries: OrderQueries, filters: Dict[str, Any]):
     col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
-        if st.button("📊 Export Excel", use_container_width=True, key="btn_export_excel"):
+        if st.button("📊 Export Excel", width='stretch', key="btn_export_excel"):
             _export_orders_excel(queries, filters)
     
     with col2:
-        if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_orders"):
+        if st.button("🔄 Refresh", width='stretch', key="btn_refresh_orders"):
             st.rerun()
 
 

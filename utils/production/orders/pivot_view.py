@@ -476,13 +476,13 @@ class OrderPivotView:
                     apply_btn = st.form_submit_button(
                         "🔄 Apply",
                         type="primary",
-                        use_container_width=True
+                        width='stretch'
                     )
                 
                 with col2:
                     reset_btn = st.form_submit_button(
                         "↩️ Reset",
-                        use_container_width=True
+                        width='stretch'
                     )
                 
                 if apply_btn:
@@ -595,7 +595,7 @@ class OrderPivotView:
         
         st.dataframe(
             display_df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             height=min(500, (len(display_df) + 1) * 35 + 50)
         )
@@ -675,7 +675,7 @@ class OrderPivotView:
                             lambda x: format_date(x) if pd.notna(x) else ''
                         )
                         
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+                        st.dataframe(display_df, width='stretch', hide_index=True)
             else:
                 st.info("ℹ️ No orders in this cell")
     

@@ -181,7 +181,7 @@ def render_validation_dialog(results: ValidationResults,
             proceed_label = f"✅ {action_name}" if language == 'en' else f"✅ {action_name}"
             if st.button(proceed_label, 
                         type="primary", 
-                        use_container_width=True,
+                        width='stretch',
                         disabled=not acknowledged,
                         key=f"{key_prefix}_proceed_btn"):
                 on_proceed()
@@ -189,7 +189,7 @@ def render_validation_dialog(results: ValidationResults,
         with col2:
             cancel_label = "❌ Cancel" if language == 'en' else "❌ Hủy"
             if st.button(cancel_label, 
-                        use_container_width=True,
+                        width='stretch',
                         key=f"{key_prefix}_cancel_btn"):
                 on_cancel()
     else:

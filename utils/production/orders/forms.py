@@ -204,7 +204,7 @@ class OrderForms:
                             'uom': 'UOM',
                             'status': 'Status'
                         }),
-                        use_container_width=True,
+                        width='stretch',
                         hide_index=True
                     )
             
@@ -407,7 +407,7 @@ class OrderForms:
             # Validate button
             validate_btn = st.form_submit_button(
                 "🔍 Validate & Check Materials",
-                use_container_width=True,
+                width='stretch',
                 help="Validate order data and check material availability"
             )
         
@@ -496,12 +496,12 @@ class OrderForms:
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("✅ Create Order", type="primary", use_container_width=True,
+            if st.button("✅ Create Order", type="primary", width='stretch',
                         disabled=not acknowledged, key="btn_create_order_final"):
                 self._handle_create_order()
         
         with col2:
-            if st.button("❌ Cancel", use_container_width=True, key="btn_cancel_create"):
+            if st.button("❌ Cancel", width='stretch', key="btn_cancel_create"):
                 # Clear session state
                 st.session_state.create_form_product_id = None
                 st.session_state.create_form_bom_id = None
@@ -573,7 +573,7 @@ class OrderForms:
                 'status_display': 'Status',
                 'uom': 'UOM'
             }),
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
         
@@ -605,7 +605,7 @@ class OrderForms:
                             'status_display': 'Status',
                             'uom': 'UOM'
                         }),
-                        use_container_width=True,
+                        width='stretch',
                         hide_index=True
                     )
                     st.markdown("---")
@@ -761,13 +761,13 @@ class OrderForms:
             with col1:
                 validate_btn = st.form_submit_button(
                     "🔍 Validate Changes",
-                    use_container_width=True
+                    width='stretch'
                 )
             
             with col2:
                 cancel_btn = st.form_submit_button(
                     "❌ Cancel",
-                    use_container_width=True
+                    width='stretch'
                 )
         
         # Handle cancel
@@ -859,7 +859,7 @@ class OrderForms:
         # Save button
         st.markdown("---")
         
-        if st.button("💾 Save Changes", type="primary", use_container_width=True,
+        if st.button("💾 Save Changes", type="primary", width='stretch',
                     disabled=not acknowledged, key="btn_save_edit"):
             try:
                 user_id = st.session_state.get('user_id', 1)

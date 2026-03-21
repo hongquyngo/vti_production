@@ -57,7 +57,7 @@ def show_confirm_dialog(order_id: int, order_no: str):
         render_validation_blocks(results, language='en')
         
         st.markdown("---")
-        if st.button("❌ Close", use_container_width=True, key="dialog_close_confirm"):
+        if st.button("❌ Close", width='stretch', key="dialog_close_confirm"):
             st.rerun()
         return
     
@@ -89,7 +89,7 @@ def show_confirm_dialog(order_id: int, order_no: str):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("✅ Confirm Order", type="primary", use_container_width=True,
+        if st.button("✅ Confirm Order", type="primary", width='stretch',
                     disabled=not acknowledged, key="dialog_confirm_btn"):
             try:
                 user_id = st.session_state.get('user_id', 1)
@@ -110,7 +110,7 @@ def show_confirm_dialog(order_id: int, order_no: str):
                 logger.error(f"Error confirming order {order_id}: {e}", exc_info=True)
     
     with col2:
-        if st.button("❌ Cancel", use_container_width=True, key="dialog_cancel_confirm"):
+        if st.button("❌ Cancel", width='stretch', key="dialog_cancel_confirm"):
             st.rerun()
 
 
@@ -145,7 +145,7 @@ def show_cancel_dialog(order_id: int, order_no: str):
         render_validation_blocks(results, language='en')
         
         st.markdown("---")
-        if st.button("❌ Close", use_container_width=True, key="dialog_close_cancel"):
+        if st.button("❌ Close", width='stretch', key="dialog_close_cancel"):
             st.rerun()
         return
     
@@ -175,7 +175,7 @@ def show_cancel_dialog(order_id: int, order_no: str):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("❌ Cancel Order", type="primary", use_container_width=True,
+        if st.button("❌ Cancel Order", type="primary", width='stretch',
                     disabled=not acknowledged, key="dialog_cancel_order_btn"):
             try:
                 user_id = st.session_state.get('user_id', 1)
@@ -196,7 +196,7 @@ def show_cancel_dialog(order_id: int, order_no: str):
                 logger.error(f"Error cancelling order {order_id}: {e}", exc_info=True)
     
     with col2:
-        if st.button("✖️ Close", use_container_width=True, key="dialog_close_cancel_btn"):
+        if st.button("✖️ Close", width='stretch', key="dialog_close_cancel_btn"):
             st.rerun()
 
 
@@ -223,7 +223,7 @@ def show_delete_dialog(order_id: int, order_no: str):
         render_validation_blocks(results, language='en')
         
         st.markdown("---")
-        if st.button("❌ Close", use_container_width=True, key="dialog_close_delete"):
+        if st.button("❌ Close", width='stretch', key="dialog_close_delete"):
             st.rerun()
         return
     
@@ -255,7 +255,7 @@ def show_delete_dialog(order_id: int, order_no: str):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("🗑️ Delete Order", type="primary", use_container_width=True,
+        if st.button("🗑️ Delete Order", type="primary", width='stretch',
                     disabled=not acknowledged, key="dialog_delete_btn"):
             try:
                 user_id = st.session_state.get('user_id', 1)
@@ -276,7 +276,7 @@ def show_delete_dialog(order_id: int, order_no: str):
                 logger.error(f"Error deleting order {order_id}: {e}", exc_info=True)
     
     with col2:
-        if st.button("✖️ Close", use_container_width=True, key="dialog_close_delete_btn"):
+        if st.button("✖️ Close", width='stretch', key="dialog_close_delete_btn"):
             st.rerun()
 
 
@@ -330,7 +330,7 @@ def show_detail_dialog(order_id: int):
         st.write(f"• **Planned:** {format_number(order['planned_qty'], 2)} {order['uom']}")
         st.write(f"• **Produced:** {format_number(order.get('produced_qty', 0), 2)} {order['uom']}")
         progress = calculate_percentage(order.get('produced_qty', 0), order['planned_qty'])
-        st.progress(progress / 100)
+        st.progress(min(progress / 100, 1.0))
         st.caption(f"{progress}% Complete")
     
     st.markdown("---")
@@ -381,7 +381,7 @@ def show_detail_dialog(order_id: int):
                 'status_display': 'Status',
                 'uom': 'UOM'
             }),
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
     else:
@@ -394,7 +394,7 @@ def show_detail_dialog(order_id: int):
     
     with col1:
         if order['status'] == 'DRAFT':
-            if st.button("✅ Confirm", type="primary", use_container_width=True,
+            if st.button("✅ Confirm", type="primary", width='stretch',
                         key="detail_confirm_btn"):
                 # Set session state to open confirm dialog after rerun
                 st.session_state['open_order_confirm_dialog'] = True
@@ -404,7 +404,7 @@ def show_detail_dialog(order_id: int):
     
     with col2:
         if order['status'] in ['DRAFT', 'CONFIRMED']:
-            if st.button("❌ Cancel Order", use_container_width=True,
+            if st.button("❌ Cancel Order", width='stretch',
                         key="detail_cancel_btn"):
                 # Set session state to open cancel dialog after rerun
                 st.session_state['open_order_cancel_dialog'] = True
@@ -413,7 +413,7 @@ def show_detail_dialog(order_id: int):
                 st.rerun()
     
     with col3:
-        if st.button("✖️ Close", use_container_width=True, key="detail_close_btn"):
+        if st.button("✖️ Close", width='stretch', key="detail_close_btn"):
             st.rerun()
 
 
@@ -477,7 +477,7 @@ def show_pdf_dialog(order_id: int, order_no: str):
     col1, col2 = st.columns(2)
     
     with col1:
-        if st.button("📥 Generate PDF", type="primary", use_container_width=True,
+        if st.button("📥 Generate PDF", type="primary", width='stretch',
                     key="pdf_gen_btn"):
             try:
                 from .pdf_generator import OrderPDFGenerator
@@ -500,7 +500,7 @@ def show_pdf_dialog(order_id: int, order_no: str):
                         data=pdf_content,
                         file_name=filename,
                         mime="application/pdf",
-                        use_container_width=True,
+                        width='stretch',
                         key="pdf_download_btn"
                     )
                 else:
@@ -511,7 +511,7 @@ def show_pdf_dialog(order_id: int, order_no: str):
                 logger.error(f"PDF generation failed: {e}", exc_info=True)
     
     with col2:
-        if st.button("❌ Cancel", use_container_width=True, key="pdf_cancel_btn"):
+        if st.button("❌ Cancel", width='stretch', key="pdf_cancel_btn"):
             st.rerun()
 
 
