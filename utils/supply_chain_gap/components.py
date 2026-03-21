@@ -1702,14 +1702,14 @@ def _render_period_analysis_section(
     with col1:
         st.plotly_chart(
             charts.create_period_shortage_summary(period_df, period_type),
-            width='stretch')
+            width='stretch', key=f"{key_prefix}_shortage_summary_chart")
     with col2:
         st.plotly_chart(
             charts.create_period_gap_timeline(period_df, top_n=8, period_type=period_type),
-            width='stretch')
+            width='stretch', key=f"{key_prefix}_gap_timeline_chart")
     
     # Pivot View
-    with st.expander("📊 Pivot View — GAP by Period", expanded=False):
+    with st.expander("📊 Pivot View — GAP by Period", expanded=False, key=f"{key_prefix}_pivot_expander"):
         render_pivot_view(period_df, period_type, key_prefix, code_col=code_col, name_col=name_col)
     
     # Filters + Detail Table
