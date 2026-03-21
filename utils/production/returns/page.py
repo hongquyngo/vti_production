@@ -1,9 +1,7 @@
 # utils/production/returns/page.py
 """
 Main UI orchestrator for Returns domain
-Renders the Returns tab with dashboard, return form, and history
-
-Version: 1.0.0
+Version: 2.0.0 — client-side filtering, bulk load
 """
 
 import logging
@@ -14,16 +12,76 @@ import streamlit as st
 import pandas as pd
 
 from .queries import ReturnQueries
-from .dashboard import render_dashboard
+from .dashboard import render_dashboard_from_data
 from .forms import render_return_form
 from .dialogs import show_detail_dialog, show_pdf_dialog, check_pending_dialogs
 from .common import (
     format_number, create_status_indicator, create_reason_display,
     format_datetime, format_datetime_vn, get_vietnam_today, export_to_excel, 
-    ReturnConstants, format_product_display, format_material_display
+    ReturnConstants, format_product_display, format_material_display,
+    PerformanceTimer
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Bootstrap Cache ====================
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_bootstrap() -> Dict[str, Any]:
+    return ReturnQueries().bootstrap_all()
+
+
+# ==================== Client-Side Helpers ====================
+
+def _apply_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    result = df.copy()
+    
+    from_date = filters.get('from_date')
+    to_date = filters.get('to_date')
+    if from_date and to_date:
+        dt = pd.to_datetime(result['return_date'], errors='coerce')
+        result = result[dt.between(pd.Timestamp(from_date),
+                                    pd.Timestamp(to_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))]
+    
+    status = filters.get('status')
+    if status:
+        result = result[result['status'] == status]
+    
+    reason = filters.get('reason')
+    if reason:
+        result = result[result['reason'] == reason]
+    
+    order_no = filters.get('order_no')
+    if order_no:
+        result = result[result['order_no'].str.contains(order_no, case=False, na=False)]
+    
+    return result
+
+
+def _derive_metrics(returns: Optional[pd.DataFrame], returnable_orders: int) -> Dict[str, Any]:
+    empty = {'total_returns': 0, 'today_returns': 0, 'confirmed_count': 0,
+             'returnable_orders': returnable_orders, 'total_units': 0, 'reason_breakdown': {}}
+    if returns is None or returns.empty:
+        return empty
+    
+    today = get_vietnam_today()
+    today_ts = pd.Timestamp(today)
+    today_end = today_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    dt = pd.to_datetime(returns['return_date'], errors='coerce')
+    
+    reason_counts = returns['reason'].value_counts().to_dict()
+    
+    return {
+        'total_returns': len(returns),
+        'today_returns': int(dt.between(today_ts, today_end).sum()),
+        'confirmed_count': int((returns['status'] == 'CONFIRMED').sum()),
+        'returnable_orders': returnable_orders,
+        'total_units': float(returns['total_qty'].sum()),
+        'reason_breakdown': reason_counts,
+    }
 
 
 # ==================== Session State ====================
@@ -95,40 +153,25 @@ def _render_filter_bar() -> Dict[str, Any]:
 
 # ==================== Return History ====================
 
-def _render_return_history(queries: ReturnQueries, filters: Dict[str, Any]):
-    """Render return history list with single row selection"""
+def _render_return_history(all_returns: Optional[pd.DataFrame], filters: Dict[str, Any]):
+    """Render return history — client-side filtering, zero DB queries"""
     page_size = ReturnConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.returns_page
     
-    returns = queries.get_returns(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        order_no=filters['order_no'],
-        status=filters['status'],
-        reason=filters['reason'],
-        page=page,
-        page_size=page_size
-    )
-    
-    # Check for connection error (returns None)
-    if returns is None:
-        error_msg = queries.get_last_error() or "Cannot connect to database"
-        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
-        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
+    if all_returns is None:
+        st.error("🔌 **Database Connection Error**")
+        st.info("💡 Check VPN/network connection or contact IT support")
         return
     
-    total_count = queries.get_returns_count(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        order_no=filters['order_no'],
-        status=filters['status'],
-        reason=filters['reason']
-    )
+    filtered = _apply_filters(all_returns, filters)
+    total_count = len(filtered)
     
-    # Check for empty data (returns empty DataFrame)
-    if returns.empty:
+    if filtered.empty:
         st.info("📭 No returns found matching the filters")
         return
+    
+    offset = (page - 1) * page_size
+    returns = filtered.iloc[offset:offset + page_size].reset_index(drop=True)
     
     # Initialize selected index in session state
     if 'returns_selected_idx' not in st.session_state:
@@ -245,37 +288,37 @@ def _render_return_history(queries: ReturnQueries, filters: Dict[str, Any]):
 
 # ==================== Action Bar ====================
 
-def _render_action_bar(queries: ReturnQueries, filters: Dict[str, Any]):
+def _render_action_bar(filters: Dict[str, Any]):
     """Render action bar"""
     col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
-        if st.button("↩️ Return Materials", type="primary", use_container_width=True,
+        if st.button("↩️ Return Materials", type="primary", width='stretch',
                     key="btn_create_return"):
             st.session_state.returns_view = 'create'
             st.rerun()
     
     with col2:
-        if st.button("📊 Export Excel", use_container_width=True, key="btn_export_returns"):
-            _export_returns_excel(queries, filters)
+        if st.button("📊 Export Excel", width='stretch', key="btn_export_returns"):
+            _export_returns_excel(filters)
     
     with col3:
-        if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_returns"):
+        if st.button("🔄 Refresh", width='stretch', key="btn_refresh_returns"):
+            _cached_bootstrap.clear()
             st.rerun()
 
 
-def _export_returns_excel(queries: ReturnQueries, filters: Dict[str, Any]):
-    """Export returns to Excel"""
+def _export_returns_excel(filters: Dict[str, Any]):
+    """Export returns to Excel — uses cached data"""
     with st.spinner("Exporting..."):
-        returns = queries.get_returns(
-            from_date=filters['from_date'],
-            to_date=filters['to_date'],
-            order_no=filters['order_no'],
-            status=filters['status'],
-            reason=filters['reason'],
-            page=1,
-            page_size=10000
-        )
+        boot = _cached_bootstrap()
+        all_returns = boot.get('returns')
+        
+        if all_returns is None or all_returns.empty:
+            st.warning("No returns to export")
+            return
+        
+        returns = _apply_filters(all_returns, filters)
         
         if returns.empty:
             st.warning("No returns to export")
@@ -322,39 +365,42 @@ def _export_returns_excel(queries: ReturnQueries, filters: Dict[str, Any]):
 # ==================== Main Render Function ====================
 
 def render_returns_tab():
-    """
-    Main function to render the Returns tab
-    Called from the main Production page
-    """
+    """Main function to render the Returns tab"""
     _init_session_state()
     
-    # Check for pending dialogs (e.g., PDF dialog triggered from detail dialog)
-    check_pending_dialogs()
+    perf = PerformanceTimer("render_returns_tab")
     
-    queries = ReturnQueries()
+    with perf.step("check_pending_dialogs"):
+        check_pending_dialogs()
     
-    # Check current view
     if st.session_state.returns_view == 'create':
         if st.button("⬅️ Back to History", key="btn_back_to_returns_history"):
             st.session_state.returns_view = 'history'
             st.session_state.pop('return_success', None)
             st.session_state.pop('return_info', None)
             st.rerun()
-        
         render_return_form()
         return
     
-    # History view
     st.subheader("↩️ Material Returns")
     
-    # Dashboard
-    render_dashboard()
-
-    # Filters
-    filters = _render_filter_bar()
-
-    # Action bar
-    _render_action_bar(queries, filters)
-
-    # Return list
-    _render_return_history(queries, filters)
+    with perf.step("bootstrap"):
+        boot = _cached_bootstrap()
+    
+    all_returns = boot.get('returns')
+    returnable_orders = boot.get('returnable_orders', 0)
+    
+    with perf.step("render_dashboard"):
+        metrics = _derive_metrics(all_returns, returnable_orders)
+        render_dashboard_from_data(metrics)
+    
+    with perf.step("render_filters"):
+        filters = _render_filter_bar()
+    
+    with perf.step("render_action_bar"):
+        _render_action_bar(filters)
+    
+    with perf.step("render_return_history"):
+        _render_return_history(all_returns, filters)
+    
+    perf.summary()

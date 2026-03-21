@@ -10,6 +10,7 @@ Changes:
 """
 
 import logging
+import time as _time
 from datetime import date
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -475,4 +476,78 @@ class ReturnQueries:
                 'returnable_orders': 0,
                 'total_units': 0,
                 'reason_breakdown': {}
-            }
+            }    
+    # ==================== Bulk Load ====================
+    
+    def get_all_returns(self) -> Optional[pd.DataFrame]:
+        """Load ALL returns in one query — no pagination, no filters."""
+        query = """
+            SELECT 
+                mr.id,
+                mr.return_no,
+                mr.return_date,
+                mr.status,
+                mr.reason,
+                mr.created_date,
+                mo.order_no,
+                mo.id as order_id,
+                p.name as product_name,
+                p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
+                b.brand_name,
+                w.name as warehouse_name,
+                CONCAT(e_returned.first_name, ' ', e_returned.last_name) as returned_by_name,
+                CONCAT(e_received.first_name, ' ', e_received.last_name) as received_by_name,
+                (SELECT COUNT(*) FROM material_return_details WHERE material_return_id = mr.id) as item_count,
+                (SELECT COALESCE(SUM(quantity), 0) FROM material_return_details WHERE material_return_id = mr.id) as total_qty
+            FROM material_returns mr
+            JOIN manufacturing_orders mo ON mr.manufacturing_order_id = mo.id
+            JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands b ON p.brand_id = b.id
+            JOIN warehouses w ON mr.warehouse_id = w.id
+            LEFT JOIN employees e_returned ON mr.returned_by = e_returned.id
+            LEFT JOIN employees e_received ON mr.received_by = e_received.id
+            ORDER BY mr.created_date DESC
+        """
+        try:
+            _t0 = _time.perf_counter()
+            result = pd.read_sql(query, self.engine)
+            _ms = (_time.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_all_returns: {_ms:.0f}ms ({len(result)} rows)")
+            self._connection_error = None
+            return result
+        except (OperationalError, DatabaseError) as e:
+            self._connection_error = "Cannot connect to database."
+            logger.error(f"Database connection error in bulk load: {e}")
+            return None
+        except Exception as e:
+            self._connection_error = f"Database error: {str(e)}"
+            logger.error(f"Error in bulk load: {e}")
+            return None
+    
+    def _get_returnable_orders_count(self) -> int:
+        """Count IN_PROGRESS MOs — can't derive from returns data."""
+        query = "SELECT COUNT(*) as cnt FROM manufacturing_orders WHERE delete_flag = 0 AND status = 'IN_PROGRESS'"
+        try:
+            _t0 = _time.perf_counter()
+            result = pd.read_sql(query, self.engine)
+            _ms = (_time.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] _get_returnable_orders_count: {_ms:.0f}ms")
+            return int(result.iloc[0]['cnt'])
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            return 0
+    
+    def bootstrap_all(self) -> Dict[str, Any]:
+        """Load ALL page data: 2 sequential queries, derive the rest."""
+        _t0 = _time.perf_counter()
+        returns = self.get_all_returns()
+        returnable_orders = self._get_returnable_orders_count()
+        connection_error = None
+        if returns is None:
+            connection_error = self._connection_error or "Cannot connect to database"
+        _ms = (_time.perf_counter() - _t0) * 1000
+        n = len(returns) if returns is not None else 0
+        logger.info(f"[PERF] bootstrap_all: {_ms:.0f}ms total ({n} returns)")
+        return {'returns': returns, 'returnable_orders': returnable_orders, 'connection_error': connection_error}
