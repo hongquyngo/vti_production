@@ -26,6 +26,7 @@ Changes:
 """
 
 import logging
+import time as _time
 from datetime import date
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -1235,4 +1236,138 @@ class OrderQueries:
             'high_priority_count': 0,
             'active_count': 0,
             'completion_rate': 0
+        }
+    
+    # ==================== Bulk Load (Client-Side Filtering) ====================
+    
+    def get_all_orders(self) -> Optional[pd.DataFrame]:
+        """
+        Load ALL orders in one query — no pagination, no filters.
+        Filtering, sorting, pagination done client-side with pandas.
+        
+        Replaces per-render: get_orders() + get_orders_count() + get_search_filter_options()
+        + get_filter_options() + get_bom_conflict_summary()
+        """
+        query = """
+            SELECT 
+                o.id,
+                o.order_no,
+                o.order_date,
+                o.scheduled_date,
+                o.completion_date,
+                o.status,
+                o.priority,
+                o.planned_qty,
+                o.produced_qty,
+                o.uom,
+                o.product_id,
+                o.bom_header_id,
+                o.warehouse_id,
+                o.target_warehouse_id,
+                o.notes,
+                p.pt_code,
+                p.name as product_name,
+                p.package_size,
+                p.legacy_pt_code,
+                b.bom_type,
+                b.bom_name,
+                b.bom_code,
+                b.status as bom_status,
+                br.id as brand_id,
+                br.brand_name,
+                w1.name as warehouse_name,
+                w2.name as target_warehouse_name,
+                o.created_date,
+                o.created_by,
+                CONCAT(e.first_name, ' ', e.last_name) as created_by_name
+            FROM manufacturing_orders o
+            JOIN products p ON o.product_id = p.id
+            JOIN bom_headers b ON o.bom_header_id = b.id
+            JOIN brands br ON p.brand_id = br.id
+            JOIN warehouses w1 ON o.warehouse_id = w1.id
+            JOIN warehouses w2 ON o.target_warehouse_id = w2.id
+            LEFT JOIN users u ON o.created_by = u.id
+            LEFT JOIN employees e ON u.employee_id = e.id
+            WHERE o.delete_flag = 0
+            ORDER BY o.created_date DESC
+        """
+        
+        try:
+            _t0 = _time.perf_counter()
+            result = pd.read_sql(query, self.engine)
+            _ms = (_time.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_all_orders: {_ms:.0f}ms ({len(result)} rows)")
+            self._connection_error = None
+            return result
+        except (OperationalError, DatabaseError) as e:
+            self._connection_error = "Cannot connect to database. Please check your network/VPN connection."
+            logger.error(f"Database connection error in bulk load: {e}")
+            return None
+        except Exception as e:
+            self._connection_error = f"Database error: {str(e)}"
+            logger.error(f"Error in bulk load: {e}")
+            return None
+    
+    def _get_bom_conflict_counts(self) -> Dict[int, int]:
+        """
+        Load BOM conflict counts for all products — 1 query.
+        Returns {product_id: active_bom_count} for products with >1 active BOM.
+        """
+        query = """
+            SELECT product_id, COUNT(*) as bom_count
+            FROM bom_headers
+            WHERE delete_flag = 0 AND status = 'ACTIVE'
+            GROUP BY product_id
+            HAVING COUNT(*) > 1
+        """
+        try:
+            _t0 = _time.perf_counter()
+            result = pd.read_sql(query, self.engine)
+            _ms = (_time.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] _get_bom_conflict_counts: {_ms:.0f}ms ({len(result)} conflicts)")
+            return dict(zip(result['product_id'], result['bom_count']))
+        except Exception as e:
+            logger.error(f"Error getting BOM conflict counts: {e}")
+            return {}
+    
+    def bootstrap_all(self) -> Dict[str, Any]:
+        """
+        Load ALL page data sequentially — 2 DB queries, derive the rest.
+        
+        NO threading (MySQL connector has 2.5x regression under ThreadPoolExecutor).
+        
+        Pipeline:
+          1. get_all_orders()              ~200ms  (bulk data)
+          2. _get_bom_conflict_counts()    ~170ms  (1 scalar query)
+          3. Derive metrics                ~0ms    (pandas)
+          4. Derive filter_options         ~0ms    (pandas)
+          5. Derive search_filter_options  ~0ms    (pandas)
+          6. Derive conflict_summary       ~0ms    (pandas)
+                                           ─────
+                                      Total ~370ms
+        """
+        _t0 = _time.perf_counter()
+        
+        # Query 1: bulk orders
+        orders = self.get_all_orders()
+        
+        # Query 2: BOM conflict counts
+        bom_conflicts = self._get_bom_conflict_counts()
+        
+        # Enrich orders with conflict count
+        if orders is not None and not orders.empty:
+            orders['bom_conflict_count'] = orders['product_id'].map(bom_conflicts).fillna(1).astype(int)
+        
+        connection_error = None
+        if orders is None:
+            connection_error = self._connection_error or "Cannot connect to database"
+        
+        _ms = (_time.perf_counter() - _t0) * 1000
+        n_rows = len(orders) if orders is not None else 0
+        logger.info(f"[PERF] bootstrap_all: {_ms:.0f}ms total (sequential, {n_rows} orders)")
+        
+        return {
+            'orders': orders,
+            'bom_conflicts': bom_conflicts,
+            'connection_error': connection_error,
         }

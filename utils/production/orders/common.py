@@ -12,6 +12,8 @@ Changes:
 """
 
 import logging
+import time as _time
+from contextlib import contextmanager
 from datetime import date, timedelta, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Tuple, Union, Optional, List, Any
@@ -33,6 +35,45 @@ except ImportError:
         logging.warning("No timezone library available. Using system timezone.")
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Performance Debugging ====================
+
+class PerformanceTimer:
+    """Lightweight timer for diagnosing page-load bottlenecks."""
+    
+    _enabled = True  # flip to False in production
+    
+    def __init__(self, name: str):
+        self.name = name
+        self.steps: List[Tuple[str, float, str]] = []
+        self._start = _time.perf_counter()
+    
+    @contextmanager
+    def step(self, label: str, tag: str = ""):
+        if not self._enabled:
+            yield
+            return
+        t0 = _time.perf_counter()
+        yield
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
+        self.steps.append((label, elapsed_ms, tag))
+        if elapsed_ms > 200:
+            logger.warning(f"[PERF] ⚠️ SLOW: {label} = {elapsed_ms:.0f}ms {tag}")
+    
+    def summary(self):
+        if not self._enabled or not self.steps:
+            return
+        total_ms = (_time.perf_counter() - self._start) * 1000
+        lines = [f"\n[PERF] ═══ {self.name} ═══"]
+        for i, (label, ms, tag) in enumerate(self.steps):
+            prefix = "├─" if i < len(self.steps) - 1 else "└─"
+            bar = "█" * min(int(ms / 50), 30)
+            slow = " ⚠️ SLOW" if ms > 500 else " ⏱" if ms > 200 else ""
+            tag_str = f" ({tag})" if tag else ""
+            lines.append(f"[PERF]   {prefix} {label}: {ms:.0f}ms {bar}{slow}{tag_str}")
+        lines.append(f"[PERF] ═══ Total: {total_ms:.0f}ms ═══\n")
+        logger.info("\n".join(lines))
 
 
 # ==================== Constants ====================

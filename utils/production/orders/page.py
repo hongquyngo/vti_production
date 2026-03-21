@@ -3,27 +3,27 @@
 Main UI orchestrator for Orders domain
 Renders the Orders tab with dashboard, filters, list, and actions
 
-Version: 1.6.0
+Version: 2.0.0
 Changes:
+- v2.0.0: Client-side filtering — MAJOR performance overhaul
+  - Single bulk DB query replaces ~13 per-render queries
+  - All filtering, pagination, stats, filter options computed client-side
+  - PerformanceTimer instrumentation throughout
 - v1.6.0: Added Pivot View for data analysis
-          + View switcher: List View / Pivot View
-          + Pivot uses st.form + fragments for performance
-          + No full page rerun when changing pivot options
 - v1.5.0: Advanced multiselect filters
 - v1.3.0: Performance optimization with fragment isolation
-- v1.2.0: Added BOM conflict detection and warning
 """
 
 import logging
 from datetime import timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import streamlit as st
 import pandas as pd
 
 from .queries import OrderQueries
 from .manager import OrderManager
-from .dashboard import render_dashboard
+from .dashboard import render_dashboard_from_data
 from .forms import render_create_form
 from .pivot_view import render_pivot_view
 from .dialogs import (
@@ -34,10 +34,240 @@ from .dialogs import (
 from .common import (
     format_number, create_status_indicator, calculate_percentage, format_datetime_vn,
     get_vietnam_today, export_to_excel, OrderConstants, OrderValidator,
-    format_product_display, format_date, get_date_filter_presets, get_default_date_range
+    format_product_display, format_date, get_date_filter_presets, get_default_date_range,
+    PerformanceTimer
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Bootstrap Cache ====================
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_bootstrap() -> Dict[str, Any]:
+    """
+    Load ALL orders data in one cached call (TTL 30s).
+    2 sequential DB queries, derive everything else client-side.
+    """
+    return OrderQueries().bootstrap_all()
+
+
+# ==================== Client-Side Derived Data ====================
+
+def _derive_filter_options(orders: pd.DataFrame) -> Dict[str, List[str]]:
+    """Derive filter options from DataFrame — replaces get_filter_options() (3 queries)"""
+    if orders is None or orders.empty:
+        return {
+            'statuses': ['DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'],
+            'order_types': [],
+            'priorities': ['LOW', 'NORMAL', 'HIGH', 'URGENT']
+        }
+    
+    status_order = ['DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED']
+    statuses = [s for s in status_order if s in orders['status'].unique()]
+    
+    priority_order = ['LOW', 'NORMAL', 'HIGH', 'URGENT']
+    priorities = [p for p in priority_order if p in orders['priority'].unique()]
+    
+    order_types = sorted(orders['bom_type'].dropna().unique().tolist())
+    
+    return {
+        'statuses': statuses,
+        'order_types': order_types,
+        'priorities': priorities,
+    }
+
+
+def _derive_search_options(orders: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    """Derive search filter options from DataFrame — replaces get_search_filter_options() (6 queries)"""
+    empty = {
+        'products': pd.DataFrame(),
+        'boms': pd.DataFrame(),
+        'brands': pd.DataFrame(),
+        'source_warehouses': pd.DataFrame(),
+        'target_warehouses': pd.DataFrame(),
+        'order_nos': pd.DataFrame(),
+    }
+    
+    if orders is None or orders.empty:
+        return empty
+    
+    # Products
+    products = orders[['product_id', 'pt_code', 'product_name', 'package_size', 'legacy_pt_code', 'brand_name']].drop_duplicates(
+        subset=['product_id']
+    ).rename(columns={'product_id': 'id'}).sort_values('product_name').reset_index(drop=True)
+    
+    # BOMs
+    boms = orders[['bom_header_id', 'bom_code', 'bom_name', 'bom_type']].drop_duplicates(
+        subset=['bom_header_id']
+    ).rename(columns={'bom_header_id': 'id'}).sort_values('bom_name').reset_index(drop=True)
+    
+    # Brands
+    brands = orders[['brand_id', 'brand_name']].drop_duplicates(
+        subset=['brand_id']
+    ).rename(columns={'brand_id': 'id'}).sort_values('brand_name').reset_index(drop=True)
+    
+    # Order numbers
+    order_nos = orders[['order_no']].drop_duplicates().sort_values('order_no', ascending=False).head(500).reset_index(drop=True)
+    
+    # Warehouses (merged source + target for unified dropdown)
+    all_wh = pd.concat([
+        orders[['warehouse_id', 'warehouse_name']].rename(columns={'warehouse_id': 'id', 'warehouse_name': 'name'}),
+        orders[['target_warehouse_id', 'target_warehouse_name']].rename(columns={'target_warehouse_id': 'id', 'target_warehouse_name': 'name'}),
+    ]).drop_duplicates(subset=['id']).sort_values('name').reset_index(drop=True)
+    
+    return {
+        'products': products,
+        'boms': boms,
+        'brands': brands,
+        'source_warehouses': all_wh,
+        'target_warehouses': all_wh,
+        'order_nos': order_nos,
+        'warehouses': all_wh,
+    }
+
+
+def _derive_metrics(orders: pd.DataFrame, from_date=None, to_date=None) -> Dict[str, Any]:
+    """Derive order metrics from DataFrame — replaces get_order_metrics() query"""
+    if orders is None or orders.empty:
+        return {
+            'total_orders': 0, 'draft_count': 0, 'confirmed_count': 0,
+            'in_progress_count': 0, 'completed_count': 0, 'cancelled_count': 0,
+            'urgent_count': 0, 'high_priority_count': 0, 'active_count': 0, 'completion_rate': 0
+        }
+    
+    df = orders
+    if from_date:
+        dt_col = pd.to_datetime(df['order_date'], errors='coerce')
+        df = df[dt_col >= pd.Timestamp(from_date)]
+    if to_date:
+        dt_col = pd.to_datetime(df['order_date'], errors='coerce')
+        df = df[dt_col <= pd.Timestamp(to_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+    
+    total = len(df)
+    completed = int((df['status'] == 'COMPLETED').sum())
+    in_progress = int((df['status'] == 'IN_PROGRESS').sum())
+    confirmed = int((df['status'] == 'CONFIRMED').sum())
+    
+    return {
+        'total_orders': total,
+        'draft_count': int((df['status'] == 'DRAFT').sum()),
+        'confirmed_count': confirmed,
+        'in_progress_count': in_progress,
+        'completed_count': completed,
+        'cancelled_count': int((df['status'] == 'CANCELLED').sum()),
+        'urgent_count': int((df['priority'] == 'URGENT').sum()),
+        'high_priority_count': int((df['priority'] == 'HIGH').sum()),
+        'active_count': in_progress + confirmed,
+        'completion_rate': round((completed / total * 100), 1) if total > 0 else 0,
+    }
+
+
+def _derive_conflict_summary(orders: pd.DataFrame, active_only: bool = True,
+                              from_date=None, to_date=None) -> Dict[str, Any]:
+    """Derive BOM conflict summary from DataFrame — replaces get_bom_conflict_summary() query"""
+    empty = {
+        'total_conflict_orders': 0, 'affected_products': 0,
+        'conflict_by_status': {'DRAFT': 0, 'CONFIRMED': 0, 'IN_PROGRESS': 0, 'COMPLETED': 0}
+    }
+    
+    if orders is None or orders.empty:
+        return empty
+    
+    df = orders
+    if from_date:
+        dt_col = pd.to_datetime(df['order_date'], errors='coerce')
+        df = df[dt_col >= pd.Timestamp(from_date)]
+    if to_date:
+        dt_col = pd.to_datetime(df['order_date'], errors='coerce')
+        df = df[dt_col <= pd.Timestamp(to_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+    
+    conflicts = df[df['bom_conflict_count'] > 1]
+    
+    if conflicts.empty:
+        return empty
+    
+    return {
+        'total_conflict_orders': len(conflicts),
+        'affected_products': conflicts['product_id'].nunique(),
+        'conflict_by_status': {
+            'DRAFT': int((conflicts['status'] == 'DRAFT').sum()),
+            'CONFIRMED': int((conflicts['status'] == 'CONFIRMED').sum()),
+            'IN_PROGRESS': int((conflicts['status'] == 'IN_PROGRESS').sum()),
+            'COMPLETED': int((conflicts['status'] == 'COMPLETED').sum()),
+        }
+    }
+
+
+def _apply_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFrame:
+    """Apply all filters client-side using pandas — replaces server-side WHERE clauses"""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
+    result = df.copy()
+    
+    # Status
+    status = filters.get('status')
+    if status:
+        result = result[result['status'].isin(status)]
+    
+    # Order type
+    order_type = filters.get('order_type')
+    if order_type:
+        result = result[result['bom_type'].isin(order_type)]
+    
+    # Priority
+    priority = filters.get('priority')
+    if priority:
+        result = result[result['priority'].isin(priority)]
+    
+    # Product IDs
+    product_ids = filters.get('product_ids')
+    if product_ids:
+        result = result[result['product_id'].isin(product_ids)]
+    
+    # BOM IDs
+    bom_ids = filters.get('bom_ids')
+    if bom_ids:
+        result = result[result['bom_header_id'].isin(bom_ids)]
+    
+    # Brand IDs
+    brand_ids = filters.get('brand_ids')
+    if brand_ids:
+        result = result[result['brand_id'].isin(brand_ids)]
+    
+    # Source warehouse IDs
+    source_warehouse_ids = filters.get('source_warehouse_ids')
+    if source_warehouse_ids:
+        result = result[result['warehouse_id'].isin(source_warehouse_ids)]
+    
+    # Target warehouse IDs
+    target_warehouse_ids = filters.get('target_warehouse_ids')
+    if target_warehouse_ids:
+        result = result[result['target_warehouse_id'].isin(target_warehouse_ids)]
+    
+    # Order numbers
+    order_nos = filters.get('order_nos')
+    if order_nos:
+        result = result[result['order_no'].isin(order_nos)]
+    
+    # Date filter
+    date_type = filters.get('date_type', 'scheduled')
+    from_date = filters.get('from_date')
+    to_date = filters.get('to_date')
+    
+    date_col = 'scheduled_date' if date_type == 'scheduled' else 'order_date'
+    if from_date and to_date and date_col in result.columns:
+        dt = pd.to_datetime(result[date_col], errors='coerce')
+        from_ts = pd.Timestamp(from_date)
+        to_ts = pd.Timestamp(to_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        result = result[dt.between(from_ts, to_ts)]
+    
+    # Conflicts only
+    if filters.get('conflicts_only'):
+        result = result[result['bom_conflict_count'] > 1]
+    
+    return result
 
 
 # ==================== Session State ====================
@@ -102,16 +332,11 @@ def _render_view_switcher() -> str:
 
 # ==================== Filter Bar ====================
 
-@st.cache_data(ttl=300)
-def _get_search_options(_queries: OrderQueries) -> Dict[str, Any]:
-    """Cache search filter options (5 min TTL)"""
-    return _queries.get_search_filter_options()
 
-
-def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
-    """Render filter bar with multiselect widgets"""
-    filter_options = queries.get_filter_options()
-    search_options = _get_search_options(queries)
+def _render_filter_bar(all_orders: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """Render filter bar — all options derived from DataFrame (zero DB queries)"""
+    filter_options = _derive_filter_options(all_orders)
+    search_options = _derive_search_options(all_orders)
     
     date_type = st.session_state.get('orders_date_type', 'scheduled')
     default_from, default_to = get_default_date_range(date_type)
@@ -330,9 +555,10 @@ def _render_filter_bar(queries: OrderQueries) -> Dict[str, Any]:
 
 # ==================== BOM Conflict Warning ====================
 
-def _render_conflict_warning(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render BOM conflict warning banner if conflicts exist"""
-    conflict_summary = queries.get_bom_conflict_summary(
+def _render_conflict_warning(all_orders: Optional[pd.DataFrame], filters: Dict[str, Any]):
+    """Render BOM conflict warning banner — derived from DataFrame (zero DB)"""
+    conflict_summary = _derive_conflict_summary(
+        all_orders,
         active_only=filters.get('conflict_check_active_only', True),
         from_date=filters.get('from_date'),
         to_date=filters.get('to_date')
@@ -348,55 +574,26 @@ def _render_conflict_warning(queries: OrderQueries, filters: Dict[str, Any]):
 # ==================== Order List ====================
 
 @st.fragment
-def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
-    """Render order list table with selection and pagination (Fragment)"""
+def _render_order_list(all_orders: Optional[pd.DataFrame], filters: Dict[str, Any]):
+    """Render order list — client-side filtering, zero DB queries"""
     page = st.session_state.get('orders_page', 1)
     page_size = OrderConstants.DEFAULT_PAGE_SIZE
     
-    orders = queries.get_orders(
-        status=filters.get('status'),
-        order_type=filters.get('order_type'),
-        priority=filters.get('priority'),
-        product_ids=filters.get('product_ids'),
-        bom_ids=filters.get('bom_ids'),
-        brand_ids=filters.get('brand_ids'),
-        source_warehouse_ids=filters.get('source_warehouse_ids'),
-        target_warehouse_ids=filters.get('target_warehouse_ids'),
-        order_nos=filters.get('order_nos'),
-        from_date=filters.get('from_date'),
-        to_date=filters.get('to_date'),
-        date_type=filters.get('date_type', 'scheduled'),
-        conflicts_only=filters.get('conflicts_only', False),
-        conflict_check_active_only=filters.get('conflict_check_active_only', True),
-        page=page,
-        page_size=page_size
-    )
+    # Client-side filter
+    filtered = _apply_filters(all_orders, filters)
+    total_count = len(filtered)
     
-    total_count = queries.get_orders_count(
-        status=filters.get('status'),
-        order_type=filters.get('order_type'),
-        priority=filters.get('priority'),
-        product_ids=filters.get('product_ids'),
-        bom_ids=filters.get('bom_ids'),
-        brand_ids=filters.get('brand_ids'),
-        source_warehouse_ids=filters.get('source_warehouse_ids'),
-        target_warehouse_ids=filters.get('target_warehouse_ids'),
-        order_nos=filters.get('order_nos'),
-        from_date=filters.get('from_date'),
-        to_date=filters.get('to_date'),
-        date_type=filters.get('date_type', 'scheduled'),
-        conflicts_only=filters.get('conflicts_only', False),
-        conflict_check_active_only=filters.get('conflict_check_active_only', True)
-    )
-    
-    if orders is None:
-        error_msg = queries.get_last_error() or "Failed to load orders"
-        st.error(f"❌ {error_msg}")
+    if all_orders is None:
+        st.error("❌ Failed to load orders")
         return
     
-    if orders.empty:
+    if filtered.empty:
         st.info("📋 No orders found matching your filters")
         return
+    
+    # Paginate
+    offset = (page - 1) * page_size
+    orders = filtered.iloc[offset:offset + page_size].reset_index(drop=True)
     
     display_df = orders.copy()
     display_df['product_display'] = display_df.apply(format_product_display, axis=1)
@@ -505,38 +702,31 @@ def _render_order_list(queries: OrderQueries, filters: Dict[str, Any]):
 
 # ==================== Action Bar ====================
 
-def _render_action_bar(queries: OrderQueries, filters: Dict[str, Any]):
+def _render_action_bar(filters: Dict[str, Any]):
     """Render action bar with export and refresh"""
     col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
         if st.button("📊 Export Excel", width='stretch', key="btn_export_excel"):
-            _export_orders_excel(queries, filters)
+            _export_orders_excel(filters)
     
     with col2:
         if st.button("🔄 Refresh", width='stretch', key="btn_refresh_orders"):
+            _cached_bootstrap.clear()
             st.rerun()
 
 
-def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
-    """Export orders to Excel"""
+def _export_orders_excel(filters: Dict[str, Any]):
+    """Export orders to Excel — uses cached data, zero extra DB hit"""
     with st.spinner("Exporting..."):
-        orders = queries.get_orders(
-            status=filters.get('status'),
-            order_type=filters.get('order_type'),
-            priority=filters.get('priority'),
-            product_ids=filters.get('product_ids'),
-            bom_ids=filters.get('bom_ids'),
-            brand_ids=filters.get('brand_ids'),
-            source_warehouse_ids=filters.get('source_warehouse_ids'),
-            target_warehouse_ids=filters.get('target_warehouse_ids'),
-            order_nos=filters.get('order_nos'),
-            from_date=filters.get('from_date'),
-            to_date=filters.get('to_date'),
-            date_type=filters.get('date_type', 'scheduled'),
-            page=1,
-            page_size=10000
-        )
+        boot = _cached_bootstrap()
+        all_orders = boot.get('orders')
+        
+        if all_orders is None or all_orders.empty:
+            st.warning("No orders to export")
+            return
+        
+        orders = _apply_filters(all_orders, filters)
         
         if orders is None or orders.empty:
             st.warning("No orders to export")
@@ -583,10 +773,17 @@ def _export_orders_excel(queries: OrderQueries, filters: Dict[str, Any]):
 # ==================== Main Render Function ====================
 
 def render_orders_tab():
-    """Main function to render the Orders tab"""
+    """
+    Main function to render the Orders tab.
+    
+    v2.0: Bootstrap cache — 2 sequential DB queries, derive everything else.
+    """
     _init_session_state()
     
-    check_pending_dialogs()
+    perf = PerformanceTimer("render_orders_tab")
+    
+    with perf.step("check_pending_dialogs"):
+        check_pending_dialogs()
     
     if st.session_state.get('order_created_success'):
         order_no = st.session_state.pop('order_created_success')
@@ -598,8 +795,6 @@ def render_orders_tab():
         2. Confirm the order when ready
         3. Issue materials to start production
         """)
-    
-    queries = OrderQueries()
     
     if st.session_state.orders_view == 'create':
         if st.button("⬅️ Back to List", key="btn_back_to_list"):
@@ -616,17 +811,30 @@ def render_orders_tab():
     st.markdown("---")
     
     if current_view == 'pivot':
-        # Pivot View - already uses fragments internally
         render_pivot_view()
     else:
-        # List View
-        conflict_check_active_only = st.session_state.get('orders_conflict_check_active_only', True)
-        render_dashboard(conflict_check_active_only=conflict_check_active_only)
+        # Bootstrap: load all data (2 DB queries on cache miss, 0 on hit)
+        with perf.step("bootstrap"):
+            boot = _cached_bootstrap()
         
-        filters = _render_filter_bar(queries)
+        all_orders = boot.get('orders')
         
-        _render_conflict_warning(queries, filters)
+        with perf.step("render_dashboard"):
+            conflict_check_active_only = st.session_state.get('orders_conflict_check_active_only', True)
+            metrics = _derive_metrics(all_orders)
+            conflict_summary = _derive_conflict_summary(all_orders, active_only=conflict_check_active_only)
+            render_dashboard_from_data(metrics, conflict_summary)
         
-        _render_action_bar(queries, filters)
+        with perf.step("render_filters"):
+            filters = _render_filter_bar(all_orders)
         
-        _render_order_list(queries, filters)
+        with perf.step("render_conflict_warning"):
+            _render_conflict_warning(all_orders, filters)
+        
+        with perf.step("render_action_bar"):
+            _render_action_bar(filters)
+        
+        with perf.step("render_order_list"):
+            _render_order_list(all_orders, filters)
+    
+    perf.summary()
