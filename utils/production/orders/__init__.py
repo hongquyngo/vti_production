@@ -3,7 +3,7 @@
 Production Orders Module
 Comprehensive order management with validation and pivot analysis
 
-Version: 2.1.0
+Version: 3.0.0
 
 Components:
 - queries.py: Database queries (OrderQueries)
@@ -18,6 +18,11 @@ Components:
 - common.py: Utilities and constants
 
 Changes:
+- v3.0.0: Performance overhaul — client-side filtering
+          + Bootstrap cache with bulk DB load (2 queries instead of ~15)
+          + PerformanceTimer for profiling
+          + render_dashboard_from_data() for zero-DB dashboard
+          + OrderDashboard class removed (use render_dashboard_from_data)
 - v2.1.0: Added Pivot View for data analysis
           + OrderPivotView class for pivot table generation
           + render_pivot_view() convenience function
@@ -57,12 +62,13 @@ from .dialogs import (
     check_pending_dialogs,
     handle_row_action
 )
-from .dashboard import OrderDashboard, render_dashboard
+from .dashboard import render_dashboard, render_dashboard_from_data
 from .pivot_view import OrderPivotView, PivotViewConfig, render_pivot_view
 from .page import render_orders_tab
 from .common import (
     OrderConstants,
     OrderValidator,
+    PerformanceTimer,
     get_vietnam_now,
     get_vietnam_today,
     format_number,
@@ -81,7 +87,6 @@ __all__ = [
     'OrderManager',
     'OrderValidators',
     'OrderForms',
-    'OrderDashboard',
     'OrderPivotView',
     'PivotViewConfig',
     
@@ -114,12 +119,14 @@ __all__ = [
     
     # Dashboard, Pivot & Page
     'render_dashboard',
+    'render_dashboard_from_data',
     'render_pivot_view',
     'render_orders_tab',
     
     # Common utilities
     'OrderConstants',
     'OrderValidator',
+    'PerformanceTimer',
     'get_vietnam_now',
     'get_vietnam_today',
     'format_number',

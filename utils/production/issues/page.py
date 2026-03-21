@@ -3,7 +3,11 @@
 Main UI orchestrator for Issues domain
 Renders the Issues tab with dashboard, issue form, and history
 
-Version: 1.0.0
+Version: 2.0.0
+Changes:
+- v2.0.0: Client-side filtering — bulk load + derive metrics
+  - 2 DB queries instead of ~5 per render
+  - PerformanceTimer instrumentation
 """
 
 import logging
@@ -14,15 +18,83 @@ import streamlit as st
 import pandas as pd
 
 from .queries import IssueQueries
-from .dashboard import render_dashboard
+from .dashboard import render_dashboard_from_data
 from .forms import render_issue_form
 from .dialogs import show_detail_dialog, show_pdf_dialog, check_pending_dialogs
 from .common import (
     format_number, create_status_indicator, format_datetime, format_datetime_vn,
-    get_vietnam_today, export_to_excel, IssueConstants, format_product_display_from_row
+    get_vietnam_today, export_to_excel, IssueConstants, format_product_display_from_row,
+    PerformanceTimer
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ==================== Bootstrap Cache ====================
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_bootstrap() -> Dict[str, Any]:
+    """Load ALL issues data in one cached call (TTL 30s)."""
+    return IssueQueries().bootstrap_all()
+
+
+# ==================== Client-Side Helpers ====================
+
+def _apply_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFrame:
+    """Apply all filters client-side using pandas."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
+    result = df.copy()
+    
+    from_date = filters.get('from_date')
+    to_date = filters.get('to_date')
+    if from_date and to_date:
+        dt = pd.to_datetime(result['issue_date'], errors='coerce')
+        from_ts = pd.Timestamp(from_date)
+        to_ts = pd.Timestamp(to_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        result = result[dt.between(from_ts, to_ts)]
+    
+    status = filters.get('status')
+    if status:
+        result = result[result['status'] == status]
+    
+    search = filters.get('search')
+    if search:
+        pattern = search.lower()
+        mask = (
+            result['order_no'].str.lower().str.contains(pattern, na=False) |
+            result['pt_code'].str.lower().str.contains(pattern, na=False) |
+            result['legacy_pt_code'].fillna('').str.lower().str.contains(pattern, na=False) |
+            result['product_name'].str.lower().str.contains(pattern, na=False) |
+            result['package_size'].fillna('').str.lower().str.contains(pattern, na=False)
+        )
+        result = result[mask]
+    
+    return result
+
+
+def _derive_metrics(issues: Optional[pd.DataFrame], pending_orders: int) -> Dict[str, Any]:
+    """Derive issue metrics from DataFrame — replaces get_issue_metrics() (3 queries)."""
+    empty = {'total_issues': 0, 'today_issues': 0, 'confirmed_count': 0, 'pending_orders': 0, 'total_units': 0}
+    
+    if issues is None or issues.empty:
+        empty['pending_orders'] = pending_orders
+        return empty
+    
+    today = get_vietnam_today()
+    today_ts = pd.Timestamp(today)
+    today_end = today_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    
+    dt = pd.to_datetime(issues['issue_date'], errors='coerce')
+    
+    return {
+        'total_issues': len(issues),
+        'today_issues': int(dt.between(today_ts, today_end).sum()),
+        'confirmed_count': int((issues['status'] == 'CONFIRMED').sum()),
+        'pending_orders': pending_orders,
+        'total_units': 0,  # item_count is count not qty — total_units needs detail table
+    }
 
 
 # ==================== Session State ====================
@@ -86,38 +158,26 @@ def _render_filter_bar() -> Dict[str, Any]:
 
 # ==================== Issue History ====================
 
-def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
-    """Render issue history list with single row selection"""
+def _render_issue_history(all_issues: Optional[pd.DataFrame], filters: Dict[str, Any]):
+    """Render issue history — client-side filtering, zero DB queries"""
     page_size = IssueConstants.DEFAULT_PAGE_SIZE
     page = st.session_state.issues_page
     
-    issues = queries.get_issues(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        search=filters.get('search'),
-        status=filters['status'],
-        page=page,
-        page_size=page_size
-    )
-    
-    # Check for connection error (returns None)
-    if issues is None:
-        error_msg = queries.get_last_error() or "Cannot connect to database"
-        st.error(f"🔌 **Database Connection Error**\n\n{error_msg}")
-        st.info("💡 **Troubleshooting:**\n- Check if VPN is connected\n- Verify network connection\n- Contact IT support if issue persists")
+    if all_issues is None:
+        st.error("🔌 **Database Connection Error**")
+        st.info("💡 Check VPN/network connection or contact IT support")
         return
     
-    total_count = queries.get_issues_count(
-        from_date=filters['from_date'],
-        to_date=filters['to_date'],
-        search=filters.get('search'),
-        status=filters['status']
-    )
+    # Client-side filter + paginate
+    filtered = _apply_filters(all_issues, filters)
+    total_count = len(filtered)
     
-    # Check for empty data (returns empty DataFrame)
-    if issues.empty:
+    if filtered.empty:
         st.info("📭 No issues found matching the filters")
         return
+    
+    offset = (page - 1) * page_size
+    issues = filtered.iloc[offset:offset + page_size].reset_index(drop=True)
     
     # Initialize selected index in session state
     if 'issues_selected_idx' not in st.session_state:
@@ -224,36 +284,37 @@ def _render_issue_history(queries: IssueQueries, filters: Dict[str, Any]):
 
 # ==================== Action Bar ====================
 
-def _render_action_bar(queries: IssueQueries, filters: Dict[str, Any]):
+def _render_action_bar(filters: Dict[str, Any]):
     """Render action bar"""
     col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
-        if st.button("📦 Issue Materials", type="primary", use_container_width=True,
+        if st.button("📦 Issue Materials", type="primary", width='stretch',
                     key="btn_create_issue"):
             st.session_state.issues_view = 'create'
             st.rerun()
     
     with col2:
-        if st.button("📊 Export Excel", use_container_width=True, key="btn_export_issues"):
-            _export_issues_excel(queries, filters)
+        if st.button("📊 Export Excel", width='stretch', key="btn_export_issues"):
+            _export_issues_excel(filters)
     
     with col3:
-        if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_issues"):
+        if st.button("🔄 Refresh", width='stretch', key="btn_refresh_issues"):
+            _cached_bootstrap.clear()
             st.rerun()
 
 
-def _export_issues_excel(queries: IssueQueries, filters: Dict[str, Any]):
-    """Export issues to Excel"""
+def _export_issues_excel(filters: Dict[str, Any]):
+    """Export issues to Excel — uses cached data, zero extra DB hit"""
     with st.spinner("Exporting..."):
-        issues = queries.get_issues(
-            from_date=filters['from_date'],
-            to_date=filters['to_date'],
-            search=filters.get('search'),
-            status=filters['status'],
-            page=1,
-            page_size=10000
-        )
+        boot = _cached_bootstrap()
+        all_issues = boot.get('issues')
+        
+        if all_issues is None or all_issues.empty:
+            st.warning("No issues to export")
+            return
+        
+        issues = _apply_filters(all_issues, filters)
         
         if issues.empty:
             st.warning("No issues to export")
@@ -287,37 +348,45 @@ def _export_issues_excel(queries: IssueQueries, filters: Dict[str, Any]):
 # ==================== Main Render Function ====================
 
 def render_issues_tab():
-    """
-    Main function to render the Issues tab
-    Called from the main Production page
-    """
+    """Main function to render the Issues tab"""
     _init_session_state()
     
-    # Check for pending dialogs (e.g., PDF dialog triggered from detail dialog)
-    check_pending_dialogs()
+    perf = PerformanceTimer("render_issues_tab")
     
-    queries = IssueQueries()
+    with perf.step("check_pending_dialogs"):
+        check_pending_dialogs()
     
-    # Check current view
     if st.session_state.issues_view == 'create':
         if st.button("⬅️ Back to History", key="btn_back_to_issues_history"):
             st.session_state.issues_view = 'history'
             st.rerun()
-        
         render_issue_form()
         return
     
-    # History view
     st.subheader("📦 Material Issues")
     
-    # Dashboard
-    render_dashboard()
-
+    # Bootstrap: 2 DB queries on cache miss, 0 on hit
+    with perf.step("bootstrap"):
+        boot = _cached_bootstrap()
+    
+    all_issues = boot.get('issues')
+    pending_orders = boot.get('pending_orders', 0)
+    
+    # Dashboard — derived from bootstrap, zero DB
+    with perf.step("render_dashboard"):
+        metrics = _derive_metrics(all_issues, pending_orders)
+        render_dashboard_from_data(metrics)
+    
     # Filters
-    filters = _render_filter_bar()
-
+    with perf.step("render_filters"):
+        filters = _render_filter_bar()
+    
     # Action bar
-    _render_action_bar(queries, filters)
-
-    # Issue list
-    _render_issue_history(queries, filters)
+    with perf.step("render_action_bar"):
+        _render_action_bar(filters)
+    
+    # Issue list — client-side filtering
+    with perf.step("render_issue_history"):
+        _render_issue_history(all_issues, filters)
+    
+    perf.summary()

@@ -10,6 +10,7 @@ Changes:
 """
 
 import logging
+import time as _time
 from datetime import date
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -629,3 +630,101 @@ class IssueQueries:
                 'pending_orders': 0,
                 'total_units': 0
             }
+    
+    # ==================== Bulk Load (Client-Side Filtering) ====================
+    
+    def get_all_issues(self) -> Optional[pd.DataFrame]:
+        """
+        Load ALL issues in one query — no pagination, no filters.
+        Filtering, pagination done client-side with pandas.
+        """
+        query = """
+            SELECT 
+                mi.id,
+                mi.issue_no,
+                mi.issue_date,
+                mi.status,
+                mi.notes,
+                mi.created_date,
+                mo.order_no,
+                mo.id as order_id,
+                p.name as product_name,
+                p.pt_code,
+                p.legacy_pt_code,
+                p.package_size,
+                br.brand_name as brand_name,
+                w.name as warehouse_name,
+                CONCAT(e_issued.first_name, ' ', e_issued.last_name) as issued_by_name,
+                CONCAT(e_received.first_name, ' ', e_received.last_name) as received_by_name,
+                (SELECT COUNT(*) FROM material_issue_details WHERE material_issue_id = mi.id) as item_count
+            FROM material_issues mi
+            JOIN manufacturing_orders mo ON mi.manufacturing_order_id = mo.id
+            JOIN products p ON mo.product_id = p.id
+            LEFT JOIN brands br ON p.brand_id = br.id
+            JOIN warehouses w ON mi.warehouse_id = w.id
+            LEFT JOIN employees e_issued ON mi.issued_by = e_issued.id
+            LEFT JOIN employees e_received ON mi.received_by = e_received.id
+            ORDER BY mi.created_date DESC
+        """
+        
+        try:
+            _t0 = _time.perf_counter()
+            result = pd.read_sql(query, self.engine)
+            _ms = (_time.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] get_all_issues: {_ms:.0f}ms ({len(result)} rows)")
+            self._connection_error = None
+            return result
+        except (OperationalError, DatabaseError) as e:
+            self._connection_error = "Cannot connect to database. Please check your network/VPN connection."
+            logger.error(f"Database connection error in bulk load: {e}")
+            return None
+        except Exception as e:
+            self._connection_error = f"Database error: {str(e)}"
+            logger.error(f"Error in bulk load: {e}")
+            return None
+    
+    def _get_pending_orders_count(self) -> int:
+        """Count of MOs waiting for material issue — can't derive from issues data."""
+        query = """
+            SELECT COUNT(*) as cnt FROM manufacturing_orders
+            WHERE delete_flag = 0 AND status IN ('DRAFT', 'CONFIRMED')
+        """
+        try:
+            _t0 = _time.perf_counter()
+            result = pd.read_sql(query, self.engine)
+            _ms = (_time.perf_counter() - _t0) * 1000
+            logger.info(f"[PERF] _get_pending_orders_count: {_ms:.0f}ms")
+            return int(result.iloc[0]['cnt'])
+        except Exception as e:
+            logger.error(f"Error getting pending orders count: {e}")
+            return 0
+    
+    def bootstrap_all(self) -> Dict[str, Any]:
+        """
+        Load ALL page data: 2 sequential queries, derive the rest.
+        
+        Pipeline:
+          1. get_all_issues()              ~200ms (bulk data)
+          2. _get_pending_orders_count()   ~170ms (1 scalar query)
+          3. Derive metrics                ~0ms   (pandas)
+                                           ─────
+                                      Total ~370ms
+        """
+        _t0 = _time.perf_counter()
+        
+        issues = self.get_all_issues()
+        pending_orders = self._get_pending_orders_count()
+        
+        connection_error = None
+        if issues is None:
+            connection_error = self._connection_error or "Cannot connect to database"
+        
+        _ms = (_time.perf_counter() - _t0) * 1000
+        n_rows = len(issues) if issues is not None else 0
+        logger.info(f"[PERF] bootstrap_all: {_ms:.0f}ms total ({n_rows} issues)")
+        
+        return {
+            'issues': issues,
+            'pending_orders': pending_orders,
+            'connection_error': connection_error,
+        }
