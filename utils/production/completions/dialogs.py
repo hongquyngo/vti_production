@@ -3,8 +3,11 @@
 Dialog components for Production Receipts domain
 Receipt detail, quality update (with guards), PDF export, close order dialogs
 
-Version: 4.0.0
+Version: 4.2.0
 Changes:
+- v4.2.0: Dialog-based UI flow
+  - NEW: show_close_order_select_dialog() — replaces close order page view
+  - Updated check_pending_dialogs() for close order select → confirm flow
 - v4.0.0: Production Receipts refactoring
   - QC dialog: ONLY PENDING receipts can be updated (PASSED/FAILED locked)
   - QC dialog: Blocked when MO = COMPLETED
@@ -602,6 +605,63 @@ def show_close_order_dialog(order_id: int):
             st.rerun()
 
 
+# ==================== Close Order Select Dialog ====================
+
+@st.dialog("🔒 Close Manufacturing Order", width="large")
+def show_close_order_select_dialog():
+    """
+    Dialog for selecting and closing orders.
+    Shows ready-to-close and blocked orders.
+    Replaces the old full-page close order view.
+    """
+    queries = CompletionQueries()
+    
+    st.caption("Select an order to close. All QC must be resolved before closing.")
+    
+    ready_info = queries.get_ready_to_close_orders()
+    
+    if ready_info['ready_count'] == 0 and ready_info['blocked_count'] == 0:
+        st.info("📭 No orders are ready to close. Orders need to meet their production target first.")
+        return
+    
+    # Show ready orders
+    if ready_info['ready_count'] > 0:
+        st.success(f"✅ **{ready_info['ready_count']} order(s) ready to close**")
+        
+        for order in ready_info['ready_orders']:
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([3, 2, 1])
+                with col1:
+                    yield_pct = calculate_percentage(order['produced_qty'], order['planned_qty'])
+                    st.markdown(
+                        f"**{order['order_no']}** | {order['product_name']}"
+                    )
+                    st.caption(
+                        f"Produced: {format_number(order['produced_qty'], 2)}"
+                        f" / {format_number(order['planned_qty'], 2)} {order['uom']}"
+                        f" ({yield_pct}%)"
+                    )
+                with col2:
+                    st.caption(f"Receipts: {order['receipt_count']}")
+                with col3:
+                    if st.button("🔒 Close", key=f"close_order_{order['id']}",
+                                width='stretch'):
+                        # Use pending dialog pattern to avoid nested dialog
+                        st.session_state['open_close_order_dialog'] = True
+                        st.session_state['close_order_id'] = int(order['id'])
+                        st.rerun()
+    
+    # Show blocked orders
+    if ready_info['blocked_count'] > 0:
+        st.warning(f"⏳ **{ready_info['blocked_count']} order(s) blocked by pending QC**")
+        
+        for order in ready_info['blocked_orders']:
+            st.caption(
+                f"• **{order['order_no']}** — {order['product_name']} "
+                f"({int(order['pending_count'])} pending receipts)"
+            )
+
+
 # ==================== Check for pending dialogs ====================
 
 def check_pending_dialogs():
@@ -625,12 +685,23 @@ def check_pending_dialogs():
         if receipt_id:
             show_update_quality_dialog(receipt_id)
     
-    # Check for close order dialog
+    # Check for close order confirm dialog (from close order select dialog)
     if st.session_state.get('open_close_order_dialog'):
         order_id = st.session_state.pop('close_order_id', None)
         st.session_state.pop('open_close_order_dialog', None)
         if order_id:
             show_close_order_dialog(order_id)
+    
+    # Check for close order select dialog
+    if st.session_state.get('open_close_order_select_dialog'):
+        st.session_state.pop('open_close_order_select_dialog', None)
+        show_close_order_select_dialog()
+    
+    # Check for record output dialog
+    if st.session_state.get('open_record_output_dialog'):
+        st.session_state.pop('open_record_output_dialog', None)
+        from .forms import show_record_output_dialog  # lazy import to avoid circular
+        show_record_output_dialog()
 
 
 # ==================== Quick Action Functions ====================

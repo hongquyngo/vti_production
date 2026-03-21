@@ -3,8 +3,13 @@
 Main UI orchestrator for Production Receipts domain
 Renders the Production Receipts tab with unified metrics, filters, and receipts list
 
-Version: 4.1.0
+Version: 4.2.0
 Changes:
+- v4.2.0: Dialog-based UI — eliminates full-page view switching
+  - Record Output / Close Order open as @st.dialog overlays
+  - No more completions_view state, no "Back to Receipts" navigation
+  - Receipts page always renders — dialogs overlay on top
+  - Removed _render_close_order_view (moved to dialogs.py)
 - v4.1.0: Filter & Performance improvements
   - Added date type filter: receipt_date, order_date, scheduled_date
   - Added custom date range with date pickers alongside presets
@@ -22,10 +27,10 @@ import streamlit as st
 import pandas as pd
 
 from .queries import CompletionQueries
-from .forms import render_completion_form
 from .dialogs import (
     show_receipt_details_dialog, show_update_quality_dialog,
-    show_pdf_dialog, show_close_order_dialog, check_pending_dialogs
+    show_pdf_dialog, show_close_order_dialog,
+    show_close_order_select_dialog, check_pending_dialogs
 )
 from .help_guide import render_help_guide
 from .common import (
@@ -70,7 +75,6 @@ def _init_session_state():
     """Initialize session state for completions tab"""
     defaults = {
         'completions_page': 1,
-        'completions_view': 'receipts',  # 'receipts' or 'create'
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -291,13 +295,13 @@ def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
     with col1:
         if st.button("📦 Record Output", type="primary", width='stretch',
                       key="btn_record_output"):
-            st.session_state.completions_view = 'create'
+            st.session_state['open_record_output_dialog'] = True
             st.rerun()
 
     with col2:
         if st.button("🔒 Close Order", width='stretch',
                       key="btn_close_order"):
-            st.session_state.completions_view = 'close_order'
+            st.session_state['open_close_order_select_dialog'] = True
             st.rerun()
 
     with col3:
@@ -747,61 +751,13 @@ def _export_receipts_excel(queries: CompletionQueries, filters: Dict[str, Any]):
         )
 
 
-# ==================== Close Order View ====================
-
-def _render_close_order_view(queries: CompletionQueries):
-    """Render close order selection and confirmation view."""
-    st.subheader("🔒 Close Manufacturing Order")
-    st.caption("Select an order to close. All QC must be resolved before closing.")
-    
-    ready_info = _cached_get_ready_to_close()
-    
-    if ready_info['ready_count'] == 0 and ready_info['blocked_count'] == 0:
-        st.info("📭 No orders are ready to close. Orders need to meet their production target first.")
-        return
-    
-    # Show ready orders
-    if ready_info['ready_count'] > 0:
-        st.success(f"✅ **{ready_info['ready_count']} order(s) ready to close**")
-        
-        for order in ready_info['ready_orders']:
-            with st.container(border=True):
-                col1, col2, col3 = st.columns([3, 2, 1])
-                with col1:
-                    yield_pct = calculate_percentage(order['produced_qty'], order['planned_qty'])
-                    st.markdown(
-                        f"**{order['order_no']}** | {order['product_name']}"
-                    )
-                    st.caption(
-                        f"Produced: {format_number(order['produced_qty'], 2)}"
-                        f" / {format_number(order['planned_qty'], 2)} {order['uom']}"
-                        f" ({yield_pct}%)"
-                    )
-                with col2:
-                    st.caption(f"Receipts: {order['receipt_count']}")
-                with col3:
-                    if st.button("🔒 Close", key=f"close_order_{order['id']}",
-                                width='stretch'):
-                        show_close_order_dialog(int(order['id']))
-    
-    # Show blocked orders
-    if ready_info['blocked_count'] > 0:
-        st.warning(f"⏳ **{ready_info['blocked_count']} order(s) blocked by pending QC**")
-        
-        for order in ready_info['blocked_orders']:
-            st.caption(
-                f"• **{order['order_no']}** — {order['product_name']} "
-                f"({int(order['pending_count'])} pending receipts)"
-            )
-
-
 # ==================== Main Render Function ====================
 
 def render_completions_tab():
     """
     Main function to render the Production Receipts tab.
 
-    Layout v4.0:
+    Layout v4.2 (dialog-based):
     ┌──────────────────────────────────┐
     │  Header + Live Badges            │  ← renders once
     ├──────────────────────────────────┤
@@ -810,9 +766,9 @@ def render_completions_tab():
     │  │ Filters (+ show completed) │  │
     │  │ Action Bar (Record/Close)  │  │  ← fragment reruns independently
     │  │ Ready-to-Close Banner      │  │
-    │  │ Unified Metrics (6 cols)   │  │
-    │  │ Warnings Bar               │  │
-    │  │ Receipts Table + Actions   │  │
+    │  │ Unified Metrics (6 cols)   │  │  Record Output / Close Order
+    │  │ Warnings Bar               │  │  open as @st.dialog overlays
+    │  │ Receipts Table + Actions   │  │  — no page navigation needed
     │  │ Pagination                 │  │
     │  └────────────────────────────┘  │
     └──────────────────────────────────┘
@@ -822,26 +778,6 @@ def render_completions_tab():
 
     queries = CompletionQueries()
 
-    # Create view — full page, not inside fragment
-    if st.session_state.completions_view == 'create':
-        if st.button("⬅️ Back to Receipts", key="btn_back_to_receipts"):
-            st.session_state.completions_view = 'receipts'
-            st.session_state.pop('completion_success', None)
-            st.session_state.pop('completion_info', None)
-            st.rerun()
-
-        render_completion_form()
-        return
-    
-    # Close Order view
-    if st.session_state.completions_view == 'close_order':
-        if st.button("⬅️ Back to Receipts", key="btn_back_from_close"):
-            st.session_state.completions_view = 'receipts'
-            st.rerun()
-        
-        _render_close_order_view(queries)
-        return
-
-    # Receipts view — Header (once) + Fragment (interactive)
+    # Always render: Header (once) + Fragment (interactive)
     _render_header(queries)
     _render_receipts_section(queries)

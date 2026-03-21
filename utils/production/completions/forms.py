@@ -3,8 +3,13 @@
 Form components for Production Receipts domain
 Record production output with QC breakdown (passed/pending/failed)
 
-Version: 4.1.0
+Version: 4.2.0
 Changes:
+- v4.2.0: Dialog-based UI flow
+  - Converted to @st.dialog — no more view switching / full page rerun
+  - show_record_output_dialog() opens as overlay on receipts page
+  - Success: "Record Another" reopens dialog, "Done" closes to receipts
+  - Removed render_completion_form() convenience function
 - v4.1.0: Fix form not refreshing when switching MO
   - Clear cached widget keys on order change and reset
   - Trigger st.rerun() after clearing to force fresh render
@@ -58,8 +63,7 @@ class CompletionForms:
     # ==================== Production Output Form ====================
     
     def render_completion_form(self):
-        """Render production output recording form"""
-        st.subheader("📦 Record Production Output")
+        """Render production output recording form (called inside dialog)"""
         
         # Check for success message
         if st.session_state.get('completion_success'):
@@ -353,11 +357,20 @@ class CompletionForms:
                        width='stretch', key="btn_another_completion"):
                 st.session_state.pop('completion_success', None)
                 st.session_state.pop('completion_info', None)
+                st.session_state.pop('completion_order_id', None)
+                # Clear widget keys for fresh form
+                for wkey in [
+                    'form_passed_qty', 'form_pending_qty', 'form_failed_qty',
+                    'form_batch_no', 'form_expiry_date', 'form_defect_type',
+                    'form_completion_notes'
+                ]:
+                    st.session_state.pop(wkey, None)
+                # Reopen dialog after rerun
+                st.session_state['open_record_output_dialog'] = True
                 st.rerun()
         with col2:
-            if st.button("📋 View Receipts", width='stretch', 
+            if st.button("✅ Done", width='stretch', 
                        key="btn_view_receipts"):
-                st.session_state.completions_view = 'receipts'
                 st.session_state.pop('completion_success', None)
                 st.session_state.pop('completion_info', None)
                 st.rerun()
@@ -502,9 +515,14 @@ class CompletionForms:
             logger.error(f"Production output error: {e}", exc_info=True)
 
 
-# Convenience function
+# ==================== Dialog Entry Point ====================
 
-def render_completion_form():
-    """Render production output recording form"""
+@st.dialog("📦 Record Production Output", width="large")
+def show_record_output_dialog():
+    """
+    Dialog wrapper for Record Output form.
+    Opens as overlay — no page navigation needed.
+    Receipts list stays rendered behind the dialog.
+    """
     forms = CompletionForms()
     forms.render_completion_form()
