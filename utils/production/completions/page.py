@@ -28,6 +28,7 @@ from .dialogs import (
     show_receipt_details_dialog, show_update_quality_dialog,
     show_pdf_dialog, show_close_order_dialog, check_pending_dialogs
 )
+from .help_guide import render_help_guide
 from .common import (
     format_number, create_status_indicator, get_yield_indicator,
     calculate_percentage, format_datetime_vn, get_vietnam_today,
@@ -96,76 +97,12 @@ def _render_header(queries: CompletionQueries):
         )
 
 
-# ==================== Help Popover ====================
+# ==================== Help ====================
 
-def _render_help_popover():
-    """
-    Render full help as st.popover — no page rerun needed.
-    Contains validation rules, formulas, quality flow,
-    inventory impact, alerts, and terminology.
-    """
-    with st.popover("❓ Help", use_container_width=True):
-        st.markdown("### 📚 Production Receipts Help")
-
-        st.markdown("#### 📦 Record Output (Phase 1)")
-        st.markdown("""\
-| Điều kiện | Yêu cầu | Giải thích |
-|-----------|---------|------------|
-| Order Status | = `IN_PROGRESS` | Chỉ orders đang sản xuất |
-| QC Breakdown | Passed + Pending + Failed > 0 | Chia QC ngay lúc receipt |
-| Batch No | Không trống | Mã batch để truy xuất |
-| Raw Materials | `issued_qty > 0` | NVL chính phải được issue |
-| Overproduction | Không giới hạn | Ghi đúng thực tế |\
-""")
-
-        st.markdown("---")
-        
-        st.markdown("#### 🔒 Close Order (Phase 2)")
-        st.markdown("""\
-| Điều kiện | Yêu cầu | Giải thích |
-|-----------|---------|------------|
-| Có receipt | ≥ 1 | Phải có ít nhất 1 phiếu nhập |
-| PENDING QC | = 0 | Tất cả QC phải resolved |
-| Raw Materials | issued | NVL chính đã xuất |
-| Action | Manual confirm | User phải nhấn Close |\
-""")
-
-        st.markdown("""\
-> 💡 **MO không auto-complete.** Sau khi Record Output, MO vẫn IN_PROGRESS.  
-> User chủ động Close Order khi sẵn sàng.\
-""")
-
-        st.markdown("---")
-
-        st.markdown("#### 🔄 QC Status Flow")
-        st.markdown("""\
-| Transition | Cho phép? | Inventory |
-|-----------|----------|-----------|
-| Receipt → PASSED | ✅ | ➕ Vào kho |
-| Receipt → PENDING | ✅ | ❌ Chưa vào kho |
-| Receipt → FAILED | ✅ | ❌ Không vào kho |
-| PENDING → PASSED | ✅ | ➕ Vào kho |
-| PENDING → FAILED | ✅ | Không thay đổi |
-| PASSED → bất kỳ | 🔒 Locked | — |
-| FAILED → bất kỳ | 🔒 Locked | — |
-| MO COMPLETED → sửa QC | 🔒 Locked | — |\
-""")
-
-        st.markdown("---")
-
-        st.markdown("#### ⚠️ Alert Warnings")
-        st.markdown("""\
-| Icon | Cảnh báo | Mô tả |
-|------|---------|-------|
-| 🔁 | Duplicate Batch | Batch number trùng MO khác |
-| 📅 | Expired | Sản phẩm đã quá hạn |
-| 📈 | Overproduction | Yield > 100% |
-| ⏳ | Pending QC | Chưa kiểm tra chất lượng |
-| 🟡🟠🔴 | Aging | PENDING lâu (>3/7/14 ngày) |
-| 🔒 | Completed | Order đã đóng |\
-""")
-
-        st.caption("💬 Liên hệ team IT hoặc sử dụng nút 👎 để báo lỗi.")
+def _render_help_button():
+    """Render help button that opens the full user guide dialog."""
+    if st.button("📚 Help", use_container_width=True, key="btn_help_guide"):
+        render_help_guide()
 
 
 # ==================== Filter Bar ====================
@@ -297,7 +234,7 @@ def _render_action_bar(queries: CompletionQueries, filters: Dict[str, Any]):
             st.rerun()
 
     with col5:
-        _render_help_popover()
+        _render_help_button()
 
 
 # ==================== Unified Metrics ====================
