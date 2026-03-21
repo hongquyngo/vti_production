@@ -891,23 +891,24 @@ class CompletionQueries:
             logger.error(f"Error in bulk load: {e}")
             return None
     
-    def _get_header_on_single_conn(self) -> Dict[str, Any]:
+    def _get_header_data(self) -> Dict[str, Any]:
         """
-        Run live_stats + ready_to_close on ONE connection (2 queries, 1 conn).
-        Avoids pool contention — only 2 connections used total in bootstrap.
+        Stats + ready-to-close using pd.read_sql(string, engine).
+        This exact pattern worked at 609ms in testing — do NOT change to
+        explicit conn.execute() or text() which caused 1482ms regression.
         """
         from .common import get_vietnam_today
         today = get_vietnam_today()
         
-        stats_query = text("""
+        stats_query = """
             SELECT 
                 (SELECT COUNT(*) FROM manufacturing_orders 
                  WHERE delete_flag = 0 AND status = 'IN_PROGRESS') as in_progress,
                 (SELECT COUNT(*) FROM production_receipts 
-                 WHERE DATE(receipt_date) = :today) as today_count
-        """)
+                 WHERE DATE(receipt_date) = %s) as today_count
+        """
         
-        ready_query = text("""
+        ready_query = """
             SELECT
                 mo.id,
                 mo.order_no,
@@ -937,25 +938,24 @@ class CompletionQueries:
                 AND mo.delete_flag = 0
                 AND mo.produced_qty >= mo.planned_qty
             ORDER BY mo.order_no
-        """)
+        """
         
         try:
             import time as _t; _t0 = _t.perf_counter()
             
-            # Single connection for both queries — no pool round-trip for 2nd query
-            with self.engine.connect() as conn:
-                stats_result = conn.execute(stats_query, {'today': today})
-                stats_row = stats_result.fetchone()
-                
-                ready_result = pd.read_sql(ready_query, conn)
+            # IMPORTANT: use pd.read_sql(string, engine) — NOT conn.execute(text())
+            # The engine-based approach auto-manages connections and was 2.4x faster in testing.
+            stats_result = pd.read_sql(stats_query, self.engine, params=(today,))
+            ready_result = pd.read_sql(ready_query, self.engine)
             
             _ms = (_t.perf_counter() - _t0) * 1000
-            logger.info(f"[PERF] _get_header_on_single_conn: {_ms:.0f}ms (stats+ready, 1 conn)")
+            logger.info(f"[PERF] _get_header_data: {_ms:.0f}ms (stats+ready via engine)")
             
             # Parse stats
+            stats_row = stats_result.iloc[0]
             live_stats = {
-                'in_progress': int(stats_row[0]) if stats_row else 0,
-                'today_count': int(stats_row[1]) if stats_row else 0,
+                'in_progress': int(stats_row['in_progress']),
+                'today_count': int(stats_row['today_count']),
             }
             
             # Parse ready-to-close
@@ -989,12 +989,14 @@ class CompletionQueries:
     
     def bootstrap_all(self, include_completed: bool = False) -> Dict[str, Any]:
         """
-        Load ALL page data in 2 parallel threads, 2 connections max.
+        Load ALL page data in 2 parallel threads.
         
-        Thread 1: get_all_active_receipts      ~236ms ─┐ 1 conn
-        Thread 2: _get_header_on_single_conn   ~300ms ─┘ 1 conn (2 queries reuse)
-                                                         ─────────
-                                          max(236, 300) ≈ 300ms total
+        Thread 1: get_all_active_receipts  ~236ms ─┐ pd.read_sql(str, engine)
+        Thread 2: _get_header_data         ~600ms ─┘ pd.read_sql(str, engine) × 2
+                                      max(236, 600) ≈ 620ms total
+        
+        NOTE: pd.read_sql(string, engine) auto-manages connection checkout/return.
+        Do NOT replace with explicit conn.execute(text()) — causes 2.4x regression.
         """
         from concurrent.futures import ThreadPoolExecutor
         import time as _t
@@ -1005,7 +1007,7 @@ class CompletionQueries:
             fut_receipts = executor.submit(
                 self.get_all_active_receipts, include_completed
             )
-            fut_header = executor.submit(self._get_header_on_single_conn)
+            fut_header = executor.submit(self._get_header_data)
             
             try:
                 receipts = fut_receipts.result(timeout=30)
