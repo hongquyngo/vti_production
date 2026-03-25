@@ -3,12 +3,13 @@
 """
 PO Planning Page — Layer 3 of SCM Planning Pipeline.
 
-Flow:
-1. User clicks "Generate PO Suggestions"
-2. System reviews GAP filter context (Informed Consent)
-3. If all filters complete → auto-proceed
-4. If filters incomplete → show review panel, user must confirm
-5. Results displayed with persistent banner if filters incomplete
+UI Fixes v1.2:
+- Removed "Skip zero-shortage items" (always True, GAP only sends shortage > 0)
+- Renamed demand offset → "Planning horizon" with default 60 days
+- Moved Export below tabs (near data)
+- Reordered tabs: By Vendor → All Lines → Overview → Coverage
+- Hidden "Data Source" into Advanced expander
+- Informed Consent filter review flow
 """
 
 import streamlit as st
@@ -29,26 +30,59 @@ def main():
         if key not in st.session_state:
             st.session_state[key] = None
 
-    # Sidebar config
+    # =========================================================================
+    # SIDEBAR
+    # =========================================================================
     with st.sidebar:
         st.markdown("### ⚙️ PO Planning Config")
-        strategy = st.selectbox("Vendor Selection Strategy", ['CHEAPEST', 'FASTEST'], index=0,
-                                help="CHEAPEST: lowest unit price (USD)\nFASTEST: shortest lead time")
-        demand_offset = st.number_input("Default demand date (days from today)",
-                                         min_value=7, max_value=180, value=30)
-        skip_zero = st.checkbox("Skip zero-shortage items", value=True)
-        st.divider()
-        source_mode = st.radio("Data Source", ['From SCM GAP Result', 'Reload from Database'], index=0)
 
-    # Action buttons
-    col1, col2, col3 = st.columns([2, 1, 1])
+        strategy = st.selectbox(
+            "Vendor Selection Strategy",
+            ['CHEAPEST', 'FASTEST'],
+            index=0,
+            help=(
+                "CHEAPEST: pick vendor with lowest unit price (USD)\n"
+                "FASTEST: pick vendor with shortest lead time"
+            ),
+        )
+
+        planning_horizon = st.number_input(
+            "Planning horizon (days)",
+            min_value=14, max_value=365, value=60,
+            help=(
+                "Fallback demand date = today + this value.\n"
+                "Used when GAP period data has no specific date for a product.\n"
+                "Should be longer than your longest vendor lead time."
+            ),
+        )
+
+        st.divider()
+        with st.expander("🔧 Advanced", expanded=False):
+            source_mode = st.radio(
+                "Data Source",
+                ['From SCM GAP Result', 'Refresh vendor pricing'],
+                index=0,
+                help=(
+                    "From SCM GAP Result: use existing analysis (default)\n"
+                    "Refresh vendor pricing: reload costbook & vendor data from DB"
+                ),
+            )
+
+    # =========================================================================
+    # ACTION BUTTONS (Generate + Reset only — Export moved below tabs)
+    # =========================================================================
+    col1, col2, col3 = st.columns([3, 1, 1])
+
     with col1:
-        run_clicked = st.button("🔄 Generate PO Suggestions", type="primary", use_container_width=True)
+        run_clicked = st.button(
+            "🔄 Generate PO Suggestions",
+            type="primary",
+            use_container_width=True,
+        )
     with col2:
-        reset_clicked = st.button("🗑️ Reset", use_container_width=True)
+        reset_clicked = st.button("🗑️ Clear Results", use_container_width=True)
     with col3:
-        has_result = st.session_state.get('po_result') is not None
-        export_clicked = st.button("📥 Export Excel", disabled=not has_result, use_container_width=True)
+        pass  # empty — Export is below tabs now
 
     # Reset
     if reset_clicked:
@@ -57,25 +91,27 @@ def main():
         st.rerun()
 
     # =========================================================================
-    # STEP 1: Generate clicked → run filter review first
+    # STEP 1: Generate → filter review first
     # =========================================================================
     if run_clicked:
         gap_result = _get_gap_result(source_mode)
         if gap_result is None:
-            st.warning("⚠️ No SCM GAP result found. Please run **Supply Chain GAP Analysis** first.")
+            st.warning(
+                "⚠️ No SCM GAP result found. "
+                "Please run **Supply Chain GAP Analysis** first."
+            )
         else:
             from utils.supply_chain_planning.validators import validate_gap_filters
             filter_review = validate_gap_filters(gap_result)
 
             if filter_review.get('all_complete', False):
-                # All filters ON → auto-proceed
-                _run_planning(strategy, demand_offset, skip_zero, source_mode)
+                _run_planning(strategy, planning_horizon, source_mode)
             else:
-                # Incomplete → show review, wait for confirm
                 st.session_state['po_filter_review'] = filter_review
                 st.session_state['po_pending_args'] = {
-                    'strategy': strategy, 'demand_offset': demand_offset,
-                    'skip_zero': skip_zero, 'source_mode': source_mode,
+                    'strategy': strategy,
+                    'planning_horizon': planning_horizon,
+                    'source_mode': source_mode,
                 }
 
     # =========================================================================
@@ -89,32 +125,27 @@ def main():
 
         bc1, bc2 = st.columns([1, 1])
         with bc1:
-            btn_label = ("⚠️ Proceed anyway — I understand the risk"
-                         if review.get('has_high_risk')
-                         else "✅ Proceed with current filters")
-            proceed = st.button(btn_label, type="primary", use_container_width=True)
+            label = ("⚠️ Proceed anyway — I understand the risk"
+                     if review.get('has_high_risk')
+                     else "✅ Proceed with current filters")
+            proceed = st.button(label, type="primary", use_container_width=True)
         with bc2:
             go_back = st.button("← Go back to SCM GAP", use_container_width=True)
 
         if proceed:
-            _run_planning(args['strategy'], args['demand_offset'],
-                          args['skip_zero'], args['source_mode'])
+            _run_planning(args['strategy'], args['planning_horizon'], args['source_mode'])
             st.session_state['po_filter_review'] = None
             st.session_state['po_pending_args'] = None
             st.rerun()
-
         if go_back:
             st.session_state['po_filter_review'] = None
             st.session_state['po_pending_args'] = None
             st.switch_page("pages/5_🔬_Supply_Chain_GAP.py")
+        return
 
-        return  # Don't render results while review pending
-
-    # Export
-    if export_clicked and has_result:
-        _do_export()
-
-    # Display results
+    # =========================================================================
+    # DISPLAY RESULTS
+    # =========================================================================
     result = st.session_state.get('po_result')
     if result is None:
         _show_empty_state()
@@ -122,8 +153,11 @@ def main():
     _render_results(result)
 
 
+# =============================================================================
+# FILTER REVIEW
+# =============================================================================
+
 def _render_filter_review(review):
-    """Render filter review panel for user confirmation."""
     st.divider()
     st.markdown("### 🔍 GAP Filter Review")
     st.markdown("PO Planning uses shortage data from SCM GAP. Review the filters used:")
@@ -146,7 +180,6 @@ def _render_filter_review(review):
             risk = info.get('risk', 'INFO')
             marker = '🔴' if risk == 'HIGH' else '🟡' if risk == 'MEDIUM' else 'ℹ️'
             st.markdown(f"{marker} ~~{info.get('label', s)}~~ — **OFF**")
-
     with col2:
         st.markdown("**📊 Demand Sources**")
         for d in review.get('demand_sources_on', []):
@@ -156,17 +189,11 @@ def _render_filter_review(review):
             info = DEMAND_SOURCE_IMPACT.get(d, {})
             st.markdown(f"ℹ️ ~~{info.get('label', d)}~~ — **OFF**")
 
-    high_items = [i for i in items if i['risk'] == 'HIGH']
-    medium_items = [i for i in items if i['risk'] == 'MEDIUM']
+    for item in [i for i in items if i['risk'] == 'HIGH']:
+        st.error(f"🔴 **{item['label']}** is OFF — {item['consequence']}")
+    for item in [i for i in items if i['risk'] == 'MEDIUM']:
+        st.warning(f"🟡 **{item['label']}** — {item['consequence']}")
     info_items = [i for i in items if i['risk'] == 'INFO']
-
-    if high_items:
-        st.markdown("---")
-        for item in high_items:
-            st.error(f"🔴 **{item['label']}** is OFF — {item['consequence']}")
-    if medium_items:
-        for item in medium_items:
-            st.warning(f"🟡 **{item['label']}** — {item['consequence']}")
     if info_items:
         with st.expander(f"ℹ️ {len(info_items)} informational notes", expanded=False):
             for item in info_items:
@@ -174,23 +201,26 @@ def _render_filter_review(review):
     st.divider()
 
 
+# =============================================================================
+# HELPERS
+# =============================================================================
+
 def _get_gap_result(source_mode):
-    if source_mode == 'From SCM GAP Result':
-        try:
-            from utils.supply_chain_gap.state import get_state as get_gap_state
-            gap_state = get_gap_state()
-            return gap_state.get_result() if gap_state.has_result() else None
-        except Exception:
-            return None
-    return None
+    try:
+        from utils.supply_chain_gap.state import get_state as get_gap_state
+        gap_state = get_gap_state()
+        return gap_state.get_result() if gap_state.has_result() else None
+    except Exception:
+        return None
 
 
-def _run_planning(strategy, demand_offset, skip_zero, source_mode):
+def _run_planning(strategy, planning_horizon, source_mode):
     from utils.supply_chain_planning.po_planner import POPlanner
 
     with st.spinner("Loading data and generating PO suggestions..."):
         try:
-            if source_mode == 'Reload from Database' or st.session_state.get('po_planner') is None:
+            reload_vendor = (source_mode == 'Refresh vendor pricing')
+            if reload_vendor or st.session_state.get('po_planner') is None:
                 planner = POPlanner.create_with_data_loader()
                 st.session_state['po_planner'] = planner
             else:
@@ -204,42 +234,39 @@ def _run_planning(strategy, demand_offset, skip_zero, source_mode):
             result = planner.plan_from_gap_result(
                 gap_result=gap_result,
                 strategy=strategy,
-                default_demand_date=date.today() + timedelta(days=demand_offset),
+                default_demand_date=date.today() + timedelta(days=planning_horizon),
                 deduct_pending_po=True,
-                skip_zero_shortage=skip_zero,
+                skip_zero_shortage=True,
             )
             st.session_state['po_result'] = result
 
-            metrics = result.get_summary()
+            m = result.get_summary()
             if result.has_lines():
                 st.success(
-                    f"✅ Generated {metrics['total_po_lines']} PO lines "
-                    f"across {metrics['total_vendors']} vendors "
-                    f"(${metrics['total_value_usd']:,.0f} total)"
+                    f"✅ Generated {m['total_po_lines']} PO lines "
+                    f"across {m['total_vendors']} vendors "
+                    f"(${m['total_value_usd']:,.0f} total)"
                 )
             else:
                 st.info("No PO suggestions needed — all shortages covered")
-        except ImportError as e:
-            st.error(f"Module not found: {e}")
         except Exception as e:
             logger.error(f"PO Planning failed: {e}", exc_info=True)
             st.error(f"PO Planning failed: {e}")
 
 
-def _do_export():
+def _do_export(result):
     from utils.supply_chain_planning.po_planning_export import (
         export_po_suggestions_to_excel, get_po_export_filename
     )
-    result = st.session_state.get('po_result')
-    if result is None:
-        return
     try:
         buffer = export_po_suggestions_to_excel(result)
         st.download_button(
-            label="⬇️ Download Excel", data=buffer,
+            label="📥 Export Excel",
+            data=buffer,
             file_name=get_po_export_filename(),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="po_download",
+            type="primary",
         )
     except Exception as e:
         st.error(f"Export failed: {e}")
@@ -259,25 +286,40 @@ def _show_empty_state():
 
 def _render_results(result):
     from utils.supply_chain_planning.po_planning_components import (
-        po_overview_fragment, po_vendor_groups_fragment,
-        po_all_lines_fragment, po_coverage_fragment,
+        po_overview_fragment,
+        po_vendor_groups_fragment,
+        po_all_lines_fragment,
+        po_coverage_fragment,
         render_filter_warning_banner,
     )
+
+    # Persistent filter banner — above tabs
     render_filter_warning_banner(result)
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        f"📊 Overview ({result.get_summary().get('total_po_lines', 0)})",
-        f"🏭 By Vendor ({result.get_summary().get('total_vendors', 0)})",
-        "📋 All Lines", "📈 Coverage",
+    m = result.get_summary()
+
+    # Tabs: By Vendor first (procurement-friendly)
+    tab_vendor, tab_lines, tab_overview, tab_coverage = st.tabs([
+        f"🏭 By Vendor ({m.get('total_vendors', 0)})",
+        f"📋 All Lines ({m.get('total_po_lines', 0)})",
+        f"📊 Overview",
+        f"📈 Coverage",
     ])
-    with tab1:
-        po_overview_fragment(result)
-    with tab2:
+
+    with tab_vendor:
         po_vendor_groups_fragment(result)
-    with tab3:
+    with tab_lines:
         po_all_lines_fragment(result)
-    with tab4:
+    with tab_overview:
+        po_overview_fragment(result)
+    with tab_coverage:
         po_coverage_fragment(result)
+
+    # Export — below tabs, near the data
+    st.divider()
+    ec1, ec2 = st.columns([1, 3])
+    with ec1:
+        _do_export(result)
 
 
 if __name__ == '__main__':

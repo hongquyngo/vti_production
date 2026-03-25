@@ -728,16 +728,40 @@ render_filter_warning_banner = render_filter_persistent_banner
 
 @st.fragment
 def po_overview_fragment(result: POSuggestionResult):
-    """Fragment: KPIs + urgency bar + reconciliation.
-    Note: persistent filter banner rendered at page level ABOVE tabs, not here.
-    """
-    # Normal rendering
+    """Fragment: GAP→PO flow summary + KPIs + urgency + top urgent + timeline + reconciliation."""
+
+    # --- GAP → PO Flow Summary (Fix 5) ---
+    inp = result.input_summary or {}
+    recon = result.get_reconciliation()
+    total_input = recon.get('total_input', 0)
+    if total_input > 0:
+        matched = recon.get('matched', 0)
+        unmatched = recon.get('unmatched', 0)
+        skipped = recon.get('skipped_pending_po', 0)
+        st.markdown(
+            f"**Data flow:** GAP produced **{total_input}** shortage items "
+            f"({recon.get('input_fg', 0)} FG + {recon.get('input_raw', 0)} Raw) → "
+            f"**{matched}** PO lines created, "
+            f"{unmatched} no vendor, "
+            f"{skipped} already covered by pending PO"
+        )
+
+        # Demand date source
+        dates_gap = inp.get('demand_dates_from_gap', 0)
+        dates_fb = inp.get('demand_dates_fallback', 0)
+        if dates_gap > 0:
+            st.caption(
+                f"📅 Demand dates: {dates_gap} from GAP period data, "
+                f"{dates_fb} using planning horizon fallback"
+            )
+
+    # --- KPIs ---
     render_po_kpi_cards(result)
 
+    # --- Urgency Distribution ---
     st.markdown("##### 📊 Urgency Distribution")
     render_urgency_bar(result)
 
-    # Insight callouts
     overdue = result.get_overdue_lines()
     if overdue:
         overdue_value = sum(l.line_value_usd for l in overdue)
@@ -748,11 +772,122 @@ def po_overview_fragment(result: POSuggestionResult):
             f"Order immediately to minimize delay."
         )
 
+    # --- Top 5 Most Urgent Items (Fix 6) ---
+    _render_top_urgent_items(result, top_n=5)
+
+    # --- Order Timeline by Week (Fix 9) ---
+    _render_order_timeline(result)
+
+    # --- Unmatched + Reconciliation ---
     if result.has_unmatched():
         render_unmatched_panel(result)
 
-    # Data reconciliation — shows where every input item ended up
     render_reconciliation_panel(result)
+
+
+def _render_top_urgent_items(result: POSuggestionResult, top_n: int = 5):
+    """Render top N most urgent items — actionable table, not just a bar."""
+    if not result.has_lines():
+        return
+
+    lines = sorted(result.all_lines, key=lambda l: (l.urgency_priority, -l.line_value_usd))
+    top = lines[:top_n]
+
+    st.markdown(f"##### 🚨 Top {min(top_n, len(top))} Most Urgent Items")
+
+    rows = []
+    for l in top:
+        urgency_cfg = URGENCY_LEVELS.get(l.urgency_level, {})
+        # Extract demand tag from match_notes
+        demand_tag = ''
+        if l.match_notes and l.match_notes.startswith('['):
+            end = l.match_notes.find(']')
+            if end > 0:
+                demand_tag = l.match_notes[1:end]
+
+        rows.append({
+            'urgency': f"{urgency_cfg.get('icon', '')} {urgency_cfg.get('label', l.urgency_level)}",
+            'code': l.pt_code,
+            'product': l.product_name[:40],
+            'vendor': l.vendor_name[:25],
+            'qty': round(l.suggested_qty),
+            'value': round(l.line_value_usd),
+            'must_order': str(l.must_order_by) if l.must_order_by else '',
+            'demand': demand_tag or l.shortage_source.replace('_', ' ').title(),
+        })
+
+    df = pd.DataFrame(rows)
+    styled = _styled_dataframe(df, qty_cols=['qty'], currency_cols=['value'])
+    st.dataframe(
+        styled,
+        column_config={
+            'urgency': st.column_config.TextColumn('Urgency', width='medium'),
+            'code': st.column_config.TextColumn('Code', width='small'),
+            'product': st.column_config.TextColumn('Product', width='large'),
+            'vendor': st.column_config.TextColumn('Vendor', width='medium'),
+            'qty': st.column_config.NumberColumn('Order Qty'),
+            'value': st.column_config.NumberColumn('Value ($)'),
+            'must_order': st.column_config.TextColumn('Must Order By', width='medium'),
+            'demand': st.column_config.TextColumn('Demand Type', width='medium'),
+        },
+        width='stretch', hide_index=True,
+        height=35 * len(df) + 38,
+    )
+
+
+def _render_order_timeline(result: POSuggestionResult):
+    """Render weekly order timeline — group PO lines by must_order_by week."""
+    if not result.has_lines():
+        return
+
+    from datetime import timedelta
+
+    lines_df = result.get_all_lines_df()
+    if lines_df.empty or 'must_order_by' not in lines_df.columns:
+        return
+
+    # Convert to datetime and group by ISO week
+    lines_df = lines_df.copy()
+    lines_df['_mob_date'] = pd.to_datetime(lines_df['must_order_by'], errors='coerce')
+    lines_df = lines_df[lines_df['_mob_date'].notna()]
+
+    if lines_df.empty:
+        return
+
+    today = pd.Timestamp.now().normalize()
+    lines_df['_week_start'] = lines_df['_mob_date'].apply(
+        lambda d: d - timedelta(days=d.weekday())  # Monday of that week
+    )
+    lines_df['_is_past'] = lines_df['_mob_date'] < today
+
+    weekly = lines_df.groupby('_week_start').agg(
+        items=('product_id', 'count'),
+        total_value=('line_value_usd', 'sum'),
+        overdue_items=('_is_past', 'sum'),
+    ).reset_index().sort_values('_week_start')
+
+    # Format week labels
+    weekly['week_label'] = weekly['_week_start'].apply(
+        lambda d: f"{'🔴 ' if d < today else '🟢 '}"
+                  f"{d.strftime('%b %d')} — {(d + timedelta(days=6)).strftime('%b %d')}"
+    )
+
+    st.markdown("##### 📅 Order Timeline — When to Place POs")
+    st.caption("Grouped by must-order-by week. 🔴 = past due, 🟢 = upcoming")
+
+    for _, row in weekly.iterrows():
+        items = int(row['items'])
+        value = row['total_value']
+        label = row['week_label']
+        overdue = int(row['overdue_items'])
+
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            st.markdown(f"**{label}**")
+        with col2:
+            st.markdown(f"**{items}** items")
+        with col3:
+            st.markdown(f"**${value:,.0f}**")
 
 
 # =============================================================================

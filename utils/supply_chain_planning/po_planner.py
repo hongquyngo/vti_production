@@ -35,6 +35,7 @@ from .po_lead_time_calculator import POLeadTimeCalculator, OrderTimingResult
 from .po_result import POLineItem, VendorPOGroup, POSuggestionResult
 from .validators import (
     extract_all_shortages, validate_gap_result, validate_gap_filters,
+    extract_demand_dates, extract_demand_composition,
     ValidationResult, safe_extract_field
 )
 
@@ -165,11 +166,17 @@ class POPlanner:
             }
             return result
 
+        # Extract per-product demand dates from GAP period data
+        # Replaces fixed "today + 30 days" with actual earliest shortage period
+        demand_dates = extract_demand_dates(gap_result)
+        dates_found = len(demand_dates)
+        
         # Convert validated dicts → ShortageItem objects
         shortages = []
         for d in shortage_dicts:
+            pid = d['product_id']
             shortages.append(ShortageItem(
-                product_id=d['product_id'],
+                product_id=pid,
                 pt_code=d['pt_code'],
                 product_name=d['product_name'],
                 brand=d['brand'],
@@ -178,12 +185,14 @@ class POPlanner:
                 shortage_qty=d['shortage_qty'],
                 shortage_source=d['shortage_source'],
                 priority=d['priority'],
+                demand_date=demand_dates.get(pid),  # None → fallback to default_demand_date
             ))
 
         logger.info(
             f"POPlanner: {len(shortages)} shortage items "
             f"({sum(1 for s in shortages if s.shortage_source == 'FG_TRADING')} FG, "
             f"{sum(1 for s in shortages if s.shortage_source == 'RAW_MATERIAL')} Raw)"
+            f", {dates_found}/{len(shortages)} with demand dates from GAP period data"
             f"{f', {validation.items_skipped} skipped' if validation.items_skipped else ''}"
         )
 
@@ -209,6 +218,21 @@ class POPlanner:
                 "Toggle only applies to manual/standalone shortage input."
             )
 
+        # Tag PO lines with demand composition (confirmed vs forecast)
+        demand_comp = extract_demand_composition(gap_result)
+        comp_tagged = 0
+        for line in result.all_lines:
+            comp = demand_comp.get(line.product_id, {})
+            tag = comp.get('demand_tag', '')
+            if tag:
+                # Append to match_notes (existing field, no schema change)
+                prefix = f"[{tag}]"
+                if line.match_notes:
+                    line.match_notes = f"{prefix} {line.match_notes}"
+                else:
+                    line.match_notes = prefix
+                comp_tagged += 1
+
         # Patch input_summary with GAP-level extraction info
         result.input_summary['validation_skipped'] = validation.items_skipped
         result.input_summary['validation_warnings'] = len(validation.warnings)
@@ -216,6 +240,15 @@ class POPlanner:
         result.input_summary['deduct_pending_po_requested'] = deduct_pending_po
         result.input_summary['deduct_pending_po_applied'] = False
         result.input_summary['filter_review'] = filter_review
+        result.input_summary['demand_dates_from_gap'] = dates_found
+        result.input_summary['demand_dates_fallback'] = len(shortages) - dates_found
+        result.input_summary['demand_composition_tagged'] = comp_tagged
+
+        # Attach filter warnings (non-blocking) to metrics for UI display
+        if filter_review.get('items'):
+            result.metrics['filter_warnings'] = [
+                i for i in filter_review['items'] if i.get('status') == 'OFF'
+            ]
 
         # Recompute reconciliation with updated input_summary
         result.metrics['reconciliation'] = result.get_reconciliation()

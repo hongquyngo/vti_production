@@ -1,15 +1,6 @@
 # utils/supply_chain_planning/__init__.py
 
-"""
-Supply Chain Planning Module — v1.1.0
-Phase 1: PO Suggestion by Vendor
-
-v1.1.0 Changes:
-- Added validators.py (cross-module data contract enforcement)
-- Adaptive lead time buffer (calibrated to vendor avg_delay_days)
-- Item-level error handling in PO planner (no single-item crash)
-- Professional Excel export formatting (openpyxl styles)
-"""
+"""Supply Chain Planning Module — v1.2.0"""
 
 from .planning_constants import (
     VERSION,
@@ -29,11 +20,8 @@ from .po_planner import POPlanner, ShortageItem
 from .po_planning_export import export_po_suggestions_to_excel, get_po_export_filename
 from .validators import (
     validate_gap_result, validate_gap_filters,
-    extract_all_shortages, safe_extract_shortage,
-    safe_extract_field, ValidationResult
+    extract_all_shortages, extract_demand_dates, extract_demand_composition,
+    safe_extract_shortage, safe_extract_field, ValidationResult
 )
-
-# UI components loaded lazily (require streamlit at runtime)
-# from .po_planning_components import po_overview_fragment, ...
 
 __version__ = VERSION

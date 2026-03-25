@@ -17,6 +17,7 @@ this validation layer.
 
 import pandas as pd
 import logging
+from datetime import date, datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
@@ -569,3 +570,158 @@ def validate_gap_filters(gap_result) -> Dict[str, Any]:
             getattr(logger, level)(f"  {item['risk']} — {item['label']}: {item['consequence']}")
     
     return review
+
+
+# =============================================================================
+# DEMAND DATE EXTRACTION FROM GAP RESULT
+# =============================================================================
+
+def extract_demand_dates(gap_result) -> Dict[int, date]:
+    """
+    Extract earliest demand date per product from GAP result.
+    
+    Priority:
+    1. fg_period_gap_df — has period-level shortage with dates
+    2. Fallback: None (caller uses default planning horizon)
+    
+    This replaces the fixed "today + 30 days" approach which caused
+    55%+ of items to show OVERDUE because 30 days < avg lead time.
+    
+    Returns:
+        Dict mapping product_id → earliest demand date
+    """
+    
+    dates = {}
+    
+    if gap_result is None:
+        return dates
+    
+    # Try period gap data — has per-product per-period shortage
+    period_df = getattr(gap_result, 'fg_period_gap_df', None)
+    if period_df is not None and not period_df.empty and 'product_id' in period_df.columns:
+        try:
+            # Get first shortage period per product
+            shortage = period_df[period_df['gap_quantity'] < 0].copy()
+            if not shortage.empty and 'period' in shortage.columns:
+                # Convert period string → approximate date
+                for pid in shortage['product_id'].unique():
+                    prod_shortage = shortage[shortage['product_id'] == pid]
+                    # Take earliest period with shortage
+                    first_period = prod_shortage.iloc[0]['period']
+                    approx_date = _period_to_date(first_period)
+                    if approx_date:
+                        dates[int(pid)] = approx_date
+        except Exception as e:
+            logger.debug(f"Could not extract dates from period gap: {e}")
+    
+    # Also try raw period gap for material IDs
+    raw_period_df = getattr(gap_result, 'raw_period_gap_df', None)
+    if raw_period_df is not None and not raw_period_df.empty and 'material_id' in raw_period_df.columns:
+        try:
+            shortage = raw_period_df[raw_period_df['gap_quantity'] < 0].copy()
+            if not shortage.empty and 'period' in shortage.columns:
+                for mid in shortage['material_id'].unique():
+                    if int(mid) not in dates:
+                        mat_shortage = shortage[shortage['material_id'] == mid]
+                        first_period = mat_shortage.iloc[0]['period']
+                        approx_date = _period_to_date(first_period)
+                        if approx_date:
+                            dates[int(mid)] = approx_date
+        except Exception as e:
+            logger.debug(f"Could not extract dates from raw period gap: {e}")
+    
+    if dates:
+        logger.info(f"Extracted demand dates for {len(dates)} products from GAP period data")
+    
+    return dates
+
+
+def _period_to_date(period_str: str) -> Optional[date]:
+    """
+    Convert period string → approximate date.
+    'Week 15 - 2026' → Monday of that week
+    'Apr 2026' → first of that month
+    """
+    
+    if not period_str or pd.isna(period_str):
+        return None
+    
+    s = str(period_str).strip()
+    
+    try:
+        # Weekly: "Week N - YYYY"
+        if 'Week' in s and ' - ' in s:
+            parts = s.split(' - ')
+            week = int(parts[0].replace('Week ', '').strip())
+            year = int(parts[1].strip())
+            # ISO week → Monday
+            jan4 = datetime(year, 1, 4)
+            monday = jan4 - timedelta(days=jan4.isoweekday() - 1) + timedelta(weeks=week - 1)
+            return monday.date()
+        
+        # Monthly: "Apr 2026"
+        try:
+            dt = datetime.strptime(f"01 {s}", "%d %b %Y")
+            return dt.date()
+        except ValueError:
+            pass
+    except Exception:
+        pass
+    
+    return None
+
+# =============================================================================
+# DEMAND COMPOSITION — Confirmed Orders vs Forecast
+# =============================================================================
+
+def extract_demand_composition(gap_result) -> Dict[int, Dict[str, Any]]:
+    """
+    Extract demand composition per product: confirmed orders vs forecast.
+    
+    Reads fg_gap_df columns 'demand_oc_pending' and 'demand_forecast'.
+    
+    Returns:
+        Dict mapping product_id -> {
+            'has_confirmed': bool, 'has_forecast': bool,
+            'confirmed_qty': float, 'forecast_qty': float,
+            'demand_tag': str
+        }
+    """
+    result = {}
+    if gap_result is None:
+        return result
+    
+    fg_gap = getattr(gap_result, 'fg_gap_df', None)
+    if fg_gap is None or fg_gap.empty:
+        return result
+    
+    has_oc = 'demand_oc_pending' in fg_gap.columns
+    has_fc = 'demand_forecast' in fg_gap.columns
+    if not has_oc and not has_fc:
+        return result
+    
+    try:
+        for _, row in fg_gap.iterrows():
+            pid = row.get('product_id')
+            if pid is None or pd.isna(pid):
+                continue
+            oc_qty = float(row.get('demand_oc_pending', 0) or 0) if has_oc else 0
+            fc_qty = float(row.get('demand_forecast', 0) or 0) if has_fc else 0
+            has_confirmed = oc_qty > 0
+            has_forecast = fc_qty > 0
+            if has_confirmed and has_forecast:
+                tag = 'Confirmed+Forecast'
+            elif has_confirmed:
+                tag = 'Confirmed'
+            elif has_forecast:
+                tag = 'Forecast Only'
+            else:
+                tag = ''
+            result[int(pid)] = {
+                'has_confirmed': has_confirmed, 'has_forecast': has_forecast,
+                'confirmed_qty': oc_qty, 'forecast_qty': fc_qty, 'demand_tag': tag,
+            }
+    except Exception as e:
+        logger.debug(f"Could not extract demand composition: {e}")
+    
+    return result
