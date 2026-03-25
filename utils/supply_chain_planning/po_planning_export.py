@@ -127,6 +127,8 @@ def export_po_suggestions_to_excel(result, gap_summary=None):
         _write_vendor_sheet(writer, result)
         if result.has_unmatched():
             _write_unmatched_sheet(writer, result)
+        if hasattr(result, 'skipped_items') and result.skipped_items:
+            _write_skipped_sheet(writer, result)
     buffer.seek(0)
     return buffer
 
@@ -156,7 +158,26 @@ def _write_summary_sheet(writer, result, gap_summary):
 
     data += [['', ''], ['--- VENDOR MATCHING ---', ''],
              ['Matched to Vendor', metrics.get('total_po_lines', 0)],
+             ['Skipped (Pending PO Covers)', metrics.get('skipped_count', 0)],
              ['No Vendor Found', metrics.get('unmatched_count', 0)]]
+
+    # Data Reconciliation
+    recon = metrics.get('reconciliation', {})
+    if recon:
+        data += [['', ''], ['--- DATA RECONCILIATION ---', '']]
+        data.append(['Input from GAP', recon.get('total_input', 0)])
+        data.append([f'  FG Trading', recon.get('input_fg', 0)])
+        data.append([f'  Raw Material', recon.get('input_raw', 0)])
+        data.append(['', ''])
+        data.append(['→ PO Lines Created', recon.get('matched', 0)])
+        data.append(['→ Skipped (Pending PO)', recon.get('skipped_pending_po', 0)])
+        data.append(['→ No Vendor Found', recon.get('unmatched', 0)])
+        data.append(['→ Validation Skipped', recon.get('input_skipped_validation', 0)])
+        data.append(['→ Processing Errors', recon.get('processing_errors', 0)])
+        data.append(['', ''])
+        data.append(['Total Accounted', recon.get('total_accounted', 0)])
+        balanced = '✅ YES' if recon.get('is_balanced', False) else f"❌ NO (diff={recon.get('discrepancy', '?')})"
+        data.append(['Balanced?', balanced])
 
     errors = metrics.get('processing_errors', [])
     if errors:
@@ -272,6 +293,25 @@ def _write_unmatched_sheet(writer, result):
     export_df = unmatched_df.rename(columns=rename)
     export_df.to_excel(writer, sheet_name='Unmatched', index=False)
     _apply_sheet_formatting(writer.sheets['Unmatched'], export_df, number_cols=['Shortage Qty'])
+
+
+def _write_skipped_sheet(writer, result):
+    """Write skipped items sheet — products where pending PO already covers shortage."""
+    skipped_df = result.get_skipped_df()
+    if skipped_df.empty:
+        return
+    rename = {
+        'pt_code': 'Code', 'product_name': 'Product', 'brand': 'Brand',
+        'shortage_source': 'Source', 'shortage_qty': 'Shortage Qty',
+        'pending_po_qty': 'Pending PO Qty', 'net_shortage_qty': 'Net Shortage',
+        'uom': 'UOM', 'vendor_name': 'Vendor', 'reason': 'Reason',
+    }
+    export_df = skipped_df.rename(columns=rename)
+    export_df.to_excel(writer, sheet_name='Skipped (PO Covers)', index=False)
+    _apply_sheet_formatting(
+        writer.sheets['Skipped (PO Covers)'], export_df,
+        number_cols=['Shortage Qty', 'Pending PO Qty', 'Net Shortage'],
+    )
 
 
 def get_po_export_filename(prefix="po_suggestions"):

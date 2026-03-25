@@ -177,13 +177,21 @@ class POPlanner:
         if validation.warnings:
             logger.warning(f"POPlanner: {len(validation.warnings)} extraction warnings")
 
-        return self.plan_from_shortages(
+        result = self.plan_from_shortages(
             shortages=shortages,
             strategy=strategy,
             default_demand_date=default_demand_date,
             deduct_pending_po=deduct_pending_po,
             skip_zero_shortage=skip_zero_shortage,
         )
+
+        # Patch input_summary with GAP-level extraction info
+        result.input_summary['validation_skipped'] = validation.items_skipped
+        result.input_summary['validation_warnings'] = len(validation.warnings)
+        # Recompute reconciliation with updated validation_skipped
+        result.metrics['reconciliation'] = result.get_reconciliation()
+
+        return result
 
     # =========================================================================
     # MAIN ENTRY: FROM SHORTAGE LIST
@@ -208,6 +216,7 @@ class POPlanner:
 
         all_lines: List[POLineItem] = []
         unmatched: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
         processing_errors: List[str] = []
 
         for item in shortages:
@@ -235,6 +244,22 @@ class POPlanner:
 
                 # Skip if net shortage is zero after pending PO deduction
                 if skip_zero_shortage and line.net_shortage_qty <= 0:
+                    skipped.append({
+                        'product_id': item.product_id,
+                        'pt_code': item.pt_code or line.pt_code,
+                        'product_name': item.product_name or line.product_name,
+                        'brand': item.brand or line.brand,
+                        'shortage_source': item.shortage_source,
+                        'shortage_qty': item.shortage_qty,
+                        'pending_po_qty': line.pending_po_qty,
+                        'net_shortage_qty': line.net_shortage_qty,
+                        'uom': item.uom,
+                        'vendor_name': line.vendor_name,
+                        'reason': (
+                            f'Pending PO ({line.pending_po_qty:,.0f}) covers '
+                            f'shortage ({item.shortage_qty:,.0f})'
+                        ),
+                    })
                     logger.debug(
                         f"  Skipping {item.pt_code}: net shortage ≤ 0 "
                         f"(shortage={item.shortage_qty:.0f}, pending={line.pending_po_qty:.0f})"
@@ -262,11 +287,21 @@ class POPlanner:
         # Group by vendor
         vendor_groups = self._group_by_vendor(all_lines)
 
+        # Build input summary for reconciliation
+        input_summary = {
+            'total_items': len(shortages),
+            'fg_trading_count': sum(1 for s in shortages if s.shortage_source == 'FG_TRADING'),
+            'raw_material_count': sum(1 for s in shortages if s.shortage_source == 'RAW_MATERIAL'),
+            'validation_skipped': 0,  # set by plan_from_gap_result if validation skips items
+        }
+
         # Build result
         result = POSuggestionResult(
             all_lines=all_lines,
             vendor_groups=vendor_groups,
             unmatched_items=unmatched,
+            skipped_items=skipped,
+            input_summary=input_summary,
             strategy=strategy,
             default_demand_date=default_demand_date,
         )
@@ -279,8 +314,10 @@ class POPlanner:
 
         logger.info(
             f"POPlanner complete: "
-            f"{len(all_lines)} PO lines across {len(vendor_groups)} vendors, "
-            f"{len(unmatched)} unmatched, "
+            f"input={len(shortages)}, "
+            f"matched={len(all_lines)}, "
+            f"skipped={len(skipped)} (pending PO covers), "
+            f"unmatched={len(unmatched)}, "
             f"total ${result.metrics.get('total_value_usd', 0):,.0f}"
             f"{f', {len(processing_errors)} errors' if processing_errors else ''}"
         )

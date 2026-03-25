@@ -217,6 +217,12 @@ class POSuggestionResult:
     # Unmatched (no vendor)
     unmatched_items: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Skipped items (vendor found but net shortage ≤ 0 after pending PO deduction)
+    skipped_items: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Input tracking — what came in from GAP result
+    input_summary: Dict[str, Any] = field(default_factory=dict)
+
     # Metrics
     metrics: Dict[str, Any] = field(default_factory=dict)
 
@@ -254,6 +260,62 @@ class POSuggestionResult:
             return pd.DataFrame()
         return pd.DataFrame(self.unmatched_items)
 
+    def get_skipped_df(self) -> pd.DataFrame:
+        """Skipped items as DataFrame (pending PO covered shortage)"""
+        if not self.skipped_items:
+            return pd.DataFrame()
+        return pd.DataFrame(self.skipped_items)
+
+    def get_reconciliation(self) -> Dict[str, Any]:
+        """
+        Full data reconciliation: input = output + skipped + unmatched + errors.
+        
+        Shows exactly where every input item ended up — no items "disappear"
+        without explanation.
+        """
+        inp = self.input_summary or {}
+        total_input = inp.get('total_items', 0)
+        input_fg = inp.get('fg_trading_count', 0)
+        input_raw = inp.get('raw_material_count', 0)
+        input_skipped_validation = inp.get('validation_skipped', 0)
+
+        matched = len(self.all_lines)
+        matched_fg = len(self.get_fg_lines())
+        matched_raw = len(self.get_raw_lines())
+
+        skipped = len(self.skipped_items)
+        skipped_fg = sum(1 for s in self.skipped_items if s.get('shortage_source') == 'FG_TRADING')
+        skipped_raw = sum(1 for s in self.skipped_items if s.get('shortage_source') == 'RAW_MATERIAL')
+
+        unmatched = len(self.unmatched_items)
+        unmatched_fg = sum(1 for u in self.unmatched_items if u.get('shortage_source') == 'FG_TRADING')
+        unmatched_raw = sum(1 for u in self.unmatched_items if u.get('shortage_source') == 'RAW_MATERIAL')
+
+        errors = len(self.metrics.get('processing_errors', []))
+
+        accounted = matched + skipped + unmatched + errors + input_skipped_validation
+        discrepancy = total_input - accounted
+
+        return {
+            'total_input': total_input,
+            'input_fg': input_fg,
+            'input_raw': input_raw,
+            'input_skipped_validation': input_skipped_validation,
+            'matched': matched,
+            'matched_fg': matched_fg,
+            'matched_raw': matched_raw,
+            'skipped_pending_po': skipped,
+            'skipped_fg': skipped_fg,
+            'skipped_raw': skipped_raw,
+            'unmatched': unmatched,
+            'unmatched_fg': unmatched_fg,
+            'unmatched_raw': unmatched_raw,
+            'processing_errors': errors,
+            'total_accounted': accounted,
+            'discrepancy': discrepancy,
+            'is_balanced': discrepancy == 0,
+        }
+
     def get_urgency_distribution(self) -> Dict[str, int]:
         """Count of lines per urgency level"""
         dist = {}
@@ -290,11 +352,13 @@ class POSuggestionResult:
             'total_vendors': len(self.vendor_groups),
             'total_value_usd': round(total_value, 2),
             'unmatched_count': len(self.unmatched_items),
+            'skipped_count': len(self.skipped_items),
             'overdue_count': overdue_count,
             'critical_count': critical_count,
             'urgency_distribution': self.get_urgency_distribution(),
             'strategy': self.strategy,
             'timestamp': self.timestamp.strftime('%Y-%m-%d %H:%M'),
+            'reconciliation': self.get_reconciliation(),
         }
 
     def get_summary(self) -> Dict[str, Any]:
@@ -312,6 +376,9 @@ class POSuggestionResult:
 
     def has_unmatched(self) -> bool:
         return len(self.unmatched_items) > 0
+
+    def has_skipped(self) -> bool:
+        return len(self.skipped_items) > 0
 
     def has_overdue(self) -> bool:
         return any(l.is_overdue for l in self.all_lines)

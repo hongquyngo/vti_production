@@ -467,12 +467,105 @@ def render_pagination(
 
 
 # =============================================================================
+# DATA RECONCILIATION PANEL
+# =============================================================================
+
+def render_reconciliation_panel(result: POSuggestionResult):
+    """
+    Render data flow reconciliation: Input → Output.
+    Shows exactly where every item from GAP result ended up.
+    No items should "disappear" without explanation.
+    """
+    recon = result.get_reconciliation()
+    total_input = recon.get('total_input', 0)
+
+    if total_input == 0:
+        return
+
+    with st.expander("📐 **Data Reconciliation** — GAP Input → PO Output", expanded=False):
+        # Row 1: Input from GAP
+        st.markdown("**📥 Input from SCM GAP**")
+        ic1, ic2, ic3 = st.columns(3)
+        ic1.metric("Total Items", f"{total_input}")
+        ic2.metric("🛒 FG Trading", f"{recon.get('input_fg', 0)}")
+        ic3.metric("🧪 Raw Material", f"{recon.get('input_raw', 0)}")
+
+        st.divider()
+
+        # Row 2: Output breakdown
+        st.markdown("**📤 Processing Result**")
+        oc1, oc2, oc3, oc4 = st.columns(4)
+        oc1.metric("✅ PO Lines Created", f"{recon.get('matched', 0)}",
+                    delta=f"{recon.get('matched_fg', 0)} FG + {recon.get('matched_raw', 0)} Raw",
+                    delta_color="off")
+        oc2.metric("⏭️ Skipped (PO Covers)", f"{recon.get('skipped_pending_po', 0)}",
+                    help="Existing pending PO already covers the shortage — no new PO needed")
+        oc3.metric("❌ No Vendor", f"{recon.get('unmatched', 0)}",
+                    delta=f"{recon.get('unmatched_fg', 0)} FG + {recon.get('unmatched_raw', 0)} Raw",
+                    delta_color="off")
+
+        errors = recon.get('processing_errors', 0)
+        validation_skip = recon.get('input_skipped_validation', 0)
+        other = errors + validation_skip
+        if other > 0:
+            oc4.metric("⚠️ Other", f"{other}",
+                        delta=f"{errors} errors, {validation_skip} invalid",
+                        delta_color="off")
+        else:
+            oc4.metric("⚠️ Other", "0")
+
+        # Row 3: Balance check
+        accounted = recon.get('total_accounted', 0)
+        discrepancy = recon.get('discrepancy', 0)
+        if discrepancy == 0:
+            st.success(
+                f"✅ **Balanced:** {total_input} input = "
+                f"{recon.get('matched', 0)} matched + "
+                f"{recon.get('skipped_pending_po', 0)} skipped + "
+                f"{recon.get('unmatched', 0)} unmatched"
+                f"{f' + {other} other' if other else ''}"
+            )
+        else:
+            st.warning(
+                f"⚠️ **Discrepancy:** {total_input} input ≠ {accounted} accounted "
+                f"(diff = {discrepancy}). Check processing logs."
+            )
+
+        # Skipped items detail table (if any)
+        if result.has_skipped():
+            st.markdown("**⏭️ Skipped Items — Pending PO Covers Shortage**")
+            skipped_df = result.get_skipped_df()
+            display_cols = ['pt_code', 'product_name', 'shortage_source',
+                            'shortage_qty', 'pending_po_qty', 'vendor_name', 'reason']
+            available = [c for c in display_cols if c in skipped_df.columns]
+
+            styled = _styled_dataframe(
+                skipped_df[available],
+                qty_cols=['shortage_qty', 'pending_po_qty'],
+            )
+            st.dataframe(
+                styled,
+                column_config={
+                    'pt_code': st.column_config.TextColumn('Code', width='small'),
+                    'product_name': st.column_config.TextColumn('Product', width='large'),
+                    'shortage_source': st.column_config.TextColumn('Source', width='small'),
+                    'shortage_qty': st.column_config.NumberColumn('Shortage'),
+                    'pending_po_qty': st.column_config.NumberColumn('Pending PO'),
+                    'vendor_name': st.column_config.TextColumn('Vendor', width='medium'),
+                    'reason': st.column_config.TextColumn('Reason', width='large'),
+                },
+                width='stretch', hide_index=True,
+                height=min(250, 35 * len(skipped_df) + 38),
+            )
+
+
+# =============================================================================
 # FRAGMENT: OVERVIEW TAB
 # =============================================================================
 
 @st.fragment
 def po_overview_fragment(result: POSuggestionResult):
-    """Fragment: KPIs + urgency bar + vendor summary."""
+    """Fragment: KPIs + urgency bar + reconciliation + vendor summary."""
     render_po_kpi_cards(result)
 
     st.markdown("##### 📊 Urgency Distribution")
@@ -491,6 +584,9 @@ def po_overview_fragment(result: POSuggestionResult):
 
     if result.has_unmatched():
         render_unmatched_panel(result)
+
+    # Data reconciliation — shows where every input item ended up
+    render_reconciliation_panel(result)
 
 
 # =============================================================================
