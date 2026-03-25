@@ -570,12 +570,168 @@ def render_reconciliation_panel(result: POSuggestionResult):
 
 
 # =============================================================================
+# FILTER REVIEW — PRE-EXECUTION CONFIRM PANEL
+# =============================================================================
+
+RISK_STYLES = {
+    'HIGH': {'color': '#DC2626', 'bg': '#FEF2F2', 'icon': '🔴', 'label': 'High Risk'},
+    'MEDIUM': {'color': '#D97706', 'bg': '#FFFBEB', 'icon': '🟡', 'label': 'Medium'},
+    'INFO': {'color': '#6B7280', 'bg': '#F9FAFB', 'icon': 'ℹ️', 'label': 'Info'},
+}
+
+
+def render_filter_review_confirm(filter_review: dict) -> bool:
+    """
+    Render the GAP filter review panel BEFORE executing PO Planning.
+    User must confirm to proceed when filters are incomplete.
+    
+    Returns True if user confirms (or all_complete), False if waiting.
+    """
+    if filter_review.get('all_complete', True):
+        st.success(f"✅ {filter_review.get('summary_text', 'All filters verified')}")
+        return True  # Auto-proceed
+    
+    # Show review panel
+    st.markdown("### 📋 GAP Filter Review")
+    st.caption("PO Planning uses shortage data from Supply Chain GAP. "
+               "The filters below were used when GAP was calculated.")
+    
+    items = filter_review.get('items', [])
+    has_high = filter_review.get('has_high_risk', False)
+    
+    # Group by category
+    supply_items = [i for i in items if i.get('category') == 'Supply Source']
+    demand_items = [i for i in items if i.get('category') == 'Demand Source']
+    option_items = [i for i in items if i.get('category') in ('Option', 'Consistency')]
+    
+    # Supply Sources
+    supply_on = filter_review.get('supply_sources_on', [])
+    supply_off = filter_review.get('supply_sources_off', [])
+    
+    st.markdown("**📦 Supply Sources**")
+    cols = st.columns(5)
+    from .validators import SUPPLY_SOURCE_IMPACT
+    for i, (key, impact) in enumerate(SUPPLY_SOURCE_IMPACT.items()):
+        with cols[i]:
+            if key in supply_on:
+                st.markdown(f"✅ {impact['icon']} {impact['label']}")
+            else:
+                risk_style = RISK_STYLES.get(impact['risk'], RISK_STYLES['INFO'])
+                st.markdown(
+                    f"<div style='background:{risk_style['bg']};border:1px solid {risk_style['color']};"
+                    f"border-radius:6px;padding:6px 8px;font-size:13px;'>"
+                    f"❌ {impact['icon']} <b>{impact['label']}</b><br>"
+                    f"<span style='color:{risk_style['color']};font-size:11px;'>"
+                    f"{risk_style['icon']} {impact['consequence']}</span></div>",
+                    unsafe_allow_html=True
+                )
+    
+    # Demand Sources
+    demand_on = filter_review.get('demand_sources_on', [])
+    st.markdown("**📊 Demand Sources**")
+    dcols = st.columns(2)
+    from .validators import DEMAND_SOURCE_IMPACT
+    for i, (key, impact) in enumerate(DEMAND_SOURCE_IMPACT.items()):
+        with dcols[i]:
+            if key in demand_on:
+                st.markdown(f"✅ {impact['icon']} {impact['label']}")
+            else:
+                st.markdown(f"ℹ️ ❌ {impact['icon']} **{impact['label']}** — {impact['consequence']}")
+    
+    # Options OFF
+    if option_items:
+        st.markdown("**⚙️ Options**")
+        for item in option_items:
+            risk_style = RISK_STYLES.get(item['risk'], RISK_STYLES['INFO'])
+            st.markdown(f"- {risk_style['icon']} **{item['label']}** OFF — {item['consequence']}")
+    
+    # Summary + confirm
+    st.divider()
+    st.markdown(f"**{filter_review.get('summary_text', '')}**")
+    
+    if has_high:
+        st.warning(
+            "⚠️ **High-risk filters are OFF.** PO suggestions may include "
+            "duplicate orders or buy items already in stock. "
+            "Consider going back to Supply Chain GAP to enable these filters."
+        )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if has_high:
+            confirmed = st.button(
+                "⚠️ Proceed anyway — I understand the risk",
+                type="secondary",
+                use_container_width=True,
+                key="po_filter_confirm"
+            )
+        else:
+            confirmed = st.button(
+                "✅ Proceed with PO Planning",
+                type="primary",
+                use_container_width=True,
+                key="po_filter_confirm"
+            )
+    with col2:
+        go_back = st.button(
+            "↩️ Go back to GAP to fix filters",
+            use_container_width=True,
+            key="po_filter_goback"
+        )
+        if go_back:
+            st.info("Open **Supply Chain GAP** page from the sidebar, "
+                    "update filters, click Analyze, then come back here.")
+    
+    return confirmed
+
+
+def render_filter_persistent_banner(result: POSuggestionResult):
+    """
+    Render persistent banner at top of results when filters were incomplete.
+    Shows on every tab — user always knows the context.
+    """
+    inp = result.input_summary or {}
+    review = inp.get('filter_review', {})
+    
+    if not review or review.get('all_complete', True):
+        return  # No banner needed
+    
+    items = review.get('items', [])
+    if not items:
+        return
+    
+    has_high = review.get('has_high_risk', False)
+    
+    # Build compact description
+    off_labels = [f"**{i['label']}**" for i in items if i.get('status') == 'OFF']
+    
+    if has_high:
+        st.warning(
+            f"⚠️ **Incomplete GAP filters:** {', '.join(off_labels)} were OFF. "
+            f"PO suggestions may not reflect the full supply/demand picture. "
+            f"[Re-run GAP with complete filters for accurate results]"
+        )
+    else:
+        st.info(
+            f"ℹ️ **Note:** GAP analyzed with {len(off_labels)} filter(s) OFF "
+            f"({', '.join(off_labels)}). Results may be partial."
+        )
+
+
+# Alias for page import
+render_filter_warning_banner = render_filter_persistent_banner
+
+
+# =============================================================================
 # FRAGMENT: OVERVIEW TAB
 # =============================================================================
 
 @st.fragment
 def po_overview_fragment(result: POSuggestionResult):
-    """Fragment: KPIs + urgency bar + reconciliation + vendor summary."""
+    """Fragment: KPIs + urgency bar + reconciliation.
+    Note: persistent filter banner rendered at page level ABOVE tabs, not here.
+    """
+    # Normal rendering
     render_po_kpi_cards(result)
 
     st.markdown("##### 📊 Urgency Distribution")

@@ -179,6 +179,22 @@ def _write_summary_sheet(writer, result, gap_summary):
         balanced = '✅ YES' if recon.get('is_balanced', False) else f"❌ NO (diff={recon.get('discrepancy', '?')})"
         data.append(['Balanced?', balanced])
 
+    # GAP Filter Warnings
+    inp = getattr(result, 'input_summary', None) or {}
+    filter_review = inp.get('filter_review', {})
+    filter_items = filter_review.get('items', [])
+    if filter_items:
+        data += [['', ''], ['--- GAP FILTER WARNINGS ---', '']]
+        data.append(['Filter Status', filter_review.get('summary_text', '')])
+        for item in filter_items:
+            risk_icon = {'HIGH': '🔴', 'MEDIUM': '🟡', 'INFO': 'ℹ️'}.get(item.get('risk'), '')
+            data.append([
+                f"  {risk_icon} {item.get('label', '')} ({item.get('risk', '')})",
+                item.get('consequence', '')
+            ])
+        data.append(['', ''])
+        data.append(['⚠️ NOTE', 'PO suggestions based on incomplete GAP filters — verify before ordering'])
+
     errors = metrics.get('processing_errors', [])
     if errors:
         data += [['', ''], ['--- PROCESSING ERRORS ---', '']]

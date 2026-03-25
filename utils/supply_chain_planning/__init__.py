@@ -28,7 +28,8 @@ from .po_result import POLineItem, VendorPOGroup, POSuggestionResult
 from .po_planner import POPlanner, ShortageItem
 from .po_planning_export import export_po_suggestions_to_excel, get_po_export_filename
 from .validators import (
-    validate_gap_result, extract_all_shortages, safe_extract_shortage,
+    validate_gap_result, validate_gap_filters,
+    extract_all_shortages, safe_extract_shortage,
     safe_extract_field, ValidationResult
 )
 

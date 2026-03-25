@@ -34,8 +34,8 @@ from .po_pricing_resolver import POPricingResolver, VendorMatch, QuantitySuggest
 from .po_lead_time_calculator import POLeadTimeCalculator, OrderTimingResult
 from .po_result import POLineItem, VendorPOGroup, POSuggestionResult
 from .validators import (
-    extract_all_shortages, validate_gap_result, ValidationResult,
-    safe_extract_field
+    extract_all_shortages, validate_gap_result, validate_gap_filters,
+    ValidationResult, safe_extract_field
 )
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,10 @@ class POPlanner:
         """
         logger.info("POPlanner: extracting shortages from GAP result (with validation)...")
 
+        # Step 0: Review GAP filters (informational — never blocks)
+        # Blocking/confirmation is handled at the PAGE level before calling this method.
+        filter_review = validate_gap_filters(gap_result)
+
         # Validated extraction — catches None fields, type mismatches, missing attrs
         shortage_dicts, validation = extract_all_shortages(gap_result)
 
@@ -143,14 +147,23 @@ class POPlanner:
                 default_demand_date=default_demand_date,
             )
             result.metrics['validation_errors'] = validation.errors
+            result.input_summary = {
+                'source_mode': 'GAP_RESULT',
+                'filter_review': filter_review,
+            }
             return result
 
         if not shortage_dicts:
             logger.info("POPlanner: no shortage items found in GAP result")
-            return POSuggestionResult(
+            result = POSuggestionResult(
                 strategy=strategy,
                 default_demand_date=default_demand_date,
             )
+            result.input_summary = {
+                'source_mode': 'GAP_RESULT',
+                'filter_review': filter_review,
+            }
+            return result
 
         # Convert validated dicts → ShortageItem objects
         shortages = []
@@ -201,11 +214,9 @@ class POPlanner:
         result.input_summary['validation_warnings'] = len(validation.warnings)
         result.input_summary['source_mode'] = 'GAP_RESULT'
         result.input_summary['deduct_pending_po_requested'] = deduct_pending_po
-        result.input_summary['deduct_pending_po_applied'] = False  # always False for GAP source
-        result.input_summary['deduct_override_reason'] = (
-            'GAP already includes PO in supply — deducting again would double-count'
-            if deduct_pending_po else 'Not requested'
-        )
+        result.input_summary['deduct_pending_po_applied'] = False
+        result.input_summary['filter_review'] = filter_review
+
         # Recompute reconciliation with updated input_summary
         result.metrics['reconciliation'] = result.get_reconciliation()
 

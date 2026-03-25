@@ -322,3 +322,250 @@ def extract_all_shortages(
             logger.warning(f"  ⚠️ {w}")
     
     return shortages, vr
+
+
+# =============================================================================
+# FILTER CONTEXT VALIDATION — "Informed Consent" model
+# =============================================================================
+# Never blocks. Classifies risk, explains consequences, lets user decide.
+# User may intentionally disable filters (e.g. no Forecast = only firm orders).
+# =============================================================================
+
+# All possible supply sources and their PO Planning impact when OFF
+SUPPLY_SOURCE_IMPACT = {
+    'PURCHASE_ORDER': {
+        'label': 'Purchase Order',
+        'icon': '📝',
+        'risk': 'HIGH',
+        'consequence': 'Shortage does NOT account for existing POs → may create DUPLICATE orders',
+    },
+    'INVENTORY': {
+        'label': 'Inventory',
+        'icon': '📦',
+        'risk': 'HIGH',
+        'consequence': 'Shortage does NOT account for warehouse stock → may buy items already in stock',
+    },
+    'CAN_PENDING': {
+        'label': 'CAN Pending',
+        'icon': '📋',
+        'risk': 'MEDIUM',
+        'consequence': 'Pre-confirmed supply not counted → PO quantities slightly overstated',
+    },
+    'WAREHOUSE_TRANSFER': {
+        'label': 'Warehouse Transfer',
+        'icon': '🚛',
+        'risk': 'MEDIUM',
+        'consequence': 'In-transit stock not counted → PO quantities slightly overstated',
+    },
+    'MO_EXPECTED': {
+        'label': 'MO Expected',
+        'icon': '🏭',
+        'risk': 'MEDIUM',
+        'consequence': 'Manufacturing output not in FG supply → FG shortage higher → raw material PO inflated',
+    },
+}
+
+DEMAND_SOURCE_IMPACT = {
+    'OC_PENDING': {
+        'label': 'Confirmed Orders',
+        'icon': '✔',
+        'risk': 'INFO',
+        'consequence': 'Confirmed customer orders not in demand → shortage understated',
+    },
+    'FORECAST': {
+        'label': 'Forecast',
+        'icon': '📊',
+        'risk': 'INFO',
+        'consequence': 'Only covers confirmed demand, not forecast — may be intentional',
+    },
+}
+
+OPTION_IMPACT = {
+    'include_fg_safety': {
+        'label': 'FG Safety Stock',
+        'risk': 'INFO',
+        'consequence_when_off': 'No safety buffer → shortage is minimum-only (no safety margin)',
+    },
+    'include_raw_safety': {
+        'label': 'Raw Safety Stock',
+        'risk': 'INFO',
+        'consequence_when_off': 'Raw material safety stock not considered',
+    },
+    'include_existing_mo': {
+        'label': 'Existing MO Demand',
+        'risk': 'MEDIUM',
+        'consequence_when_off': 'Raw demand from existing MOs not included → raw PO may be too low',
+    },
+    'exclude_expired': {
+        'label': 'Exclude Expired',
+        'risk': 'INFO',
+        'consequence_when_off': 'Expired stock counted in supply — may overstate availability',
+    },
+}
+
+
+def validate_gap_filters(gap_result) -> Dict[str, Any]:
+    """
+    Review GAP filters for PO Planning — "Informed Consent" model.
+    
+    NEVER blocks execution. Instead:
+    - Classifies each disabled filter by risk level (HIGH / MEDIUM / INFO)
+    - Explains the consequence for PO Planning
+    - Returns structured review for UI to display
+    - User decides whether to proceed
+    
+    Returns:
+        Dict with:
+        - all_complete: bool — True if all filters ON (auto-proceed, no confirm needed)
+        - has_high_risk: bool — True if any HIGH risk filter is OFF
+        - items: List[Dict] — each disabled filter with risk/consequence
+        - filters_used: Dict — raw filters from GAP result
+        - supply_sources_on: List[str]
+        - supply_sources_off: List[str]
+        - demand_sources_on: List[str]
+        - demand_sources_off: List[str]
+        - options_off: List[Dict]
+        - entity: str or None
+        - summary_text: str — human-readable one-liner
+    """
+    review = {
+        'all_complete': True,
+        'has_high_risk': False,
+        'has_filter_data': False,
+        'items': [],
+        'filters_used': {},
+        'supply_sources_on': [],
+        'supply_sources_off': [],
+        'demand_sources_on': [],
+        'demand_sources_off': [],
+        'options_off': [],
+        'entity': None,
+        'summary_text': '',
+    }
+    
+    if gap_result is None:
+        review['all_complete'] = False
+        review['has_high_risk'] = True
+        review['items'].append({
+            'filter': 'GAP Result',
+            'label': 'GAP Result',
+            'status': 'MISSING',
+            'risk': 'HIGH',
+            'consequence': 'No GAP result available — run Supply Chain GAP first',
+            'icon': '🚫',
+        })
+        review['summary_text'] = 'No GAP result — run Supply Chain GAP first'
+        return review
+    
+    filters = getattr(gap_result, 'filters_used', None)
+    if not filters:
+        # Can't verify — proceed with caution
+        review['items'].append({
+            'filter': 'filters_used',
+            'label': 'Filter Data',
+            'status': 'UNKNOWN',
+            'risk': 'INFO',
+            'consequence': 'GAP result has no filter metadata — cannot verify completeness',
+            'icon': 'ℹ️',
+        })
+        review['summary_text'] = 'Filter metadata unavailable — proceed with caution'
+        return review
+    
+    review['has_filter_data'] = True
+    review['filters_used'] = dict(filters)
+    review['entity'] = filters.get('entity', None)
+    
+    # Check supply sources
+    supply_on = filters.get('supply_sources') or []
+    for source_key, impact in SUPPLY_SOURCE_IMPACT.items():
+        if source_key in supply_on:
+            review['supply_sources_on'].append(source_key)
+        else:
+            review['supply_sources_off'].append(source_key)
+            review['all_complete'] = False
+            if impact['risk'] == 'HIGH':
+                review['has_high_risk'] = True
+            review['items'].append({
+                'filter': source_key,
+                'label': impact['label'],
+                'category': 'Supply Source',
+                'status': 'OFF',
+                'risk': impact['risk'],
+                'consequence': impact['consequence'],
+                'icon': impact['icon'],
+            })
+    
+    # Check demand sources
+    demand_on = filters.get('demand_sources') or []
+    for source_key, impact in DEMAND_SOURCE_IMPACT.items():
+        if source_key in demand_on:
+            review['demand_sources_on'].append(source_key)
+        else:
+            review['demand_sources_off'].append(source_key)
+            review['all_complete'] = False
+            review['items'].append({
+                'filter': source_key,
+                'label': impact['label'],
+                'category': 'Demand Source',
+                'status': 'OFF',
+                'risk': impact['risk'],
+                'consequence': impact['consequence'],
+                'icon': impact['icon'],
+            })
+    
+    # Check options
+    for opt_key, impact in OPTION_IMPACT.items():
+        val = filters.get(opt_key)
+        if val is False or val == 0:
+            review['options_off'].append({'key': opt_key, **impact})
+            review['all_complete'] = False
+            review['items'].append({
+                'filter': opt_key,
+                'label': impact['label'],
+                'category': 'Option',
+                'status': 'OFF',
+                'risk': impact['risk'],
+                'consequence': impact.get('consequence_when_off', ''),
+                'icon': '⚙️',
+            })
+    
+    # MO Expected + Existing MO consistency
+    if 'MO_EXPECTED' not in supply_on and filters.get('include_existing_mo', False):
+        review['items'].append({
+            'filter': 'MO_EXPECTED+EXISTING_MO',
+            'label': 'MO Double-Count Risk',
+            'category': 'Consistency',
+            'status': 'WARN',
+            'risk': 'MEDIUM',
+            'consequence': 'MO Expected OFF + Existing MO ON → raw material demand may double-count',
+            'icon': '⚠️',
+        })
+        review['all_complete'] = False
+    
+    # Build summary text
+    off_count = len(review['items'])
+    if off_count == 0:
+        review['summary_text'] = '✅ All filters complete — PO quantities are fully informed'
+    else:
+        high_count = sum(1 for i in review['items'] if i['risk'] == 'HIGH')
+        med_count = sum(1 for i in review['items'] if i['risk'] == 'MEDIUM')
+        parts = []
+        if high_count:
+            parts.append(f'{high_count} high-risk')
+        if med_count:
+            parts.append(f'{med_count} medium')
+        info_count = off_count - high_count - med_count
+        if info_count:
+            parts.append(f'{info_count} info')
+        review['summary_text'] = f'{off_count} filters OFF ({", ".join(parts)}) — PO quantities may not reflect full picture'
+    
+    # Log
+    if review['all_complete']:
+        logger.info(f"Filter review: all complete")
+    else:
+        logger.info(f"Filter review: {review['summary_text']}")
+        for item in review['items']:
+            level = 'warning' if item['risk'] in ('HIGH', 'MEDIUM') else 'info'
+            getattr(logger, level)(f"  {item['risk']} — {item['label']}: {item['consequence']}")
+    
+    return review
