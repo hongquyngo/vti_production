@@ -33,6 +33,10 @@ from .planning_constants import (
 from .po_pricing_resolver import POPricingResolver, VendorMatch, QuantitySuggestion
 from .po_lead_time_calculator import POLeadTimeCalculator, OrderTimingResult
 from .po_result import POLineItem, VendorPOGroup, POSuggestionResult
+from .validators import (
+    extract_all_shortages, validate_gap_result, ValidationResult,
+    safe_extract_field
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +121,8 @@ class POPlanner:
         """
         Generate PO suggestions from SupplyChainGAPResult.
 
-        Extracts po_fg_suggestions (Trading FG) and po_raw_suggestions (Raw Material)
-        from the GAP result, then runs the full planning pipeline.
+        Uses validated extraction (validators.py) to safely convert
+        ActionRecommendation objects from GAP module into ShortageItems.
 
         Args:
             gap_result: SupplyChainGAPResult from supply_chain_gap module
@@ -127,22 +131,51 @@ class POPlanner:
             deduct_pending_po: Subtract existing pending POs from shortage
             skip_zero_shortage: Skip items where net shortage ≤ 0 after deduction
         """
-        logger.info("POPlanner: extracting shortages from GAP result...")
+        logger.info("POPlanner: extracting shortages from GAP result (with validation)...")
 
-        shortages = self._extract_shortages_from_gap(gap_result)
+        # Validated extraction — catches None fields, type mismatches, missing attrs
+        shortage_dicts, validation = extract_all_shortages(gap_result)
 
-        if not shortages:
+        if not validation.is_valid:
+            logger.error(f"GAP result validation FAILED: {validation.errors}")
+            result = POSuggestionResult(
+                strategy=strategy,
+                default_demand_date=default_demand_date,
+            )
+            result.metrics['validation_errors'] = validation.errors
+            return result
+
+        if not shortage_dicts:
             logger.info("POPlanner: no shortage items found in GAP result")
             return POSuggestionResult(
                 strategy=strategy,
                 default_demand_date=default_demand_date,
             )
 
+        # Convert validated dicts → ShortageItem objects
+        shortages = []
+        for d in shortage_dicts:
+            shortages.append(ShortageItem(
+                product_id=d['product_id'],
+                pt_code=d['pt_code'],
+                product_name=d['product_name'],
+                brand=d['brand'],
+                package_size=d['package_size'],
+                uom=d['uom'],
+                shortage_qty=d['shortage_qty'],
+                shortage_source=d['shortage_source'],
+                priority=d['priority'],
+            ))
+
         logger.info(
             f"POPlanner: {len(shortages)} shortage items "
             f"({sum(1 for s in shortages if s.shortage_source == 'FG_TRADING')} FG, "
             f"{sum(1 for s in shortages if s.shortage_source == 'RAW_MATERIAL')} Raw)"
+            f"{f', {validation.items_skipped} skipped' if validation.items_skipped else ''}"
         )
+
+        if validation.warnings:
+            logger.warning(f"POPlanner: {len(validation.warnings)} extraction warnings")
 
         return self.plan_from_shortages(
             shortages=shortages,
@@ -175,38 +208,56 @@ class POPlanner:
 
         all_lines: List[POLineItem] = []
         unmatched: List[Dict[str, Any]] = []
+        processing_errors: List[str] = []
 
         for item in shortages:
-            line = self._process_shortage_item(
-                item=item,
-                strategy=strategy,
-                default_demand_date=default_demand_date,
-                deduct_pending_po=deduct_pending_po,
-            )
+            try:
+                line = self._process_shortage_item(
+                    item=item,
+                    strategy=strategy,
+                    default_demand_date=default_demand_date,
+                    deduct_pending_po=deduct_pending_po,
+                )
 
-            if line is None:
-                # No vendor found
+                if line is None:
+                    # No vendor found
+                    unmatched.append({
+                        'product_id': item.product_id,
+                        'pt_code': item.pt_code,
+                        'product_name': item.product_name,
+                        'brand': item.brand,
+                        'shortage_source': item.shortage_source,
+                        'shortage_qty': item.shortage_qty,
+                        'uom': item.uom,
+                        'reason': 'No vendor found (no costbook or PO history)',
+                    })
+                    continue
+
+                # Skip if net shortage is zero after pending PO deduction
+                if skip_zero_shortage and line.net_shortage_qty <= 0:
+                    logger.debug(
+                        f"  Skipping {item.pt_code}: net shortage ≤ 0 "
+                        f"(shortage={item.shortage_qty:.0f}, pending={line.pending_po_qty:.0f})"
+                    )
+                    continue
+
+                all_lines.append(line)
+
+            except Exception as e:
+                # Item-level error — log and continue, don't crash the whole run
+                error_msg = f"Error processing {item.pt_code} (id={item.product_id}): {e}"
+                logger.error(error_msg, exc_info=True)
+                processing_errors.append(error_msg)
                 unmatched.append({
                     'product_id': item.product_id,
                     'pt_code': item.pt_code,
                     'product_name': item.product_name,
-                    'brand': item.brand,
-                    'shortage_source': item.shortage_source,
-                    'shortage_qty': item.shortage_qty,
-                    'uom': item.uom,
-                    'reason': 'No vendor found (no costbook or PO history)',
+                    'brand': getattr(item, 'brand', ''),
+                    'shortage_source': getattr(item, 'shortage_source', ''),
+                    'shortage_qty': getattr(item, 'shortage_qty', 0),
+                    'uom': getattr(item, 'uom', ''),
+                    'reason': f'Processing error: {str(e)[:100]}',
                 })
-                continue
-
-            # Skip if net shortage is zero after pending PO deduction
-            if skip_zero_shortage and line.net_shortage_qty <= 0:
-                logger.debug(
-                    f"  Skipping {item.pt_code}: net shortage ≤ 0 "
-                    f"(shortage={item.shortage_qty:.0f}, pending={line.pending_po_qty:.0f})"
-                )
-                continue
-
-            all_lines.append(line)
 
         # Group by vendor
         vendor_groups = self._group_by_vendor(all_lines)
@@ -221,11 +272,17 @@ class POPlanner:
         )
         result.compute_metrics()
 
+        # Attach processing errors to metrics for UI reporting
+        if processing_errors:
+            result.metrics['processing_errors'] = processing_errors
+            logger.warning(f"POPlanner: {len(processing_errors)} items failed processing")
+
         logger.info(
             f"POPlanner complete: "
             f"{len(all_lines)} PO lines across {len(vendor_groups)} vendors, "
             f"{len(unmatched)} unmatched, "
             f"total ${result.metrics.get('total_value_usd', 0):,.0f}"
+            f"{f', {len(processing_errors)} errors' if processing_errors else ''}"
         )
 
         return result
@@ -281,8 +338,10 @@ class POPlanner:
             shipping_mode=match.shipping_mode,
         )
 
-        # Step 5: Build line item
-        line_value_usd = qty_result.suggested_qty * match.standard_unit_price_usd
+        # Step 5: Build line item — guard against None prices
+        unit_price = match.standard_unit_price or 0.0
+        unit_price_usd = match.standard_unit_price_usd or 0.0
+        line_value_usd = round(qty_result.suggested_qty * unit_price_usd, 2)
 
         line = POLineItem(
             # Product
@@ -312,8 +371,8 @@ class POPlanner:
             vendor_location_type=match.vendor_location_type,
 
             # Pricing
-            unit_price=match.standard_unit_price,
-            unit_price_usd=match.standard_unit_price_usd,
+            unit_price=unit_price,
+            unit_price_usd=unit_price_usd,
             currency_code=match.currency_code,
             buying_uom=match.buying_uom,
             uom_conversion=match.uom_conversion,
@@ -359,48 +418,31 @@ class POPlanner:
 
     def _extract_shortages_from_gap(self, gap_result) -> List[ShortageItem]:
         """
-        Extract shortage items from SupplyChainGAPResult.
-
-        Sources:
-        - po_fg_suggestions → FG_TRADING (trading products that need purchasing)
-        - po_raw_suggestions → RAW_MATERIAL (raw materials that need purchasing)
+        DEPRECATED: Use plan_from_gap_result() which uses validators.extract_all_shortages().
+        
+        Kept for backward compatibility — now delegates to validated extraction.
         """
-        shortages = []
-
-        # Trading FG shortages
-        if hasattr(gap_result, 'po_fg_suggestions'):
-            for action in gap_result.po_fg_suggestions:
-                shortages.append(ShortageItem(
-                    product_id=action.product_id,
-                    pt_code=action.pt_code,
-                    product_name=action.product_name,
-                    brand=getattr(action, 'brand', ''),
-                    package_size=getattr(action, 'package_size', ''),
-                    uom=action.uom,
-                    shortage_qty=abs(action.quantity),
-                    shortage_source='FG_TRADING',
-                    priority=action.priority,
-                ))
-
-        # Raw material shortages
-        if hasattr(gap_result, 'po_raw_suggestions'):
-            for action in gap_result.po_raw_suggestions:
-                shortages.append(ShortageItem(
-                    product_id=action.product_id,
-                    pt_code=action.pt_code,
-                    product_name=action.product_name,
-                    brand=getattr(action, 'brand', ''),
-                    package_size=getattr(action, 'package_size', ''),
-                    uom=action.uom,
-                    shortage_qty=abs(action.quantity),
-                    shortage_source='RAW_MATERIAL',
-                    priority=action.priority,
-                ))
-
-        # Sort by priority (most urgent first)
-        shortages.sort(key=lambda s: s.priority)
-
-        return shortages
+        import warnings
+        warnings.warn(
+            "_extract_shortages_from_gap is deprecated. "
+            "plan_from_gap_result now uses validators.extract_all_shortages()",
+            DeprecationWarning, stacklevel=2
+        )
+        shortage_dicts, _ = extract_all_shortages(gap_result)
+        return [
+            ShortageItem(
+                product_id=d['product_id'],
+                pt_code=d['pt_code'],
+                product_name=d['product_name'],
+                brand=d['brand'],
+                package_size=d['package_size'],
+                uom=d['uom'],
+                shortage_qty=d['shortage_qty'],
+                shortage_source=d['shortage_source'],
+                priority=d['priority'],
+            )
+            for d in shortage_dicts
+        ]
 
     # =========================================================================
     # GROUP BY VENDOR

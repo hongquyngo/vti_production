@@ -8,7 +8,7 @@ PO Planning (Phase 1) + Production Planning (Phase 2)
 # =============================================================================
 # VERSION
 # =============================================================================
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # =============================================================================
 # URGENCY LEVELS — PO must-order-by date vs today
@@ -85,10 +85,25 @@ LEAD_TIME_DEFAULTS = {
 
 # Buffer days added ON TOP of costbook lead time
 # Based on vendor_delivery_performance: avg delay = 16.3 days
+#
+# v1.1: ADAPTIVE mode uses actual avg_delay_days from vendor performance
+# instead of fixed values. Prevents urgency inflation where 60%+ items
+# show OVERDUE because unreliable vendors get blanket +10d buffer.
 LEAD_TIME_BUFFER_DAYS = {
     'DEFAULT': 5,
     'UNRELIABLE_VENDOR': 10,    # on_time_rate < 50%
     'RELIABLE_VENDOR': 3,       # on_time_rate >= 80%
+}
+
+# Adaptive buffer: use actual avg_delay_days capped at these limits
+LEAD_TIME_BUFFER_ADAPTIVE = {
+    'enabled': True,                # set False to revert to fixed buffer
+    'min_buffer_days': 3,           # never go below 3 days even if vendor is perfect
+    'max_buffer_days': 15,          # cap to prevent extreme inflation
+    'reliable_multiplier': 0.5,     # RELIABLE: buffer = avg_delay × 0.5
+    'average_multiplier': 0.75,     # AVERAGE: buffer = avg_delay × 0.75
+    'unreliable_multiplier': 1.0,   # UNRELIABLE: buffer = avg_delay × 1.0
+    'unknown_fixed': 5,             # UNKNOWN (no perf data): fixed 5 days
 }
 
 # Vendor reliability thresholds (from vendor_delivery_performance_view)

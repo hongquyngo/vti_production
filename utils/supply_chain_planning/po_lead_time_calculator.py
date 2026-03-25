@@ -22,7 +22,8 @@ from dataclasses import dataclass
 
 from .planning_constants import (
     URGENCY_LEVELS, URGENCY_THRESHOLDS,
-    LEAD_TIME_DEFAULTS, LEAD_TIME_BUFFER_DAYS, VENDOR_RELIABILITY
+    LEAD_TIME_DEFAULTS, LEAD_TIME_BUFFER_DAYS, VENDOR_RELIABILITY,
+    LEAD_TIME_BUFFER_ADAPTIVE
 )
 
 logger = logging.getLogger(__name__)
@@ -188,7 +189,7 @@ class POLeadTimeCalculator:
         """
         # Vendor reliability (affects buffer)
         reliability, on_time_pct, avg_delay = self._get_vendor_reliability(vendor_id)
-        buffer = self._calculate_buffer(reliability)
+        buffer = self._calculate_buffer(reliability, avg_delay)
 
         # Priority 1: Costbook lead time (99.1% of records)
         if lead_time_max_days is not None and lead_time_max_days > 0:
@@ -324,8 +325,38 @@ class POLeadTimeCalculator:
             return 'AVERAGE', on_time_pct, avg_delay
 
     @staticmethod
-    def _calculate_buffer(reliability: str) -> int:
-        """Calculate buffer days based on vendor reliability"""
+    def _calculate_buffer(reliability: str, avg_delay_days: float = None) -> int:
+        """
+        Calculate buffer days based on vendor reliability.
+        
+        v1.1 ADAPTIVE MODE: Uses actual avg_delay_days from vendor performance
+        instead of fixed values. Prevents urgency inflation where 60%+ items
+        show OVERDUE because unreliable vendors get blanket +10d buffer.
+        
+        Formula: buffer = avg_delay × multiplier, clamped to [min, max]
+        
+        Falls back to fixed buffer if adaptive mode disabled or no perf data.
+        """
+        cfg = LEAD_TIME_BUFFER_ADAPTIVE
+        
+        # Adaptive mode: use actual delay data
+        if cfg.get('enabled', False) and avg_delay_days is not None and avg_delay_days > 0:
+            if reliability == 'RELIABLE':
+                multiplier = cfg.get('reliable_multiplier', 0.5)
+            elif reliability == 'UNRELIABLE':
+                multiplier = cfg.get('unreliable_multiplier', 1.0)
+            elif reliability == 'AVERAGE':
+                multiplier = cfg.get('average_multiplier', 0.75)
+            else:
+                # UNKNOWN — use fixed
+                return cfg.get('unknown_fixed', 5)
+            
+            raw_buffer = avg_delay_days * multiplier
+            clamped = max(cfg.get('min_buffer_days', 3),
+                         min(int(round(raw_buffer)), cfg.get('max_buffer_days', 15)))
+            return clamped
+        
+        # Fixed fallback (original behavior)
         if reliability == 'RELIABLE':
             return LEAD_TIME_BUFFER_DAYS['RELIABLE_VENDOR']
         elif reliability == 'UNRELIABLE':
