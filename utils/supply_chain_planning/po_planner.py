@@ -181,14 +181,32 @@ class POPlanner:
             shortages=shortages,
             strategy=strategy,
             default_demand_date=default_demand_date,
-            deduct_pending_po=deduct_pending_po,
+            # CRITICAL: Force deduct_pending_po=False when input comes from GAP result.
+            # GAP module already includes PO in supply (unified_supply_view supply_source='PURCHASE_ORDER'
+            # and raw_material_supply_summary_view.supply_purchase_order).
+            # Deducting again here would be double-counting — items would be incorrectly skipped.
+            deduct_pending_po=False,
             skip_zero_shortage=skip_zero_shortage,
         )
+
+        if deduct_pending_po:
+            logger.info(
+                "POPlanner: 'Deduct pending POs' ignored for GAP-sourced data — "
+                "GAP already includes PO quantities in supply calculation. "
+                "Toggle only applies to manual/standalone shortage input."
+            )
 
         # Patch input_summary with GAP-level extraction info
         result.input_summary['validation_skipped'] = validation.items_skipped
         result.input_summary['validation_warnings'] = len(validation.warnings)
-        # Recompute reconciliation with updated validation_skipped
+        result.input_summary['source_mode'] = 'GAP_RESULT'
+        result.input_summary['deduct_pending_po_requested'] = deduct_pending_po
+        result.input_summary['deduct_pending_po_applied'] = False  # always False for GAP source
+        result.input_summary['deduct_override_reason'] = (
+            'GAP already includes PO in supply — deducting again would double-count'
+            if deduct_pending_po else 'Not requested'
+        )
+        # Recompute reconciliation with updated input_summary
         result.metrics['reconciliation'] = result.get_reconciliation()
 
         return result

@@ -531,6 +531,16 @@ def render_reconciliation_panel(result: POSuggestionResult):
                 f"(diff = {discrepancy}). Check processing logs."
             )
 
+        # Source mode info — explain deduct override when applicable
+        inp_summary = result.input_summary or {}
+        if inp_summary.get('source_mode') == 'GAP_RESULT' and inp_summary.get('deduct_pending_po_requested'):
+            st.info(
+                "ℹ️ **Deduct Pending POs** toggle was ON but automatically overridden. "
+                "GAP analysis already includes PO quantities in supply calculation "
+                "(unified_supply_view + raw_material_supply_summary_view). "
+                "Deducting again would double-count and incorrectly skip items that still need ordering."
+            )
+
         # Skipped items detail table (if any)
         if result.has_skipped():
             st.markdown("**⏭️ Skipped Items — Pending PO Covers Shortage**")
