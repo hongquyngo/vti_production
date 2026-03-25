@@ -160,44 +160,11 @@ def main():
 def _render_filter_review(review):
     st.divider()
     st.markdown("### 🔍 GAP Filter Review")
-    st.markdown("PO Planning uses shortage data from SCM GAP. Review the filters used:")
+    st.markdown("PO Planning uses shortage data from SCM GAP. Review your config against the standard:")
 
-    items = review.get('items', [])
-    if not items:
-        st.success("✅ All supply & demand sources enabled — data is complete.")
-        return
+    from utils.supply_chain_planning.po_planning_components import render_gap_config_checklist
+    render_gap_config_checklist(review)
 
-    from utils.supply_chain_planning.validators import SUPPLY_SOURCE_IMPACT, DEMAND_SOURCE_IMPACT
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**📦 Supply Sources**")
-        for s in review.get('supply_sources_on', []):
-            info = SUPPLY_SOURCE_IMPACT.get(s, {})
-            st.markdown(f"✅ {info.get('icon', '')} {info.get('label', s)}")
-        for s in review.get('supply_sources_off', []):
-            info = SUPPLY_SOURCE_IMPACT.get(s, {})
-            risk = info.get('risk', 'INFO')
-            marker = '🔴' if risk == 'HIGH' else '🟡' if risk == 'MEDIUM' else 'ℹ️'
-            st.markdown(f"{marker} ~~{info.get('label', s)}~~ — **OFF**")
-    with col2:
-        st.markdown("**📊 Demand Sources**")
-        for d in review.get('demand_sources_on', []):
-            info = DEMAND_SOURCE_IMPACT.get(d, {})
-            st.markdown(f"✅ {info.get('icon', '')} {info.get('label', d)}")
-        for d in review.get('demand_sources_off', []):
-            info = DEMAND_SOURCE_IMPACT.get(d, {})
-            st.markdown(f"ℹ️ ~~{info.get('label', d)}~~ — **OFF**")
-
-    for item in [i for i in items if i['risk'] == 'HIGH']:
-        st.error(f"🔴 **{item['label']}** is OFF — {item['consequence']}")
-    for item in [i for i in items if i['risk'] == 'MEDIUM']:
-        st.warning(f"🟡 **{item['label']}** — {item['consequence']}")
-    info_items = [i for i in items if i['risk'] == 'INFO']
-    if info_items:
-        with st.expander(f"ℹ️ {len(info_items)} informational notes", expanded=False):
-            for item in info_items:
-                st.caption(f"• **{item['label']}** — {item['consequence']}")
     st.divider()
 
 
@@ -278,12 +245,15 @@ def _show_empty_state():
     st.markdown("---")
     st.markdown("""
     ### 🚀 How to use PO Planning
-    1. Go to **Supply Chain GAP** page → run analysis
+    1. Go to **Supply Chain GAP** page → run analysis with standard config
     2. Come back here → click **🔄 Generate PO Suggestions**
     3. System reviews GAP filters → confirm if needed
     4. Review vendor-grouped PO lines with urgency and timing
     5. Export to Excel for procurement team
     """)
+
+    from utils.supply_chain_planning.po_planning_components import render_standard_config_reference
+    render_standard_config_reference()
 
 
 def _render_results(result):

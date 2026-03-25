@@ -382,25 +382,62 @@ DEMAND_SOURCE_IMPACT = {
 }
 
 OPTION_IMPACT = {
+    # --- Standard = ON, warn when OFF ---
     'include_fg_safety': {
         'label': 'FG Safety Stock',
+        'standard': True,
         'risk': 'INFO',
         'consequence_when_off': 'No safety buffer → shortage is minimum-only (no safety margin)',
     },
     'include_raw_safety': {
         'label': 'Raw Safety Stock',
+        'standard': True,
         'risk': 'INFO',
         'consequence_when_off': 'Raw material safety stock not considered',
     },
+    'exclude_expired': {
+        'label': 'Exclude Expired',
+        'standard': True,
+        'risk': 'INFO',
+        'consequence_when_off': 'Expired stock counted in supply — may overstate availability',
+    },
+    'include_alternatives': {
+        'label': 'Alternatives',
+        'standard': True,
+        'risk': 'MEDIUM',
+        'consequence_when_off': 'Alternative materials not considered in BOM explosion → raw material demand may be overstated',
+    },
     'include_existing_mo': {
         'label': 'Existing MO Demand',
+        'standard': True,
         'risk': 'MEDIUM',
         'consequence_when_off': 'Raw demand from existing MOs not included → raw PO may be too low',
     },
-    'exclude_expired': {
-        'label': 'Exclude Expired',
+}
+
+# Options where standard = OFF — warn when ON (reverse logic)
+OPTION_REVERSE_IMPACT = {
+    'include_draft_mo': {
+        'label': 'Include DRAFT MO',
+        'standard': False,
         'risk': 'INFO',
-        'consequence_when_off': 'Expired stock counted in supply — may overstate availability',
+        'consequence_when_on': 'Draft (unconfirmed) MOs included in raw material demand → raw PO may be inflated by uncommitted production',
+    },
+}
+
+# Period analysis settings
+PERIOD_ANALYSIS_IMPACT = {
+    'track_backlog': {
+        'label': 'Track Backlog',
+        'standard': True,
+        'risk': 'MEDIUM',
+        'consequence_when_off': 'Period backlog not carried forward → shortages underestimated in later periods, demand dates less accurate',
+    },
+    'period_type': {
+        'label': 'Period Type',
+        'standard': 'Weekly',
+        'risk': 'INFO',
+        'consequence_when_changed': 'Period type "{actual}" instead of standard "Weekly" — demand date granularity affected',
     },
 }
 
@@ -514,7 +551,7 @@ def validate_gap_filters(gap_result) -> Dict[str, Any]:
                 'icon': impact['icon'],
             })
     
-    # Check options
+    # Check options (standard = ON, warn when OFF)
     for opt_key, impact in OPTION_IMPACT.items():
         val = filters.get(opt_key)
         if val is False or val == 0:
@@ -529,6 +566,49 @@ def validate_gap_filters(gap_result) -> Dict[str, Any]:
                 'consequence': impact.get('consequence_when_off', ''),
                 'icon': '⚙️',
             })
+    
+    # Check reverse options (standard = OFF, warn when ON)
+    for opt_key, impact in OPTION_REVERSE_IMPACT.items():
+        val = filters.get(opt_key)
+        if val is True or val == 1:
+            review['all_complete'] = False
+            review['items'].append({
+                'filter': opt_key,
+                'label': impact['label'],
+                'category': 'Option',
+                'status': 'ON (non-standard)',
+                'risk': impact['risk'],
+                'consequence': impact.get('consequence_when_on', ''),
+                'icon': '⚙️',
+            })
+    
+    # Check period analysis settings
+    track_backlog_cfg = PERIOD_ANALYSIS_IMPACT['track_backlog']
+    if filters.get('track_backlog') is False:
+        review['all_complete'] = False
+        review['items'].append({
+            'filter': 'track_backlog',
+            'label': track_backlog_cfg['label'],
+            'category': 'Period Analysis',
+            'status': 'OFF',
+            'risk': track_backlog_cfg['risk'],
+            'consequence': track_backlog_cfg['consequence_when_off'],
+            'icon': '📅',
+        })
+    
+    period_type_cfg = PERIOD_ANALYSIS_IMPACT['period_type']
+    actual_period = filters.get('period_type', 'Weekly')
+    if actual_period and actual_period != period_type_cfg['standard']:
+        review['all_complete'] = False
+        review['items'].append({
+            'filter': 'period_type',
+            'label': period_type_cfg['label'],
+            'category': 'Period Analysis',
+            'status': f'{actual_period} (non-standard)',
+            'risk': period_type_cfg['risk'],
+            'consequence': period_type_cfg['consequence_when_changed'].format(actual=actual_period),
+            'icon': '📅',
+        })
     
     # MO Expected + Existing MO consistency
     if 'MO_EXPECTED' not in supply_on and filters.get('include_existing_mo', False):

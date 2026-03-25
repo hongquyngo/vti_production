@@ -585,24 +585,190 @@ def render_filter_persistent_banner(result: POSuggestionResult):
     
     has_high = review.get('has_high_risk', False)
     
-    # Build compact description
-    off_labels = [f"**{i['label']}**" for i in items if i.get('status') == 'OFF']
+    # Build compact description — include all non-standard items
+    deviation_labels = [f"**{i['label']}**" for i in items]
     
     if has_high:
         st.warning(
-            f"⚠️ **Incomplete GAP filters:** {', '.join(off_labels)} were OFF. "
+            f"⚠️ **Non-standard GAP config:** {', '.join(deviation_labels)} deviated from standard. "
             f"PO suggestions may not reflect the full supply/demand picture. "
-            f"[Re-run GAP with complete filters for accurate results]"
+            f"[Re-run GAP with standard config for accurate results]"
         )
     else:
         st.info(
-            f"ℹ️ **Note:** GAP analyzed with {len(off_labels)} filter(s) OFF "
-            f"({', '.join(off_labels)}). Results may be partial."
+            f"ℹ️ **Note:** GAP analyzed with {len(deviation_labels)} config deviation(s) "
+            f"({', '.join(deviation_labels)}). Results may be partial."
         )
 
 
 # Alias for page import
 render_filter_warning_banner = render_filter_persistent_banner
+
+
+# =============================================================================
+# GAP CONFIG CHECKLIST — Full comparison: Standard vs Actual
+# =============================================================================
+
+def render_gap_config_checklist(filter_review: dict):
+    """
+    Render full GAP config comparison: Standard vs Actual.
+    Shows every config item with match/deviation status.
+    Used in filter review panel before PO Planning execution.
+    """
+    from .validators import (
+        SUPPLY_SOURCE_IMPACT, DEMAND_SOURCE_IMPACT,
+        OPTION_IMPACT, OPTION_REVERSE_IMPACT, PERIOD_ANALYSIS_IMPACT
+    )
+
+    filters = filter_review.get('filters_used', {})
+    supply_on = set(filters.get('supply_sources') or [])
+    demand_on = set(filters.get('demand_sources') or [])
+
+    items = filter_review.get('items', [])
+    has_high = filter_review.get('has_high_risk', False)
+    all_complete = filter_review.get('all_complete', True)
+
+    # Header
+    if all_complete:
+        st.success("✅ All GAP filters match standard configuration — PO data is fully informed")
+        return
+    
+    st.markdown(
+        "Compare your GAP analysis configuration against the standard. "
+        "Deviations are highlighted with their impact on PO suggestions."
+    )
+
+    # --- Supply Sources ---
+    st.markdown("**📦 Supply Sources**")
+    cols = st.columns(5)
+    for i, (key, impact) in enumerate(SUPPLY_SOURCE_IMPACT.items()):
+        with cols[i]:
+            is_on = key in supply_on
+            if is_on:
+                st.markdown(
+                    f"<div style='background:#F0FDF4;border:1px solid #BBF7D0;"
+                    f"border-radius:6px;padding:6px 8px;text-align:center;font-size:13px;'>"
+                    f"✅ {impact['icon']}<br><b>{impact['label']}</b></div>",
+                    unsafe_allow_html=True
+                )
+            else:
+                risk = impact['risk']
+                bg = '#FEF2F2' if risk == 'HIGH' else '#FFFBEB' if risk == 'MEDIUM' else '#F9FAFB'
+                border = '#FCA5A5' if risk == 'HIGH' else '#FDE68A' if risk == 'MEDIUM' else '#D1D5DB'
+                marker = '🔴' if risk == 'HIGH' else '🟡'
+                st.markdown(
+                    f"<div style='background:{bg};border:1px solid {border};"
+                    f"border-radius:6px;padding:6px 8px;text-align:center;font-size:13px;'>"
+                    f"{marker} {impact['icon']}<br><b><s>{impact['label']}</s></b>"
+                    f"<br><span style='font-size:11px;'>OFF</span></div>",
+                    unsafe_allow_html=True
+                )
+
+    # --- Demand Sources ---
+    st.markdown("**📊 Demand Sources**")
+    dcols = st.columns(2)
+    for i, (key, impact) in enumerate(DEMAND_SOURCE_IMPACT.items()):
+        with dcols[i]:
+            is_on = key in demand_on
+            if is_on:
+                st.markdown(f"✅ {impact['icon']} **{impact['label']}**")
+            else:
+                st.markdown(f"ℹ️ ~~{impact['label']}~~ — OFF")
+
+    # --- Options (standard=ON items) ---
+    st.markdown("**⚙️ Options**")
+    opt_cols = st.columns(3)
+    opt_items = list(OPTION_IMPACT.items())
+    for i, (key, impact) in enumerate(opt_items):
+        with opt_cols[i % 3]:
+            actual = filters.get(key)
+            is_standard = actual is True or actual == 1 or (actual is None and impact.get('standard', True))
+            if is_standard:
+                st.markdown(f"✅ **{impact['label']}**")
+            else:
+                risk = impact['risk']
+                marker = '🟡' if risk == 'MEDIUM' else 'ℹ️'
+                st.markdown(f"{marker} ~~{impact['label']}~~ — **OFF**")
+
+    # --- Reverse options (standard=OFF items) ---
+    for key, impact in OPTION_REVERSE_IMPACT.items():
+        actual = filters.get(key)
+        is_on = actual is True or actual == 1
+        if is_on:
+            st.markdown(f"ℹ️ ⚙️ **{impact['label']}** — **ON** (standard: OFF)")
+        else:
+            st.markdown(f"✅ ⚙️ **{impact['label']}** — OFF (standard)")
+
+    # --- Period Analysis ---
+    st.markdown("**📅 Period Analysis**")
+    pcols = st.columns(2)
+    with pcols[0]:
+        track = filters.get('track_backlog')
+        cfg = PERIOD_ANALYSIS_IMPACT['track_backlog']
+        if track is False:
+            st.markdown(f"🟡 ~~{cfg['label']}~~ — **OFF**")
+        else:
+            st.markdown(f"✅ **{cfg['label']}**")
+    with pcols[1]:
+        period = filters.get('period_type', 'Weekly')
+        cfg = PERIOD_ANALYSIS_IMPACT['period_type']
+        if period != cfg['standard']:
+            st.markdown(f"ℹ️ **{cfg['label']}** — {period} (standard: {cfg['standard']})")
+        else:
+            st.markdown(f"✅ **{cfg['label']}** — {period}")
+
+    # --- Impact summary ---
+    st.markdown("")
+    for item in [i for i in items if i['risk'] == 'HIGH']:
+        st.error(f"🔴 **{item['label']}** — {item['consequence']}")
+    for item in [i for i in items if i['risk'] == 'MEDIUM']:
+        st.warning(f"🟡 **{item['label']}** — {item['consequence']}")
+    info_items = [i for i in items if i['risk'] == 'INFO']
+    if info_items:
+        with st.expander(f"ℹ️ {len(info_items)} informational note(s)", expanded=False):
+            for item in info_items:
+                st.caption(f"• **{item['label']}** — {item['consequence']}")
+
+
+def render_standard_config_reference():
+    """
+    Render standard GAP config reference panel.
+    Shows what configuration should be used in Supply Chain GAP
+    for PO Planning to produce accurate results.
+    """
+    from .validators import (
+        SUPPLY_SOURCE_IMPACT, DEMAND_SOURCE_IMPACT,
+        OPTION_IMPACT, OPTION_REVERSE_IMPACT, PERIOD_ANALYSIS_IMPACT
+    )
+
+    with st.expander("📋 **Standard GAP Configuration for PO Planning**", expanded=False):
+        st.caption(
+            "PO Planning expects Supply Chain GAP to run with the configuration below. "
+            "Deviations are allowed but will trigger a review before PO generation."
+        )
+
+        st.markdown("**📦 Supply Sources** — all ON")
+        supply_text = " · ".join(
+            f"{v['icon']} {v['label']}" for v in SUPPLY_SOURCE_IMPACT.values()
+        )
+        st.markdown(f"> {supply_text}")
+
+        st.markdown("**📊 Demand Sources** — all ON")
+        demand_text = " · ".join(
+            f"{v['icon']} {v['label']}" for v in DEMAND_SOURCE_IMPACT.values()
+        )
+        st.markdown(f"> {demand_text}")
+
+        st.markdown("**⚙️ Options**")
+        on_labels = [f"✅ {v['label']}" for v in OPTION_IMPACT.values()]
+        off_labels = [f"❌ {v['label']}" for v in OPTION_REVERSE_IMPACT.values()]
+        st.markdown(f"> {' · '.join(on_labels + off_labels)}")
+
+        st.markdown("**📅 Period Analysis**")
+        st.markdown(
+            f"> ✅ Track Backlog · "
+            f"✅ Period Type: {PERIOD_ANALYSIS_IMPACT['period_type']['standard']}"
+        )
 
 
 # =============================================================================
