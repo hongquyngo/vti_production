@@ -109,6 +109,7 @@ class POLineItem:
             'unit_price_usd': self.unit_price_usd,
             'currency_code': self.currency_code,
             'buying_uom': self.buying_uom,
+            'uom_conversion': self.uom_conversion,
             'vat_percent': self.vat_percent,
             'line_value_usd': self.line_value_usd,
             'moq': self.moq,

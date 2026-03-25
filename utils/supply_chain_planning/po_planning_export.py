@@ -14,12 +14,10 @@ v1.1: Added openpyxl formatting:
 
 import pandas as pd
 from io import BytesIO
-from typing import Dict, Any, Optional, List
 from datetime import datetime
 import logging
 
-from .po_result import POSuggestionResult
-from .planning_constants import URGENCY_LEVELS, SHORTAGE_SOURCE, PRICE_SOURCE
+from .planning_constants import URGENCY_LEVELS
 
 logger = logging.getLogger(__name__)
 

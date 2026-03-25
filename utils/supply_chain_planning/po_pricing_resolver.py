@@ -12,10 +12,9 @@ Also resolves MOQ/SPQ rounding and multi-vendor selection.
 """
 
 import pandas as pd
-import numpy as np
 import logging
-from typing import Dict, Any, List, Optional, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass
 
 from .planning_constants import (
     PRICE_SOURCE, MOQ_SPQ_CONFIG, SHORTAGE_SOURCE
@@ -238,14 +237,17 @@ class POPricingResolver:
         return self._row_to_match(options.iloc[0], 'COSTBOOK', 'First available costbook')
 
     def _try_last_po_match(self, product_id: int) -> VendorMatch:
-        """Try matching from last PO history"""
+        """Try matching from last PO history (returns most recent PO)"""
 
         options = self._last_po_by_product.get(product_id)
         if options is None or options.empty:
             return VendorMatch(product_id=product_id, matched=False)
 
-        row = options.iloc[0]
-        match = VendorMatch(
+        return self._last_po_row_to_match(options.iloc[0], product_id)
+
+    def _last_po_row_to_match(self, row: pd.Series, product_id: int) -> VendorMatch:
+        """Convert a single last-PO DataFrame row to VendorMatch"""
+        return VendorMatch(
             product_id=product_id,
             pt_code=str(row.get('pt_code', '')),
             product_name=str(row.get('product_name', '')),
@@ -275,7 +277,6 @@ class POPricingResolver:
             matched=True,
             match_notes=f"Fallback: last PO {row.get('po_number', '')} ({row.get('po_date', '')})"
         )
-        return match
 
     def _row_to_match(self, row: pd.Series, source: str, notes: str) -> VendorMatch:
         """Convert a pricing DataFrame row to VendorMatch"""
@@ -373,9 +374,10 @@ class POPricingResolver:
             for _, row in last_po.iterrows():
                 vid = int(row['vendor_id']) if pd.notna(row.get('vendor_id')) else None
                 if vid not in costbook_vendors:
-                    match = self._try_last_po_match(product_id)
+                    match = self._last_po_row_to_match(row, product_id)
                     if match.matched:
                         options.append(match)
+                        costbook_vendors.add(vid)  # prevent duplicates
 
         return options
 

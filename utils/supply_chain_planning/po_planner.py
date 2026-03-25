@@ -24,19 +24,19 @@ Usage:
 import pandas as pd
 import logging
 from datetime import date, timedelta
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 
 from .planning_constants import (
     URGENCY_LEVELS, SHORTAGE_SOURCE, PRICE_SOURCE
 )
-from .po_pricing_resolver import POPricingResolver, VendorMatch, QuantitySuggestion
-from .po_lead_time_calculator import POLeadTimeCalculator, OrderTimingResult
+from .po_pricing_resolver import POPricingResolver, VendorMatch
+from .po_lead_time_calculator import POLeadTimeCalculator
 from .po_result import POLineItem, VendorPOGroup, POSuggestionResult
 from .validators import (
     extract_all_shortages, validate_gap_result, validate_gap_filters,
     extract_demand_dates, extract_demand_composition,
-    ValidationResult, safe_extract_field
+    ValidationResult
 )
 
 logger = logging.getLogger(__name__)
@@ -274,7 +274,7 @@ class POPlanner:
             POSuggestionResult with vendor-grouped PO suggestions
         """
         if default_demand_date is None:
-            default_demand_date = date.today() + timedelta(days=30)
+            default_demand_date = date.today() + timedelta(days=60)  # match UI default planning horizon
 
         all_lines: List[POLineItem] = []
         unmatched: List[Dict[str, Any]] = []
@@ -512,38 +512,6 @@ class POPlanner:
         return line
 
     # =========================================================================
-    # EXTRACT SHORTAGES FROM GAP RESULT
-    # =========================================================================
-
-    def _extract_shortages_from_gap(self, gap_result) -> List[ShortageItem]:
-        """
-        DEPRECATED: Use plan_from_gap_result() which uses validators.extract_all_shortages().
-        
-        Kept for backward compatibility — now delegates to validated extraction.
-        """
-        import warnings
-        warnings.warn(
-            "_extract_shortages_from_gap is deprecated. "
-            "plan_from_gap_result now uses validators.extract_all_shortages()",
-            DeprecationWarning, stacklevel=2
-        )
-        shortage_dicts, _ = extract_all_shortages(gap_result)
-        return [
-            ShortageItem(
-                product_id=d['product_id'],
-                pt_code=d['pt_code'],
-                product_name=d['product_name'],
-                brand=d['brand'],
-                package_size=d['package_size'],
-                uom=d['uom'],
-                shortage_qty=d['shortage_qty'],
-                shortage_source=d['shortage_source'],
-                priority=d['priority'],
-            )
-            for d in shortage_dicts
-        ]
-
-    # =========================================================================
     # GROUP BY VENDOR
     # =========================================================================
 
@@ -644,7 +612,7 @@ class POPlanner:
         qty = self._resolver.apply_moq_spq(net, match.moq, match.spq)
 
         if demand_date is None:
-            demand_date = date.today() + timedelta(days=30)
+            demand_date = date.today() + timedelta(days=60)  # match UI default planning horizon
 
         timing = self._timing_calc.calculate_timing(
             demand_date=demand_date,

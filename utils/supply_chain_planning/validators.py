@@ -17,7 +17,7 @@ this validation layer.
 
 import pandas as pd
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
@@ -262,8 +262,8 @@ def extract_all_shortages(
     """
     Extract and validate ALL shortage items from a GAP result.
     
-    This replaces the raw loop in POPlanner._extract_shortages_from_gap
-    with a validated, type-safe version.
+    This is the validated extraction used by POPlanner.plan_from_gap_result()
+    instead of raw attribute access.
     
     Returns:
         (shortage_dicts, validation_result)
@@ -654,10 +654,7 @@ def _period_to_date(period_str: str) -> Optional[date]:
             parts = s.split(' - ')
             week = int(parts[0].replace('Week ', '').strip())
             year = int(parts[1].strip())
-            # ISO week → Monday
-            jan4 = datetime(year, 1, 4)
-            monday = jan4 - timedelta(days=jan4.isoweekday() - 1) + timedelta(weeks=week - 1)
-            return monday.date()
+            return date.fromisocalendar(year, week, 1)  # Monday of ISO week
         
         # Monthly: "Apr 2026"
         try:

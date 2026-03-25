@@ -235,7 +235,9 @@ def _run_planning(strategy, planning_horizon, source_mode):
                 gap_result=gap_result,
                 strategy=strategy,
                 default_demand_date=date.today() + timedelta(days=planning_horizon),
-                deduct_pending_po=True,
+                # deduct_pending_po is always forced False inside plan_from_gap_result()
+                # because GAP already includes PO in supply calculation.
+                deduct_pending_po=False,
                 skip_zero_shortage=True,
             )
             st.session_state['po_result'] = result
