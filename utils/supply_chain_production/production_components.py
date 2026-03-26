@@ -476,7 +476,8 @@ def _render_quick_start(config: ProductionConfig, lt_stats_df, historical_summar
     for bom_type in ('CUTTING', 'REPACKING', 'KITTING'):
         hist = historical_summary.get(bom_type) if historical_summary else None
         if hist and hist.get('total_mos', 0) >= 5:
-            avg = float(hist.get('avg_days', 0) or 0)
+            _avg = hist.get('avg_days', 0)
+            avg = float(_avg) if _avg is not None and not pd.isna(_avg) else 0.0
             total = hist['total_mos']
             parts.append(f"{bom_type}: avg {avg:.1f}d ({total} MOs)")
 
@@ -519,7 +520,7 @@ def _build_historical_hint(lt_stats_df, bom_type: str) -> str:
     avg = row.get('avg_lead_time_days')
     mos = row.get('completed_mo_count', 0)
     if avg is not None and not pd.isna(avg):
-        return f"📊 Historical: avg {float(avg):.1f}d from {int(mos or 0)} completed MOs"
+        return f"📊 Historical: avg {float(avg):.1f}d from {int(mos) if not pd.isna(mos) else 0} completed MOs"
     return ""
 
 

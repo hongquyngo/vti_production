@@ -235,8 +235,10 @@ class MOPlanner:
 
         # Existing MO context (informational only — NOT deducted)
         existing = self._existing_mos.get(item.product_id, {})
-        existing_count = int(existing.get('active_mo_count', 0) or 0)
-        existing_remaining = float(existing.get('total_remaining_qty', 0) or 0)
+        _ec = existing.get('active_mo_count', 0)
+        existing_count = int(_ec) if _ec is not None and not pd.isna(_ec) else 0
+        _er = existing.get('total_remaining_qty', 0)
+        existing_remaining = float(_er) if _er is not None and not pd.isna(_er) else 0.0
 
         # Action type
         action_type, action_desc = self._determine_action(readiness, sched)

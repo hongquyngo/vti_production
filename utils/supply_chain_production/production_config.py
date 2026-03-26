@@ -431,10 +431,12 @@ class ProductionConfigLoader:
             df = pd.read_sql(query, self._engine)
             result = {}
             for _, row in df.iterrows():
+                _tm = row.get('total_mos', 0)
+                _pc = row.get('product_count', 0)
                 result[row['bom_type']] = {
                     'avg_days': row.get('weighted_avg_days'),
-                    'total_mos': int(row.get('total_mos', 0) or 0),
-                    'product_count': int(row.get('product_count', 0) or 0),
+                    'total_mos': int(_tm) if not pd.isna(_tm) else 0,
+                    'product_count': int(_pc) if not pd.isna(_pc) else 0,
                     'avg_yield_pct': row.get('avg_yield_pct'),
                     'avg_qc_pass_rate_pct': row.get('avg_qc_pass_rate_pct'),
                 }

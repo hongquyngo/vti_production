@@ -314,7 +314,8 @@ class MOSchedulingEngine:
         # Level 1: Product-specific
         product_stats = self._lt_by_product.get(product_id)
         if product_stats is not None:
-            mo_count = int(product_stats.get('completed_mo_count', 0) or 0)
+            _mc = product_stats.get('completed_mo_count', 0)
+            mo_count = int(_mc) if _mc is not None and not pd.isna(_mc) else 0
             if mo_count >= min_product:
                 avg_days = product_stats.get('avg_lead_time_days')
                 if avg_days is not None and not pd.isna(avg_days) and avg_days >= 0:
@@ -404,7 +405,8 @@ class MOSchedulingEngine:
         if product_stats is None:
             return None
 
-        mo_count = int(product_stats.get('completed_mo_count', 0) or 0)
+        _mc = product_stats.get('completed_mo_count', 0)
+        mo_count = int(_mc) if _mc is not None and not pd.isna(_mc) else 0
         if mo_count < min_count:
             return None
 

@@ -431,7 +431,8 @@ class MaterialReadinessChecker:
             mid = row.get('material_id')
             if mid is None or pd.isna(mid):
                 continue
-            supply = float(row.get(supply_col, 0) or 0)
+            _supply = row.get(supply_col, 0)
+            supply = float(_supply) if not pd.isna(_supply) else 0.0
             mid_int = int(mid)
             # Accumulate (same material from different sources)
             lookup[mid_int] = lookup.get(mid_int, 0) + supply

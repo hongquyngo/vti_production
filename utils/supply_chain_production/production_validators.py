@@ -332,9 +332,13 @@ def _build_gap_lookup(gap_result) -> Dict[int, Dict[str, Any]]:
         pid = row.get('product_id')
         if pid is None or pd.isna(pid):
             continue
+        # NaN is truthy in Python, so `NaN or 0` still returns NaN.
+        # Must check pd.isna() explicitly before casting.
+        arv = row.get('at_risk_value', 0)
+        cc = row.get('customer_count', 0)
         lookup[int(pid)] = {
-            'at_risk_value': float(row.get('at_risk_value', 0) or 0),
-            'customer_count': int(row.get('customer_count', 0) or 0),
+            'at_risk_value': float(arv) if not pd.isna(arv) else 0.0,
+            'customer_count': int(cc) if not pd.isna(cc) else 0,
         }
     return lookup
 
@@ -459,19 +463,24 @@ def extract_material_requirements(
     bom_out = max(bom_output_qty, 0.001)  # prevent division by zero
 
     for _, row in product_bom.iterrows():
-        qty_per = float(row.get('quantity_per_output', 1) or 1)
-        scrap = float(row.get('scrap_rate', 0) or 0)
+        _qty_per = row.get('quantity_per_output', 1)
+        qty_per = float(_qty_per) if not pd.isna(_qty_per) else 1.0
+        _scrap = row.get('scrap_rate', 0)
+        scrap = float(_scrap) if not pd.isna(_scrap) else 0.0
         effective = qty_per * (1 + scrap / 100)
         required = (shortage_qty / bom_out) * effective
 
+        _mid = row.get('material_id', 0)
+        _alt_pri = row.get('alternative_priority', 0)
+
         mat = MaterialRequirement(
-            material_id=int(row.get('material_id', 0)),
-            material_pt_code=str(row.get('material_pt_code', '')),
-            material_name=str(row.get('material_name', '')),
-            material_uom=str(row.get('material_uom', '')),
-            material_type=str(row.get('material_type', 'RAW_MATERIAL')),
+            material_id=int(_mid) if not pd.isna(_mid) else 0,
+            material_pt_code=str(row.get('material_pt_code', '') or ''),
+            material_name=str(row.get('material_name', '') or ''),
+            material_uom=str(row.get('material_uom', '') or ''),
+            material_type=str(row.get('material_type', 'RAW_MATERIAL') or 'RAW_MATERIAL'),
             is_primary=bool(row.get('is_primary', 1) in [1, True]),
-            alternative_priority=int(row.get('alternative_priority', 0) or 0),
+            alternative_priority=int(_alt_pri) if not pd.isna(_alt_pri) else 0,
             primary_material_id=(
                 int(row['primary_material_id'])
                 if pd.notna(row.get('primary_material_id')) else None
