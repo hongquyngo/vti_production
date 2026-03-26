@@ -18,13 +18,28 @@ UI Fixes v1.2:
 import streamlit as st
 import logging
 from datetime import date, timedelta
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="PO Planning", page_icon="📦", layout="wide")
 
+# Import utilities
+project_root = os.environ.get('PROJECT_ROOT', Path(__file__).parent.parent)
+if str(project_root) not in os.sys.path:
+    os.sys.path.insert(0, str(project_root))
+
+from utils.auth import AuthManager
+
 
 def main():
+    # Authentication check
+    auth_manager = AuthManager()
+    if not auth_manager.check_session():
+        st.warning("⚠️ Please login to access this page")
+        st.stop()
+
     st.title("📦 PO Planning — Purchase Order Suggestions")
     st.caption("Layer 3: SCM GAP → Vendor-matched PO suggestions with timing & urgency")
 
@@ -37,6 +52,12 @@ def main():
     # SIDEBAR
     # =========================================================================
     with st.sidebar:
+        st.markdown(f"👤 **User:** {auth_manager.get_user_display_name()}")
+        if st.button("🚪 Logout", use_container_width=True):
+            auth_manager.logout()
+            st.rerun()
+
+        st.divider()
         st.markdown("### ⚙️ PO Planning Config")
 
         strategy = st.selectbox(
@@ -70,6 +91,10 @@ def main():
                     "Refresh vendor pricing: reload costbook & vendor data from DB"
                 ),
             )
+
+        st.divider()
+        from utils.supply_chain_planning import VERSION
+        st.caption(f"Version {VERSION}")
 
     # =========================================================================
     # ACTION BUTTONS (Generate + Reset only — Export moved below tabs)
