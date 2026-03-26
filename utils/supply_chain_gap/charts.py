@@ -239,20 +239,56 @@ class SupplyChainCharts:
         
         return fig
     
-    def create_action_summary(self, mo_count: int, po_fg_count: int, po_raw_count: int) -> go.Figure:
-        """Create action summary chart"""
+    def create_action_summary(
+        self,
+        mo_count: int, po_fg_count: int, po_raw_count: int,
+        mo_filtered: Optional[int] = None,
+        po_fg_filtered: Optional[int] = None,
+        po_raw_filtered: Optional[int] = None,
+        filter_label: str = 'Selected'
+    ) -> go.Figure:
+        """
+        Create action summary chart.
+        
+        When filtered counts are provided and differ from totals,
+        shows stacked bars: filtered (dark) + others (light).
+        """
         
         labels = ['MO to Create', 'PO for FG', 'PO for Raw']
-        values = [mo_count, po_fg_count, po_raw_count]
-        colors = ['#3B82F6', '#10B981', '#8B5CF6']
+        totals = [mo_count, po_fg_count, po_raw_count]
+        filtered = [mo_filtered, po_fg_filtered, po_raw_filtered]
+        colors_main = ['#3B82F6', '#10B981', '#8B5CF6']
+        colors_light = ['#93C5FD', '#6EE7B7', '#C4B5FD']
         
-        fig = go.Figure(data=[go.Bar(
-            x=labels,
-            y=values,
-            marker_color=colors,
-            text=values,
-            textposition='outside'
-        )])
+        has_filter = any(f is not None and f != t for f, t in zip(filtered, totals))
+        
+        if has_filter:
+            sel_values = [f if f is not None else t for f, t in zip(filtered, totals)]
+            other_values = [t - s for t, s in zip(totals, sel_values)]
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=labels, y=sel_values,
+                marker_color=colors_main,
+                text=[f"{v:,}" for v in sel_values],
+                textposition='inside',
+                name=filter_label
+            ))
+            fig.add_trace(go.Bar(
+                x=labels, y=other_values,
+                marker_color=colors_light,
+                text=[f"+{v:,}" if v > 0 else '' for v in other_values],
+                textposition='outside',
+                name='Others'
+            ))
+            fig.update_layout(barmode='stack', showlegend=True,
+                              legend=dict(orientation="h", yanchor="bottom", y=-0.25))
+        else:
+            fig = go.Figure(data=[go.Bar(
+                x=labels, y=totals,
+                marker_color=colors_main,
+                text=totals, textposition='outside'
+            )])
         
         fig.update_layout(
             title="Action Summary",

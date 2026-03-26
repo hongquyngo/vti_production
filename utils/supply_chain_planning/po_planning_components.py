@@ -236,6 +236,7 @@ def render_vendor_po_detail(result: POSuggestionResult, vendor_id: int):
         'pt_code', 'product_name', 'package_size', 'brand',
         'shortage_source', 'standard_uom',
         'shortage_qty', 'pending_po_qty', 'net_shortage_qty', 'suggested_qty',
+        'moq', 'spq', 'quantity_notes',
         'unit_price_usd', 'line_value_usd',
         'price_source', 'lead_time_days', 'urgency_display',
         'must_order_by',
@@ -255,7 +256,7 @@ def render_vendor_po_detail(result: POSuggestionResult, vendor_id: int):
 
     styled = _styled_dataframe(
         df[available],
-        qty_cols=['shortage_qty', 'pending_po_qty', 'net_shortage_qty', 'suggested_qty'],
+        qty_cols=['shortage_qty', 'pending_po_qty', 'net_shortage_qty', 'suggested_qty', 'moq', 'spq'],
         currency_cols=['unit_price_usd', 'line_value_usd'],
     )
 
@@ -272,6 +273,9 @@ def render_vendor_po_detail(result: POSuggestionResult, vendor_id: int):
             'pending_po_qty': st.column_config.NumberColumn('Pending PO'),
             'net_shortage_qty': st.column_config.NumberColumn('Net Need'),
             'suggested_qty': st.column_config.NumberColumn('Order Qty'),
+            'moq': st.column_config.NumberColumn('MOQ'),
+            'spq': st.column_config.NumberColumn('SPQ'),
+            'quantity_notes': st.column_config.TextColumn('Qty Notes', width='medium'),
             'unit_price_usd': st.column_config.NumberColumn('Price/u (USD)'),
             'line_value_usd': st.column_config.NumberColumn('Value (USD)'),
             'price_source': st.column_config.TextColumn('Price Src', width='small'),
@@ -353,7 +357,7 @@ def render_po_lines_table(
     display_cols = [
         'urgency_display', 'source_icon', 'pt_code', 'product_name', 'package_size', 'brand',
         'standard_uom', 'vendor_name',
-        'net_shortage_qty', 'suggested_qty',
+        'net_shortage_qty', 'suggested_qty', 'quantity_notes',
         'unit_price_usd', 'line_value_usd', 'currency_code',
         'price_icon', 'lead_time_days',
         'must_order_by',
@@ -383,6 +387,7 @@ def render_po_lines_table(
             ),
             'net_shortage_qty': st.column_config.NumberColumn('Need'),
             'suggested_qty': st.column_config.NumberColumn('Order Qty'),
+            'quantity_notes': st.column_config.TextColumn('Qty Notes', width='medium'),
             'unit_price_usd': st.column_config.NumberColumn('$/unit'),
             'line_value_usd': st.column_config.NumberColumn('Value $'),
             'price_icon': st.column_config.TextColumn('Src', width='small'),
@@ -395,10 +400,16 @@ def render_po_lines_table(
         key=table_key,
     )
 
+    # Filtered metrics (computed from full filtered df, not just current page)
+    filtered_value = lines_df['line_value_usd'].sum() if 'line_value_usd' in lines_df.columns else 0
+    filtered_vendors = lines_df['vendor_id'].nunique() if 'vendor_id' in lines_df.columns else 0
+
     return {
         'page': current_page,
         'total_pages': total_pages,
         'total_items': total_items,
+        'filtered_value_usd': filtered_value,
+        'filtered_vendors': filtered_vendors,
         'showing': f"{start + 1}-{end} of {total_items}",
     }
 
@@ -968,7 +979,17 @@ def po_vendor_groups_fragment(result: POSuggestionResult):
         st.info("No vendor groups — run PO planning first")
         return
 
+    # --- Summary metrics (consistent with Overview) ---
+    m = result.get_summary()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📦 PO Lines", f"{m.get('total_po_lines', 0):,}",
+              delta=f"{m.get('fg_lines', 0)} FG + {m.get('raw_lines', 0)} Raw", delta_color="off")
+    c2.metric("💰 Total Value", f"${m.get('total_value_usd', 0):,.0f}")
+    c3.metric("🚨 Overdue", f"{m.get('overdue_count', 0)}")
+    c4.metric("❌ No Vendor", f"{m.get('unmatched_count', 0)}")
+
     if result.vendor_groups:
+        st.divider()
         st.markdown(f"##### 🏭 {len(result.vendor_groups)} Vendors")
         render_vendor_summary_table(result)
 
@@ -1010,6 +1031,18 @@ def po_all_lines_fragment(result: POSuggestionResult):
         return
 
     metrics = result.get_summary()
+    total_lines = metrics['total_po_lines']
+    total_value = metrics.get('total_value_usd', 0)
+
+    # --- Summary metrics (consistent with Overview) ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📦 PO Lines", f"{total_lines:,}",
+              delta=f"{metrics.get('fg_lines', 0)} FG + {metrics.get('raw_lines', 0)} Raw", delta_color="off")
+    c2.metric("💰 Total Value", f"${total_value:,.0f}")
+    c3.metric("🚨 Overdue", f"{metrics.get('overdue_count', 0)}")
+    c4.metric("❌ No Vendor", f"{metrics.get('unmatched_count', 0)}")
+
+    st.divider()
 
     # Filter controls
     fc1, fc2, fc3, fc4 = st.columns([1, 1, 2, 1])
@@ -1074,6 +1107,19 @@ def po_all_lines_fragment(result: POSuggestionResult):
         table_key="po_lines_tbl",
     )
 
+    # Filtered summary — show when filters active
+    if page_info:
+        is_filtered = (source_filter != 'all' or urgency_filter != 'all' or vendor_filter is not None)
+        filtered_items = page_info.get('total_items', 0)
+        filtered_value = page_info.get('filtered_value_usd', 0)
+        if is_filtered:
+            st.caption(
+                f"Filtered: **{filtered_items}** of {total_lines} lines "
+                f"| **${filtered_value:,.0f}** of ${total_value:,.0f}"
+            )
+        else:
+            st.caption(f"Showing {page_info.get('showing', '')}")
+
     if page_info and page_info.get('total_pages', 1) > 1:
         new_page = render_pagination(
             page_info['page'], page_info['total_pages'], 'po_lines'
@@ -1094,6 +1140,17 @@ def po_coverage_fragment(result: POSuggestionResult):
     if lines_df.empty:
         st.info("No data")
         return
+
+    # --- Summary metrics (consistent with Overview) ---
+    m = result.get_summary()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📦 PO Lines", f"{m.get('total_po_lines', 0):,}",
+              delta=f"{m.get('fg_lines', 0)} FG + {m.get('raw_lines', 0)} Raw", delta_color="off")
+    c2.metric("💰 Total Value", f"${m.get('total_value_usd', 0):,.0f}")
+    c3.metric("🏭 Vendors", f"{m.get('total_vendors', 0)}")
+    c4.metric("❌ No Vendor", f"{m.get('unmatched_count', 0)}")
+
+    st.divider()
 
     # Price source breakdown
     st.markdown("##### 📗 Price Source Coverage")

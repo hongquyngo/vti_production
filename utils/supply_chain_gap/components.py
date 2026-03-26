@@ -1465,7 +1465,7 @@ def raw_materials_fragment(result: SupplyChainGAPResult, charts):
         st.info("No raw material data available")
         return
     
-    metrics = result.get_metrics()
+    metrics = result.get_metrics_filtered()
     rm = result.raw_metrics
     
     # --- Row 1: Metrics bar (compact) ---
@@ -1529,19 +1529,49 @@ def actions_fragment(result: SupplyChainGAPResult, charts):
         st.success("✅ No actions required")
         return
     
-    metrics = result.get_metrics()
+    metrics = result.get_metrics_filtered()
+    has_filter = metrics.get('has_display_filter', False)
+    
+    # Action counts
+    mo_total = metrics.get('mo_count', 0)
+    po_fg_total = metrics.get('po_fg_count', 0)
+    po_raw_total = metrics.get('po_raw_count', 0)
+    mo_filtered = metrics.get('mo_filtered', mo_total)
+    po_fg_filtered = metrics.get('po_fg_filtered', po_fg_total)
+    po_raw_filtered = metrics.get('po_raw_filtered', po_raw_total)
+    
+    # Filter label for chart legend
+    filter_brands = metrics.get('filter_brands', [])
+    filter_label = ', '.join(filter_brands) if filter_brands else 'Selected'
+    
     col1, col2 = st.columns(2)
     with col1:
-        st.plotly_chart(
-            charts.create_action_summary(
-                metrics.get('mo_count', 0), metrics.get('po_fg_count', 0), metrics.get('po_raw_count', 0)),
-            width='stretch')
+        if has_filter:
+            st.plotly_chart(
+                charts.create_action_summary(
+                    mo_total, po_fg_total, po_raw_total,
+                    mo_filtered=mo_filtered,
+                    po_fg_filtered=po_fg_filtered,
+                    po_raw_filtered=po_raw_filtered,
+                    filter_label=filter_label
+                ),
+                width='stretch')
+        else:
+            st.plotly_chart(
+                charts.create_action_summary(mo_total, po_fg_total, po_raw_total),
+                width='stretch')
     
-    at1, at2, at3 = st.tabs([
-        f"🏭 MO ({metrics.get('mo_count', 0)})",
-        f"🛒 PO-FG ({metrics.get('po_fg_count', 0)})",
-        f"📦 PO-Raw ({metrics.get('po_raw_count', 0)})"
-    ])
+    # Tab labels with filtered/total
+    if has_filter:
+        mo_label = f"🏭 MO ({mo_filtered}/{mo_total})"
+        po_fg_label = f"🛒 PO-FG ({po_fg_filtered}/{po_fg_total})"
+        po_raw_label = f"📦 PO-Raw ({po_raw_filtered}/{po_raw_total})"
+    else:
+        mo_label = f"🏭 MO ({mo_total})"
+        po_fg_label = f"🛒 PO-FG ({po_fg_total})"
+        po_raw_label = f"📦 PO-Raw ({po_raw_total})"
+    
+    at1, at2, at3 = st.tabs([mo_label, po_fg_label, po_raw_label])
     with at1:
         render_action_table(result, action_type='mo')
     with at2:
