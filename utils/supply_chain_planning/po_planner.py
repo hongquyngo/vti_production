@@ -491,6 +491,7 @@ class POPlanner:
             # Lead time
             lead_time_days=timing.lead_time.total_lead_time_days,
             lead_time_source=timing.lead_time.lead_time_source,
+            lead_time_notes=timing.lead_time.lead_time_notes,
             vendor_reliability=timing.lead_time.vendor_reliability,
 
             # Timing
@@ -659,6 +660,7 @@ class POPlanner:
             last_po_number=match.last_po_number,
             lead_time_days=timing.lead_time.total_lead_time_days,
             lead_time_source=timing.lead_time.lead_time_source,
+            lead_time_notes=timing.lead_time.lead_time_notes,
             vendor_reliability=timing.lead_time.vendor_reliability,
             demand_date=timing.demand_date,
             must_order_by=timing.must_order_by,

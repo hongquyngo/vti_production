@@ -64,6 +64,7 @@ class POLineItem:
     # Lead time & timing
     lead_time_days: int = 0             # total (base + buffer)
     lead_time_source: str = ''          # COSTBOOK, LEADTIME_RULE, DEFAULT
+    lead_time_notes: str = ''           # breakdown: "Costbook: 21d + buffer: 8d"
     vendor_reliability: str = ''        # RELIABLE, AVERAGE, UNRELIABLE, UNKNOWN
 
     # Order timing
@@ -119,6 +120,7 @@ class POLineItem:
             'last_po_number': self.last_po_number,
             'lead_time_days': self.lead_time_days,
             'lead_time_source': self.lead_time_source,
+            'lead_time_notes': self.lead_time_notes,
             'vendor_reliability': self.vendor_reliability,
             'demand_date': self.demand_date,
             'must_order_by': self.must_order_by,

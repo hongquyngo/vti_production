@@ -238,7 +238,8 @@ def render_vendor_po_detail(result: POSuggestionResult, vendor_id: int):
         'shortage_qty', 'pending_po_qty', 'net_shortage_qty', 'suggested_qty',
         'moq', 'spq', 'quantity_notes',
         'unit_price_usd', 'line_value_usd',
-        'price_source', 'lead_time_days', 'urgency_display',
+        'price_source', 'lead_time_days', 'lead_time_source', 'lead_time_notes',
+        'urgency_display',
         'must_order_by',
     ]
 
@@ -279,7 +280,12 @@ def render_vendor_po_detail(result: POSuggestionResult, vendor_id: int):
             'unit_price_usd': st.column_config.NumberColumn('Price/u (USD)'),
             'line_value_usd': st.column_config.NumberColumn('Value (USD)'),
             'price_source': st.column_config.TextColumn('Price Src', width='small'),
-            'lead_time_days': st.column_config.NumberColumn('LT (d)', format="%d"),
+            'lead_time_days': st.column_config.NumberColumn(
+                'LT (d)', format="%d",
+                help='Total lead time = base (costbook/rule/default) + buffer (vendor reliability adjusted).',
+            ),
+            'lead_time_source': st.column_config.TextColumn('LT Src', width='small'),
+            'lead_time_notes': st.column_config.TextColumn('LT Breakdown', width='large'),
             'urgency_display': st.column_config.TextColumn('Urgency', width='medium'),
             'must_order_by': st.column_config.DateColumn('Must Order By', format='YYYY-MM-DD'),
         },
@@ -359,7 +365,7 @@ def render_po_lines_table(
         'standard_uom', 'vendor_name',
         'net_shortage_qty', 'suggested_qty', 'quantity_notes',
         'unit_price_usd', 'line_value_usd', 'currency_code',
-        'price_icon', 'lead_time_days',
+        'price_icon', 'lead_time_days', 'lead_time_source',
         'must_order_by',
     ]
     available = [c for c in display_cols if c in page_df.columns]
@@ -391,7 +397,11 @@ def render_po_lines_table(
             'unit_price_usd': st.column_config.NumberColumn('$/unit'),
             'line_value_usd': st.column_config.NumberColumn('Value $'),
             'price_icon': st.column_config.TextColumn('Src', width='small'),
-            'lead_time_days': st.column_config.NumberColumn('LT', format="%d"),
+            'lead_time_days': st.column_config.NumberColumn(
+                'LT', format="%d",
+                help='Total lead time (days) = base + buffer. See By Vendor tab for full breakdown.',
+            ),
+            'lead_time_source': st.column_config.TextColumn('LT Src', width='small'),
             'must_order_by': st.column_config.DateColumn('Must Order', format='YYYY-MM-DD'),
         },
         width='stretch',
