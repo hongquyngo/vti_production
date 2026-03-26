@@ -141,11 +141,30 @@ def render_kpi_cards(result: SupplyChainGAPResult):
     """
     Render focused KPI cards — only actionable metrics.
     
+    v2.3.1: FG metrics = filtered by brand/product. Raw metrics = full (shared resource).
+    
     Row 1: Situation (what's the problem?)
     Row 2: Actions (what needs to be done?)
     """
     
-    metrics = result.get_metrics()
+    metrics = result.get_metrics_filtered()
+    
+    # Display filter banner
+    if metrics.get('has_display_filter', False):
+        filter_brands = metrics.get('filter_brands', [])
+        filter_pids = metrics.get('filter_product_ids', [])
+        filter_parts = []
+        if filter_brands:
+            filter_parts.append(f"Brand: {', '.join(filter_brands)}")
+        if filter_pids:
+            filter_parts.append(f"{len(filter_pids)} products selected")
+        full_fg_total = len(result.fg_gap_df)
+        filtered_fg_total = metrics.get('fg_total', 0)
+        st.info(
+            f"🔍 **Display filter:** {' · '.join(filter_parts)} — "
+            f"FG shows {filtered_fg_total:,} of {full_fg_total:,} products. "
+            f"Raw Materials shows full supply chain (shared resource)."
+        )
     
     # Row 1: Situation
     cols = st.columns(4)
@@ -189,7 +208,7 @@ def render_kpi_cards(result: SupplyChainGAPResult):
             value=f"{raw_short:,}",
             delta=f"of {raw_total:,} materials" if raw_total > 0 else None,
             delta_color="off",
-            help="Số nguyên vật liệu có Net GAP < 0"
+            help="Số nguyên vật liệu có Net GAP < 0 (tính toàn bộ supply chain, không chỉ brand đang lọc)"
         )
     
     # Row 2: Actions
@@ -695,7 +714,7 @@ def render_manufacturing_table(
     current_page: int = 1
 ) -> Dict[str, Any]:
     """Render manufacturing products with sortable columns + pagination"""
-    mfg_shortage = result.get_manufacturing_shortage()
+    mfg_shortage = result.get_manufacturing_shortage_filtered()
     if mfg_shortage.empty:
         st.info("🏭 No manufacturing products with shortage")
         return {}
@@ -765,7 +784,7 @@ def render_trading_table(
     current_page: int = 1
 ) -> Dict[str, Any]:
     """Render trading products with sortable columns + pagination"""
-    trading_shortage = result.get_trading_shortage()
+    trading_shortage = result.get_trading_shortage_filtered()
     if trading_shortage.empty:
         st.info("🛒 No trading products with shortage")
         return {}
@@ -873,6 +892,20 @@ def render_raw_material_table(
         display_cols.append('bom_level')
         col_config['bom_level'] = st.column_config.NumberColumn('Level', format="%d", width='small')
     
+    # Demand breakdown columns (v2.3.1) — show when display filter is active
+    has_breakdown = 'demand_from_selected' in page_df.columns and result.has_display_filter()
+    if has_breakdown:
+        for col in ['demand_from_selected', 'demand_from_others']:
+            if col in page_df.columns:
+                page_df[col] = pd.to_numeric(page_df[col], errors='coerce').fillna(0).round(0)
+        filter_brands = result.applied_display_filter.get('brands', [])
+        selected_label = ', '.join(filter_brands) if filter_brands else 'Selected'
+        display_cols += ['demand_from_selected', 'demand_from_others']
+        col_config.update({
+            'demand_from_selected': st.column_config.NumberColumn(f'Demand ({selected_label})'),
+            'demand_from_others': st.column_config.NumberColumn('Demand (Others)'),
+        })
+    
     display_cols += ['total_required_qty', 'total_supply', 'net_gap', 'coverage_pct']
     col_config.update({
         'total_required_qty': st.column_config.NumberColumn('Required'),
@@ -884,7 +917,7 @@ def render_raw_material_table(
     
     styled = _styled_dataframe(
         page_df[available],
-        qty_cols=['total_required_qty', 'total_supply', 'net_gap']
+        qty_cols=['demand_from_selected', 'demand_from_others', 'total_required_qty', 'total_supply', 'net_gap']
     )
     st.dataframe(styled, column_config=col_config, width='stretch',
                  hide_index=True, height=min(400, 35 * len(page_df) + 38))
@@ -1242,13 +1275,14 @@ def render_pagination(current_page: int, total_pages: int, key_prefix: str = "ma
 @st.fragment
 def fg_charts_fragment(result: SupplyChainGAPResult, charts):
     """Fragment for FG charts — donut + value at risk + top shortages."""
+    fg_df = result.get_fg_gap_filtered()
     col1, col2 = st.columns(2)
     with col1:
-        st.plotly_chart(charts.create_status_donut(result.fg_gap_df), width='stretch')
+        st.plotly_chart(charts.create_status_donut(fg_df), width='stretch')
     with col2:
-        st.plotly_chart(charts.create_top_items_bar(result.fg_gap_df, 'shortage', 8), width='stretch')
+        st.plotly_chart(charts.create_top_items_bar(fg_df, 'shortage', 8), width='stretch')
     
-    render_status_summary(result.fg_gap_df, key_prefix="fg")
+    render_status_summary(fg_df, key_prefix="fg")
 
 
 @st.fragment
@@ -1263,7 +1297,7 @@ def fg_table_fragment(result: SupplyChainGAPResult):
     
     # Quick filter
     quick_filter = render_quick_filter(key_prefix="fg")
-    filtered_df = apply_quick_filter(result.fg_gap_df, quick_filter)
+    filtered_df = apply_quick_filter(result.get_fg_gap_filtered(), quick_filter)
     
     # Table controls
     col1, col2 = st.columns([1, 3])
@@ -1333,19 +1367,25 @@ def manufacturing_fragment(result: SupplyChainGAPResult, charts):
     state = get_state()
     
     if result.has_classification():
-        mfg_shortage = result.get_manufacturing_shortage()
-        all_statuses = result.get_all_production_statuses()
+        mfg_shortage = result.get_manufacturing_shortage_filtered()
         
-        can_produce_count = sum(1 for s in all_statuses.values() if s.get('can_produce'))
-        cannot_produce_count = len(all_statuses) - can_produce_count
+        # Production status from FULL data (raw material availability is global)
+        all_statuses = result.get_all_production_statuses()
+        # Filter to only filtered products
+        filtered_mfg_ids = result.get_manufacturing_filtered()['product_id'].tolist() if not result.get_manufacturing_filtered().empty else []
+        filtered_shortage_ids = [pid for pid in mfg_shortage['product_id'].tolist()] if not mfg_shortage.empty else []
+        filtered_statuses = {pid: s for pid, s in all_statuses.items() if pid in filtered_shortage_ids}
+        
+        can_produce_count = sum(1 for s in filtered_statuses.values() if s.get('can_produce'))
+        cannot_produce_count = len(filtered_statuses) - can_produce_count
         
         col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
             st.plotly_chart(
-                charts.create_classification_pie(len(result.manufacturing_df), len(result.trading_df)),
+                charts.create_classification_pie(len(result.get_manufacturing_filtered()), len(result.get_trading_filtered())),
                 width='stretch')
         with col2:
-            metrics = result.get_metrics()
+            metrics = result.get_metrics_filtered()
             st.metric("Manufacturing Products", metrics.get('manufacturing_count', 0))
             st.metric("With Shortage", len(mfg_shortage))
         with col3:
@@ -1764,12 +1804,12 @@ def _render_period_analysis_section(
 
 @st.fragment
 def fg_period_fragment(result: SupplyChainGAPResult, charts):
-    """Period analysis for ALL FG products."""
+    """Period analysis for FG products (filtered by brand/product if active)."""
     if not result.has_period_data():
         st.caption("📅 No period data. Supply/demand need date columns.")
         return
     _render_period_analysis_section(
-        result.fg_period_gap_df, charts, result.period_type,
+        result.get_fg_period_gap_filtered(), charts, result.period_type,
         result.filters_used.get('track_backlog', True),
         key_prefix='fg_p', page_key='fg_period'
     )
@@ -1777,11 +1817,11 @@ def fg_period_fragment(result: SupplyChainGAPResult, charts):
 
 @st.fragment
 def manufacturing_period_fragment(result: SupplyChainGAPResult, charts):
-    """Period analysis for manufacturing products only."""
+    """Period analysis for manufacturing products (filtered)."""
     if not result.has_period_data() or not result.has_classification():
         st.caption("📅 No period data for manufacturing products")
         return
-    mfg_period = result.get_manufacturing_period_gap()
+    mfg_period = result.get_manufacturing_period_gap_filtered()
     if mfg_period.empty:
         st.caption("📅 No manufacturing products in period data")
         return
@@ -1794,11 +1834,11 @@ def manufacturing_period_fragment(result: SupplyChainGAPResult, charts):
 
 @st.fragment
 def trading_period_fragment(result: SupplyChainGAPResult, charts):
-    """Period analysis for trading products only."""
+    """Period analysis for trading products (filtered)."""
     if not result.has_period_data() or not result.has_classification():
         st.caption("📅 No period data for trading products")
         return
-    trd_period = result.get_trading_period_gap()
+    trd_period = result.get_trading_period_gap_filtered()
     if trd_period.empty:
         st.caption("📅 No trading products in period data")
         return

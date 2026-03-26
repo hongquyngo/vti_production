@@ -1,6 +1,7 @@
 # utils/supply_chain_gap/__init__.py
-"""Supply Chain GAP Analysis Module — v2.3.0
-Full multi-level analysis + Period GAP per tab with carry-forward"""
+"""Supply Chain GAP Analysis Module — v2.3.1
+Full multi-level analysis + Period GAP per tab with carry-forward
+v2.3.1: Brand/product filter as display filter — Raw GAP always uses full data"""
 
 from .constants import (
     VERSION, GAP_CATEGORIES, THRESHOLDS, STATUS_CONFIG,

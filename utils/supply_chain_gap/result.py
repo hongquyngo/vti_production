@@ -94,6 +94,9 @@ class SupplyChainGAPResult:
     # Metadata
     filters_used: Dict[str, Any] = field(default_factory=dict)
     
+    # Display filter (v2.3.1) — brand/product filter applied AFTER full calculation
+    applied_display_filter: Dict[str, Any] = field(default_factory=dict)
+    
     # Period-based GAP Analysis (v2.2)
     fg_period_gap_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     fg_period_metrics: Dict[str, Any] = field(default_factory=dict)
@@ -187,6 +190,186 @@ class SupplyChainGAPResult:
         if self.fg_gap_df.empty or 'net_gap' not in self.fg_gap_df.columns:
             return pd.DataFrame()
         return self.fg_gap_df[self.fg_gap_df['net_gap'] > 0].copy()
+    
+    # =========================================================================
+    # DISPLAY FILTER ACCESSORS (v2.3.1)
+    # When brand/product filter is set, FG tabs show filtered subset.
+    # Raw/Actions tabs show full data with breakdown.
+    # =========================================================================
+    
+    def has_display_filter(self) -> bool:
+        """Check if a display filter (brand/product) is active"""
+        return self.applied_display_filter.get('has_filter', False)
+    
+    def get_fg_gap_filtered(self) -> pd.DataFrame:
+        """Get FG GAP filtered by brand/product (for FG tabs display)"""
+        if self.fg_gap_df.empty:
+            return pd.DataFrame()
+        if 'in_filter' in self.fg_gap_df.columns and self.has_display_filter():
+            return self.fg_gap_df[self.fg_gap_df['in_filter']].copy()
+        return self.fg_gap_df.copy()
+    
+    def get_fg_shortage_filtered(self) -> pd.DataFrame:
+        """Get FG shortage filtered by brand/product"""
+        filtered = self.get_fg_gap_filtered()
+        if filtered.empty or 'net_gap' not in filtered.columns:
+            return pd.DataFrame()
+        return filtered[filtered['net_gap'] < 0].copy()
+    
+    def get_fg_surplus_filtered(self) -> pd.DataFrame:
+        """Get FG surplus filtered by brand/product"""
+        filtered = self.get_fg_gap_filtered()
+        if filtered.empty or 'net_gap' not in filtered.columns:
+            return pd.DataFrame()
+        return filtered[filtered['net_gap'] > 0].copy()
+    
+    def get_manufacturing_filtered(self) -> pd.DataFrame:
+        """Get manufacturing products filtered by brand/product"""
+        if self.manufacturing_df.empty:
+            return pd.DataFrame()
+        if not self.has_display_filter():
+            return self.manufacturing_df.copy()
+        filtered_ids = self.get_fg_gap_filtered()['product_id'].tolist()
+        return self.manufacturing_df[self.manufacturing_df['product_id'].isin(filtered_ids)].copy()
+    
+    def get_trading_filtered(self) -> pd.DataFrame:
+        """Get trading products filtered by brand/product"""
+        if self.trading_df.empty:
+            return pd.DataFrame()
+        if not self.has_display_filter():
+            return self.trading_df.copy()
+        filtered_ids = self.get_fg_gap_filtered()['product_id'].tolist()
+        return self.trading_df[self.trading_df['product_id'].isin(filtered_ids)].copy()
+    
+    def get_manufacturing_shortage_filtered(self) -> pd.DataFrame:
+        """Get manufacturing shortage filtered by brand/product"""
+        mfg = self.get_manufacturing_filtered()
+        if mfg.empty:
+            return pd.DataFrame()
+        shortage = self.get_fg_shortage_filtered()
+        if shortage.empty:
+            return pd.DataFrame()
+        mfg_ids = mfg['product_id'].tolist()
+        return shortage[shortage['product_id'].isin(mfg_ids)].copy()
+    
+    def get_trading_shortage_filtered(self) -> pd.DataFrame:
+        """Get trading shortage filtered by brand/product"""
+        trading = self.get_trading_filtered()
+        if trading.empty:
+            return pd.DataFrame()
+        shortage = self.get_fg_shortage_filtered()
+        if shortage.empty:
+            return pd.DataFrame()
+        trading_ids = trading['product_id'].tolist()
+        return shortage[shortage['product_id'].isin(trading_ids)].copy()
+    
+    def get_metrics_filtered(self) -> Dict[str, Any]:
+        """
+        Get combined metrics: FG = filtered by brand/product, Raw = full.
+        Used by KPI cards and summary.
+        """
+        fg_filtered = self.get_fg_gap_filtered()
+        fg_shortage = self.get_fg_shortage_filtered()
+        mfg_filtered = self.get_manufacturing_filtered()
+        trading_filtered = self.get_trading_filtered()
+        
+        metrics = {
+            # FG metrics (filtered)
+            'fg_total': len(fg_filtered),
+            'fg_shortage': len(fg_shortage),
+            'fg_surplus': len(self.get_fg_surplus_filtered()),
+            'fg_balanced': len(fg_filtered[fg_filtered['gap_status'] == 'BALANCED']) if 'gap_status' in fg_filtered.columns else 0,
+            
+            # Classification (filtered)
+            'manufacturing_count': len(mfg_filtered),
+            'trading_count': len(trading_filtered),
+            
+            # Raw material metrics (FULL — shared resource)
+            'raw_total': len(self.raw_gap_df),
+            'raw_shortage': len(self.get_raw_shortage()),
+            'raw_sufficient': len(self.raw_gap_df) - len(self.get_raw_shortage()) if len(self.raw_gap_df) > 0 else 0,
+            
+            # Semi-finished metrics (FULL)
+            'semi_finished_total': len(self.semi_finished_gap_df),
+            'semi_finished_shortage': len(self.get_semi_finished_shortage()),
+            'max_bom_depth': self.max_bom_depth,
+            
+            # Value metrics (filtered)
+            'at_risk_value': fg_shortage['at_risk_value'].sum() if not fg_shortage.empty and 'at_risk_value' in fg_shortage.columns else 0,
+            'affected_customers': self._count_filtered_customers(),
+            
+            # Action counts (FULL)
+            'mo_count': len(self.mo_suggestions),
+            'po_fg_count': len(self.po_fg_suggestions),
+            'po_raw_count': len(self.po_raw_suggestions),
+            
+            # Period analysis
+            'period_type': self.period_type,
+            'has_period_data': self.has_period_data(),
+            'has_raw_period_data': self.has_raw_period_data(),
+            
+            # Display filter info
+            'has_display_filter': self.has_display_filter(),
+            'filter_brands': self.applied_display_filter.get('brands', []),
+            'filter_product_ids': self.applied_display_filter.get('product_ids', []),
+        }
+        
+        # Merge period metrics
+        if self.fg_period_metrics:
+            for k, v in self.fg_period_metrics.items():
+                metrics[f'period_{k}'] = v
+        if self.raw_period_metrics:
+            for k, v in self.raw_period_metrics.items():
+                metrics[f'raw_period_{k}'] = v
+        
+        return metrics
+    
+    def _count_filtered_customers(self) -> int:
+        """Count affected customers from filtered FG shortage"""
+        if not self.customer_impact or self.customer_impact.details.empty:
+            return 0
+        if not self.has_display_filter():
+            return self.customer_impact.affected_count
+        
+        fg_shortage = self.get_fg_shortage_filtered()
+        if fg_shortage.empty:
+            return 0
+        shortage_ids = fg_shortage['product_id'].tolist()
+        details = self.customer_impact.details
+        if 'product_id' in details.columns:
+            filtered_details = details[details['product_id'].isin(shortage_ids)]
+            if 'customer' in filtered_details.columns:
+                return filtered_details['customer'].nunique()
+        return 0
+    
+    # =========================================================================
+    # PERIOD GAP FILTERED ACCESSORS (v2.3.1)
+    # =========================================================================
+    
+    def get_fg_period_gap_filtered(self) -> pd.DataFrame:
+        """Get FG period GAP filtered by brand/product"""
+        if self.fg_period_gap_df.empty:
+            return pd.DataFrame()
+        if not self.has_display_filter():
+            return self.fg_period_gap_df.copy()
+        filtered_ids = self.get_fg_gap_filtered()['product_id'].tolist()
+        return self.fg_period_gap_df[self.fg_period_gap_df['product_id'].isin(filtered_ids)].copy()
+    
+    def get_manufacturing_period_gap_filtered(self) -> pd.DataFrame:
+        """Get manufacturing period GAP filtered"""
+        period_df = self.get_fg_period_gap_filtered()
+        if period_df.empty or self.manufacturing_df.empty:
+            return pd.DataFrame()
+        mfg_ids = self.get_manufacturing_filtered()['product_id'].tolist()
+        return period_df[period_df['product_id'].isin(mfg_ids)].copy()
+    
+    def get_trading_period_gap_filtered(self) -> pd.DataFrame:
+        """Get trading period GAP filtered"""
+        period_df = self.get_fg_period_gap_filtered()
+        if period_df.empty or self.trading_df.empty:
+            return pd.DataFrame()
+        trading_ids = self.get_trading_filtered()['product_id'].tolist()
+        return period_df[period_df['product_id'].isin(trading_ids)].copy()
     
     def get_manufacturing_shortage(self) -> pd.DataFrame:
         """Get manufacturing products with shortage"""

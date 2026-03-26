@@ -45,15 +45,15 @@ def export_to_excel(
         _write_summary_sheet(writer, result, filter_values)
         
         # Sheet 2: FG GAP
-        if not result.fg_gap_df.empty:
+        if not result.get_fg_gap_filtered().empty:
             _write_fg_gap_sheet(writer, result)
         
         # Sheet 3: Manufacturing
-        if not result.manufacturing_df.empty:
+        if not result.get_manufacturing_filtered().empty:
             _write_manufacturing_sheet(writer, result)
         
         # Sheet 4: Trading
-        if not result.trading_df.empty:
+        if not result.get_trading_filtered().empty:
             _write_trading_sheet(writer, result)
         
         # Sheet 5: Semi-Finished Materials (if multi-level)
@@ -88,7 +88,7 @@ def _write_summary_sheet(
     """Write summary sheet"""
     
     summary = result.get_summary()
-    metrics = result.get_metrics()
+    metrics = result.get_metrics_filtered()
     
     data = [
         ['Supply Chain GAP Analysis - Summary', ''],
@@ -134,6 +134,20 @@ def _write_summary_sheet(
         data.append(['', ''])
         data.append(['--- FILTERS APPLIED ---', ''])
         data.append(['Entity', filter_values.get('entity', 'All')])
+        
+        # Display filter info (v2.3.1)
+        brands = filter_values.get('brands', [])
+        products = filter_values.get('products', [])
+        if brands:
+            data.append(['Brand Filter', ', '.join(brands)])
+        if products:
+            data.append(['Product Filter', f'{len(products)} products selected'])
+        if brands or products:
+            full_fg = len(result.fg_gap_df)
+            filtered_fg = len(result.get_fg_gap_filtered())
+            data.append(['FG Scope', f'{filtered_fg} of {full_fg} products (display filter)'])
+            data.append(['Raw Material Scope', 'Full supply chain (shared resource)'])
+        
         data.append(['Include FG Safety', 'Yes' if filter_values.get('include_fg_safety') else 'No'])
         data.append(['Include Raw Safety', 'Yes' if filter_values.get('include_raw_safety') else 'No'])
         data.append(['Exclude Expired', 'Yes' if filter_values.get('exclude_expired') else 'No'])
@@ -151,9 +165,9 @@ def _write_summary_sheet(
 
 
 def _write_fg_gap_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
-    """Write FG GAP sheet"""
+    """Write FG GAP sheet (filtered by brand/product if active)"""
     
-    df = result.fg_gap_df.copy()
+    df = result.get_fg_gap_filtered().copy()
     
     # Select columns
     columns = [
@@ -193,7 +207,7 @@ def _write_fg_gap_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
 def _write_manufacturing_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
     """Write manufacturing products sheet"""
     
-    mfg_shortage = result.get_manufacturing_shortage()
+    mfg_shortage = result.get_manufacturing_shortage_filtered()
     
     if mfg_shortage.empty:
         pd.DataFrame({'Note': ['No manufacturing products with shortage']}).to_excel(
@@ -227,7 +241,7 @@ def _write_manufacturing_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPRes
 def _write_trading_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
     """Write trading products sheet"""
     
-    trading_shortage = result.get_trading_shortage()
+    trading_shortage = result.get_trading_shortage_filtered()
     
     if trading_shortage.empty:
         pd.DataFrame({'Note': ['No trading products with shortage']}).to_excel(
@@ -312,6 +326,7 @@ def _write_raw_gap_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
     columns = [
         'material_pt_code', 'material_name', 'material_package_size', 'material_brand', 'material_uom',
         'material_type', 'is_primary', 'bom_level', 'fg_product_count',
+        'demand_from_selected', 'demand_from_others',
         'required_qty', 'existing_mo_demand', 'total_required_qty',
         'total_supply', 'safety_stock_qty', 'net_gap', 'coverage_ratio', 'gap_status'
     ]
@@ -333,6 +348,8 @@ def _write_raw_gap_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
         'is_primary': 'Is Primary',
         'bom_level': 'BOM Level',
         'fg_product_count': 'FG Products',
+        'demand_from_selected': 'Demand (Selected)',
+        'demand_from_others': 'Demand (Others)',
         'required_qty': 'New Demand',
         'existing_mo_demand': 'Existing MO',
         'total_required_qty': 'Total Required',
@@ -382,9 +399,9 @@ def _write_actions_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
 
 
 def _write_period_gap_sheet(writer: pd.ExcelWriter, result: SupplyChainGAPResult):
-    """Write period GAP sheet (v2.2)"""
+    """Write period GAP sheet (v2.2) — filtered by brand/product"""
     
-    df = result.fg_period_gap_df.copy()
+    df = result.get_fg_period_gap_filtered().copy()
     
     if df.empty:
         pd.DataFrame({'Note': ['No period GAP data']}).to_excel(

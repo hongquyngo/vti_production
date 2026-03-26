@@ -81,31 +81,37 @@ def calculate_gap(
     calculator,
     filter_values: Dict[str, Any]
 ):
-    """Load all data and calculate full Supply Chain GAP"""
+    """
+    Load all data and calculate full Supply Chain GAP.
+    
+    v2.3.1: Load ALL data (entity only, no brand/product filter in SQL).
+    Brand/product filter is applied AFTER calculation as display filter.
+    This ensures Raw Material GAP accounts for ALL demand (cross-brand).
+    """
     
     with st.spinner("🔬 Calculating Supply Chain GAP..."):
         
-        # Load FG Supply
+        # =====================================================================
+        # LOAD DATA — entity only, NO brand/product filter
+        # Brand/product applied later as display filter on results
+        # =====================================================================
+        
+        # Load FG Supply (ALL products in entity)
         fg_supply = data_loader.load_fg_supply(
             entity_name=filter_values.get('entity'),
-            product_ids=filter_values.get('products_tuple'),
-            brands=filter_values.get('brands_tuple'),
             exclude_expired=filter_values.get('exclude_expired', True)
         )
         
-        # Load FG Demand
+        # Load FG Demand (ALL products in entity)
         fg_demand = data_loader.load_fg_demand(
-            entity_name=filter_values.get('entity'),
-            product_ids=filter_values.get('products_tuple'),
-            brands=filter_values.get('brands_tuple')
+            entity_name=filter_values.get('entity')
         )
         
-        # Load FG Safety Stock
+        # Load FG Safety Stock (ALL products in entity)
         fg_safety = None
         if filter_values.get('include_fg_safety', True):
             fg_safety = data_loader.load_fg_safety_stock(
-                entity_name=filter_values.get('entity'),
-                product_ids=filter_values.get('products_tuple')
+                entity_name=filter_values.get('entity')
             )
         
         # Validate FG data
@@ -113,10 +119,9 @@ def calculate_gap(
             st.warning("No FG data available for selected filters")
             return None
         
-        # Load Classification
+        # Load Classification (ALL products)
         classification = data_loader.load_product_classification(
-            entity_name=filter_values.get('entity'),
-            product_ids=filter_values.get('products_tuple')
+            entity_name=filter_values.get('entity')
         )
         
         # Load BOM Explosion
@@ -174,7 +179,131 @@ def calculate_gap(
         )
         
         logger.info(f"Supply Chain GAP calculated: {result.get_summary()}")
+        
+        # =====================================================================
+        # POST-PROCESS: Apply display filter (brand/product) on results
+        # =====================================================================
+        _apply_display_filter(result, filter_values)
+        _compute_raw_demand_breakdown(result)
+        
         return result
+
+
+def _apply_display_filter(result, filter_values: Dict[str, Any]):
+    """
+    Tag FG products as in_filter based on brand/product selection.
+    
+    This is a DISPLAY filter — it determines what shows in FG/MFG/Trading tabs.
+    Raw Material tab always shows full data (NVL is shared resource).
+    """
+    brands = filter_values.get('brands', [])
+    product_ids = filter_values.get('products', [])
+    has_filter = bool(brands or product_ids)
+    
+    result.applied_display_filter = {
+        'has_filter': has_filter,
+        'brands': brands,
+        'product_ids': product_ids
+    }
+    
+    if result.fg_gap_df.empty:
+        return
+    
+    if not has_filter:
+        result.fg_gap_df['in_filter'] = True
+    else:
+        mask = pd.Series(True, index=result.fg_gap_df.index)
+        if brands and 'brand' in result.fg_gap_df.columns:
+            mask &= result.fg_gap_df['brand'].isin(brands)
+        if product_ids:
+            mask &= result.fg_gap_df['product_id'].isin(product_ids)
+        result.fg_gap_df['in_filter'] = mask
+    
+    logger.info(
+        f"Display filter applied: {len(result.fg_gap_df[result.fg_gap_df['in_filter']])} "
+        f"of {len(result.fg_gap_df)} FG products in filter "
+        f"(brands={brands}, products={len(product_ids)} selected)"
+    )
+
+
+def _compute_raw_demand_breakdown(result):
+    """
+    Compute demand breakdown per raw material: demand from filtered FG vs others.
+    
+    Adds columns to raw_gap_df:
+    - demand_from_selected: BOM demand originating from filtered FG shortage
+    - demand_from_others: BOM demand originating from non-filtered FG shortage
+    
+    Note: Uses simplified single-level BOM explosion for attribution.
+    Total required_qty (from multi-level calculator) remains the accurate number.
+    """
+    if result.raw_gap_df.empty:
+        return
+    
+    # Default: all demand is "selected" (no filter active)
+    if not result.has_display_filter():
+        result.raw_gap_df['demand_from_selected'] = result.raw_gap_df.get('required_qty', 0)
+        result.raw_gap_df['demand_from_others'] = 0.0
+        return
+    
+    if result.fg_gap_df.empty or result.bom_explosion_df.empty:
+        result.raw_gap_df['demand_from_selected'] = 0.0
+        result.raw_gap_df['demand_from_others'] = result.raw_gap_df.get('required_qty', 0)
+        return
+    
+    # Get filtered manufacturing shortage IDs
+    filtered_fg = result.fg_gap_df[result.fg_gap_df.get('in_filter', True)]
+    filtered_shortage_ids = filtered_fg[filtered_fg['net_gap'] < 0]['product_id'].tolist() if not filtered_fg.empty else []
+    
+    mfg_ids = result.manufacturing_df['product_id'].tolist() if not result.manufacturing_df.empty else []
+    filtered_mfg_ids = [pid for pid in filtered_shortage_ids if pid in mfg_ids]
+    
+    if not filtered_mfg_ids:
+        result.raw_gap_df['demand_from_selected'] = 0.0
+        result.raw_gap_df['demand_from_others'] = result.raw_gap_df.get('required_qty', 0)
+        return
+    
+    # Simplified BOM explosion for filtered MFG shortage only
+    bom = result.bom_explosion_df
+    id_col = 'output_product_id' if 'output_product_id' in bom.columns else 'fg_product_id'
+    
+    shortage_data = result.fg_gap_df[
+        (result.fg_gap_df['product_id'].isin(filtered_mfg_ids)) &
+        (result.fg_gap_df['net_gap'] < 0)
+    ][['product_id', 'net_gap']].copy()
+    
+    merged = bom.merge(
+        shortage_data.rename(columns={'product_id': id_col, 'net_gap': 'fg_shortage'}),
+        on=id_col, how='inner'
+    )
+    
+    if merged.empty:
+        result.raw_gap_df['demand_from_selected'] = 0.0
+        result.raw_gap_df['demand_from_others'] = result.raw_gap_df.get('required_qty', 0)
+        return
+    
+    # Calculate demand per material from filtered FG
+    merged['fg_shortage'] = merged['fg_shortage'].abs()
+    bom_out = merged['bom_output_quantity'].fillna(1).replace(0, 1) if 'bom_output_quantity' in merged.columns else 1
+    qty_per = merged['quantity_per_output'].fillna(1) if 'quantity_per_output' in merged.columns else 1
+    scrap = merged['scrap_rate'].fillna(0) if 'scrap_rate' in merged.columns else 0
+    
+    merged['demand_qty'] = (merged['fg_shortage'] / bom_out) * qty_per * (1 + scrap / 100)
+    
+    demand_map = merged.groupby('material_id')['demand_qty'].sum()
+    
+    result.raw_gap_df['demand_from_selected'] = (
+        result.raw_gap_df['material_id'].map(demand_map).fillna(0).round(0)
+    )
+    # Others = total required (from multi-level calc) minus selected
+    # Clip to 0 to handle rounding differences
+    required = result.raw_gap_df.get('required_qty', pd.Series(0, index=result.raw_gap_df.index))
+    result.raw_gap_df['demand_from_others'] = (required - result.raw_gap_df['demand_from_selected']).clip(lower=0).round(0)
+    
+    logger.info(
+        f"Raw demand breakdown: {result.raw_gap_df['demand_from_selected'].sum():,.0f} from selected, "
+        f"{result.raw_gap_df['demand_from_others'].sum():,.0f} from others"
+    )
 
 
 def main():
