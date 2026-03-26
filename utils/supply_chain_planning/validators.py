@@ -326,6 +326,146 @@ def extract_all_shortages(
 
 
 # =============================================================================
+# DISPLAY FILTER SCOPE — extract filtered IDs for PO Planning scope selector
+# =============================================================================
+
+def extract_display_filter_scope(gap_result) -> Dict[str, Any]:
+    """
+    Extract display filter info from GAP result for PO Planning scope selection.
+
+    Returns:
+        Dict with:
+        - has_filter: bool — whether brand/product filter is active
+        - brands: List[str] — filtered brands
+        - product_ids: List[int] — filtered product IDs
+        - filtered_fg_product_ids: Set[int] — FG product IDs matching filter (from in_filter col)
+        - filtered_raw_material_ids: Set[int] — raw material IDs with demand from filtered FG
+        - fg_total: int — total FG products in GAP
+        - fg_filtered: int — FG products matching filter
+        - raw_total: int — total raw materials in GAP
+        - raw_filtered: int — raw materials with demand from filtered FG
+        - scope_label: str — human-readable label for the filter
+    """
+    info = {
+        'has_filter': False,
+        'brands': [],
+        'product_ids': [],
+        'filtered_fg_product_ids': set(),
+        'filtered_raw_material_ids': set(),
+        'fg_total': 0,
+        'fg_filtered': 0,
+        'raw_total': 0,
+        'raw_filtered': 0,
+        'scope_label': '',
+    }
+
+    if gap_result is None:
+        return info
+
+    # Read applied_display_filter
+    display_filter = getattr(gap_result, 'applied_display_filter', None) or {}
+    if not display_filter.get('has_filter', False):
+        return info
+
+    info['has_filter'] = True
+    info['brands'] = display_filter.get('brands', [])
+    info['product_ids'] = display_filter.get('product_ids', [])
+
+    # Build scope label
+    parts = []
+    if info['brands']:
+        parts.append(f"Brand: {', '.join(info['brands'])}")
+    if info['product_ids']:
+        parts.append(f"{len(info['product_ids'])} product(s)")
+    info['scope_label'] = ' + '.join(parts) if parts else 'Custom filter'
+
+    # Extract filtered FG product IDs from fg_gap_df.in_filter
+    fg_gap = getattr(gap_result, 'fg_gap_df', None)
+    if fg_gap is not None and not fg_gap.empty:
+        info['fg_total'] = len(fg_gap)
+        if 'in_filter' in fg_gap.columns:
+            filtered_fg = fg_gap[fg_gap['in_filter']]
+            info['fg_filtered'] = len(filtered_fg)
+            info['filtered_fg_product_ids'] = set(filtered_fg['product_id'].tolist())
+
+    # Extract filtered raw material IDs from raw_gap_df.demand_from_selected
+    raw_gap = getattr(gap_result, 'raw_gap_df', None)
+    if raw_gap is not None and not raw_gap.empty:
+        info['raw_total'] = len(raw_gap)
+        if 'demand_from_selected' in raw_gap.columns:
+            filtered_raw = raw_gap[raw_gap['demand_from_selected'] > 0]
+            info['raw_filtered'] = len(filtered_raw)
+            info['filtered_raw_material_ids'] = set(
+                filtered_raw['material_id'].tolist()
+            )
+        else:
+            # No demand breakdown — in filtered mode, include all raw materials
+            info['raw_filtered'] = info['raw_total']
+            info['filtered_raw_material_ids'] = set(
+                raw_gap['material_id'].tolist()
+            )
+
+    logger.info(
+        f"Display filter scope: {info['scope_label']} — "
+        f"FG {info['fg_filtered']}/{info['fg_total']}, "
+        f"Raw {info['raw_filtered']}/{info['raw_total']}"
+    )
+
+    return info
+
+
+def filter_shortages_by_scope(
+    shortage_dicts: List[Dict[str, Any]],
+    scope_info: Dict[str, Any]
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """
+    Filter shortage dicts to only those matching the display filter scope.
+
+    FG_TRADING: keep if product_id in filtered_fg_product_ids
+    RAW_MATERIAL: keep if product_id in filtered_raw_material_ids
+
+    Returns:
+        (filtered_shortages, stats)
+        stats: {kept_fg, removed_fg, kept_raw, removed_raw}
+    """
+    if not scope_info.get('has_filter', False):
+        return shortage_dicts, {'kept_fg': 0, 'removed_fg': 0, 'kept_raw': 0, 'removed_raw': 0}
+
+    fg_ids = scope_info.get('filtered_fg_product_ids', set())
+    raw_ids = scope_info.get('filtered_raw_material_ids', set())
+
+    filtered = []
+    stats = {'kept_fg': 0, 'removed_fg': 0, 'kept_raw': 0, 'removed_raw': 0}
+
+    for item in shortage_dicts:
+        source = item.get('shortage_source', '')
+        pid = item.get('product_id')
+
+        if source == 'FG_TRADING':
+            if pid in fg_ids:
+                filtered.append(item)
+                stats['kept_fg'] += 1
+            else:
+                stats['removed_fg'] += 1
+        elif source == 'RAW_MATERIAL':
+            if pid in raw_ids:
+                filtered.append(item)
+                stats['kept_raw'] += 1
+            else:
+                stats['removed_raw'] += 1
+        else:
+            # Unknown source — keep
+            filtered.append(item)
+
+    logger.info(
+        f"Scope filter: kept {stats['kept_fg']} FG + {stats['kept_raw']} Raw, "
+        f"removed {stats['removed_fg']} FG + {stats['removed_raw']} Raw"
+    )
+
+    return filtered, stats
+
+
+# =============================================================================
 # FILTER CONTEXT VALIDATION — "Informed Consent" model
 # =============================================================================
 # Never blocks. Classifies risk, explains consequences, lets user decide.

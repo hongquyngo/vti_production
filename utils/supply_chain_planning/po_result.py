@@ -271,16 +271,27 @@ class POSuggestionResult:
 
     def get_reconciliation(self) -> Dict[str, Any]:
         """
-        Full data reconciliation: input = output + skipped + unmatched + errors.
+        Full data reconciliation: input = output + skipped + unmatched + errors + scope_removed.
         
         Shows exactly where every input item ended up — no items "disappear"
         without explanation.
         """
         inp = self.input_summary or {}
-        total_input = inp.get('total_items', 0)
+        # total_before_scope = full extraction count (before scope filter)
+        # total_items = count after scope filter (what was actually processed)
+        total_before_scope = inp.get('total_before_scope', inp.get('total_items', 0))
+        total_after_scope = inp.get('total_items', 0)
         input_fg = inp.get('fg_trading_count', 0)
         input_raw = inp.get('raw_material_count', 0)
         input_skipped_validation = inp.get('validation_skipped', 0)
+
+        # Scope-removed items (filtered out by brand/product scope)
+        scope_stats = inp.get('scope_stats', {})
+        scope_removed = (
+            scope_stats.get('removed_fg', 0) + scope_stats.get('removed_raw', 0)
+        )
+        scope_removed_fg = scope_stats.get('removed_fg', 0)
+        scope_removed_raw = scope_stats.get('removed_raw', 0)
 
         matched = len(self.all_lines)
         matched_fg = len(self.get_fg_lines())
@@ -296,14 +307,19 @@ class POSuggestionResult:
 
         errors = len(self.metrics.get('processing_errors', []))
 
-        accounted = matched + skipped + unmatched + errors + input_skipped_validation
-        discrepancy = total_input - accounted
+        accounted = matched + skipped + unmatched + errors + input_skipped_validation + scope_removed
+        discrepancy = total_before_scope - accounted
 
         return {
-            'total_input': total_input,
+            'total_input': total_before_scope,
+            'total_after_scope': total_after_scope,
             'input_fg': input_fg,
             'input_raw': input_raw,
             'input_skipped_validation': input_skipped_validation,
+            'scope_removed': scope_removed,
+            'scope_removed_fg': scope_removed_fg,
+            'scope_removed_raw': scope_removed_raw,
+            'filter_scope': inp.get('filter_scope', 'full'),
             'matched': matched,
             'matched_fg': matched_fg,
             'matched_raw': matched_raw,

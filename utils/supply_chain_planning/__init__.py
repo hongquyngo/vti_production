@@ -1,6 +1,6 @@
 # utils/supply_chain_planning/__init__.py
 
-"""Supply Chain Planning Module — v1.2.0"""
+"""Supply Chain Planning Module — v1.2.1"""
 
 from .planning_constants import (
     VERSION,
@@ -21,6 +21,7 @@ from .po_planning_export import export_po_suggestions_to_excel, get_po_export_fi
 from .validators import (
     validate_gap_result, validate_gap_filters,
     extract_all_shortages, extract_demand_dates, extract_demand_composition,
+    extract_display_filter_scope, filter_shortages_by_scope,
     safe_extract_shortage, safe_extract_field, ValidationResult
 )
 

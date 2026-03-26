@@ -3,6 +3,9 @@
 """
 PO Planning Page — Layer 3 of SCM Planning Pipeline.
 
+v1.2.1: Scope selector — when GAP has brand/product display filter,
+        user chooses 'Filtered' or 'Full' scope before generating PO suggestions.
+
 UI Fixes v1.2:
 - Removed "Skip zero-shortage items" (always True, GAP only sends shortage > 0)
 - Renamed demand offset → "Planning horizon" with default 60 days
@@ -26,7 +29,7 @@ def main():
     st.caption("Layer 3: SCM GAP → Vendor-matched PO suggestions with timing & urgency")
 
     # Session state
-    for key in ['po_result', 'po_planner', 'po_filter_review', 'po_pending_args']:
+    for key in ['po_result', 'po_planner', 'po_filter_review', 'po_pending_args', 'po_scope_info']:
         if key not in st.session_state:
             st.session_state[key] = None
 
@@ -86,12 +89,12 @@ def main():
 
     # Reset
     if reset_clicked:
-        for key in ['po_result', 'po_planner', 'po_filter_review', 'po_pending_args']:
+        for key in ['po_result', 'po_planner', 'po_filter_review', 'po_pending_args', 'po_scope_info']:
             st.session_state[key] = None
         st.rerun()
 
     # =========================================================================
-    # STEP 1: Generate → filter review first
+    # STEP 1: Generate → scope check + filter review
     # =========================================================================
     if run_clicked:
         gap_result = _get_gap_result(source_mode)
@@ -101,45 +104,75 @@ def main():
                 "Please run **Supply Chain GAP Analysis** first."
             )
         else:
-            from utils.supply_chain_planning.validators import validate_gap_filters
+            from utils.supply_chain_planning.validators import (
+                validate_gap_filters, extract_display_filter_scope
+            )
             filter_review = validate_gap_filters(gap_result)
+            scope_info = extract_display_filter_scope(gap_result)
 
-            if filter_review.get('all_complete', False):
-                _run_planning(strategy, planning_horizon, source_mode)
-            else:
+            needs_confirmation = (
+                scope_info.get('has_filter', False)
+                or not filter_review.get('all_complete', False)
+            )
+
+            if needs_confirmation:
+                # Show scope selector and/or filter review before running
                 st.session_state['po_filter_review'] = filter_review
+                st.session_state['po_scope_info'] = scope_info
                 st.session_state['po_pending_args'] = {
                     'strategy': strategy,
                     'planning_horizon': planning_horizon,
                     'source_mode': source_mode,
                 }
+            else:
+                # No display filter, all filters complete → run immediately
+                _run_planning(strategy, planning_horizon, source_mode, filter_scope='full')
 
     # =========================================================================
-    # STEP 2: Filter review panel (if pending)
+    # STEP 2: Pre-run confirmation (scope selector + filter review)
     # =========================================================================
-    if st.session_state.get('po_filter_review') and st.session_state.get('po_pending_args'):
-        review = st.session_state['po_filter_review']
+    if st.session_state.get('po_pending_args'):
+        review = st.session_state.get('po_filter_review') or {}
+        scope_info = st.session_state.get('po_scope_info') or {}
         args = st.session_state['po_pending_args']
 
-        _render_filter_review(review)
+        # --- Scope selector (if GAP has display filter) ---
+        selected_scope = 'full'
+        if scope_info.get('has_filter', False):
+            from utils.supply_chain_planning.po_planning_components import render_scope_selector
+            selected_scope = render_scope_selector(scope_info)
 
+        # --- Filter review (if filters incomplete) ---
+        if not review.get('all_complete', True):
+            _render_filter_review(review)
+
+        # --- Action buttons ---
         bc1, bc2 = st.columns([1, 1])
         with bc1:
-            label = ("⚠️ Proceed anyway — I understand the risk"
-                     if review.get('has_high_risk')
-                     else "✅ Proceed with current filters")
+            if review.get('has_high_risk'):
+                label = "⚠️ Proceed anyway — I understand the risk"
+            elif scope_info.get('has_filter', False):
+                scope_label = "filtered" if selected_scope == 'filtered' else "full"
+                label = f"🔄 Generate PO Suggestions ({scope_label} scope)"
+            else:
+                label = "✅ Proceed with current filters"
             proceed = st.button(label, type="primary", use_container_width=True)
         with bc2:
             go_back = st.button("← Go back to SCM GAP", use_container_width=True)
 
         if proceed:
-            _run_planning(args['strategy'], args['planning_horizon'], args['source_mode'])
+            _run_planning(
+                args['strategy'], args['planning_horizon'],
+                args['source_mode'], filter_scope=selected_scope,
+            )
             st.session_state['po_filter_review'] = None
             st.session_state['po_pending_args'] = None
+            st.session_state['po_scope_info'] = None
             st.rerun()
         if go_back:
             st.session_state['po_filter_review'] = None
             st.session_state['po_pending_args'] = None
+            st.session_state['po_scope_info'] = None
             st.switch_page("pages/5_🔬_Supply_Chain_GAP.py")
         return
 
@@ -181,7 +214,7 @@ def _get_gap_result(source_mode):
         return None
 
 
-def _run_planning(strategy, planning_horizon, source_mode):
+def _run_planning(strategy, planning_horizon, source_mode, filter_scope='full'):
     from utils.supply_chain_planning.po_planner import POPlanner
 
     with st.spinner("Loading data and generating PO suggestions..."):
@@ -206,6 +239,7 @@ def _run_planning(strategy, planning_horizon, source_mode):
                 # because GAP already includes PO in supply calculation.
                 deduct_pending_po=False,
                 skip_zero_shortage=True,
+                filter_scope=filter_scope,
             )
             st.session_state['po_result'] = result
 
@@ -263,9 +297,11 @@ def _render_results(result):
         po_all_lines_fragment,
         po_coverage_fragment,
         render_filter_warning_banner,
+        render_scope_banner,
     )
 
-    # Persistent filter banner — above tabs
+    # Persistent banners — above tabs
+    render_scope_banner(result)
     render_filter_warning_banner(result)
 
     m = result.get_summary()

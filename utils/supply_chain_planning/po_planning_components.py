@@ -54,6 +54,107 @@ def _styled_dataframe(
 
 
 # =============================================================================
+# SCOPE SELECTOR — shown when GAP has brand/product display filter
+# =============================================================================
+
+def render_scope_selector(scope_info: dict) -> str:
+    """
+    Render scope selector when GAP has an active display filter.
+
+    Args:
+        scope_info: from extract_display_filter_scope()
+
+    Returns:
+        'full' or 'filtered' — the selected scope
+    """
+    if not scope_info.get('has_filter', False):
+        return 'full'
+
+    label = scope_info.get('scope_label', 'Custom filter')
+    fg_filtered = scope_info.get('fg_filtered', 0)
+    fg_total = scope_info.get('fg_total', 0)
+    raw_filtered = scope_info.get('raw_filtered', 0)
+    raw_total = scope_info.get('raw_total', 0)
+
+    st.markdown("---")
+    st.markdown("### 🔍 GAP Display Filter Detected")
+    st.markdown(
+        f"SCM GAP was analyzed with filter: **{label}**. "
+        "Choose which products to include in PO suggestions:"
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown(
+            f"**🎯 Filtered** — {label}  \n"
+            f"`{fg_filtered}` of `{fg_total}` FG products  \n"
+            f"`{raw_filtered}` of `{raw_total}` raw materials (with demand from filtered FG)"
+        )
+
+    with col2:
+        st.markdown(
+            f"**📦 Full** — all products  \n"
+            f"`{fg_total}` FG products  \n"
+            f"`{raw_total}` raw materials"
+        )
+
+    scope = st.radio(
+        "PO Planning scope",
+        options=['filtered', 'full'],
+        index=0,
+        format_func=lambda x: (
+            f"🎯 Filtered ({label})" if x == 'filtered'
+            else f"📦 Full (all {fg_total} FG + {raw_total} raw)"
+        ),
+        key="po_scope_selector",
+        horizontal=True,
+        help=(
+            "Filtered: PO suggestions only for products matching your GAP brand/product filter. "
+            "Full: PO suggestions for all shortage products regardless of filter."
+        ),
+    )
+
+    if scope == 'filtered':
+        st.caption(
+            f"ℹ️ Raw materials are filtered by demand attribution: only materials "
+            f"where the shortage originates from **{label}** will be included."
+        )
+
+    st.markdown("---")
+    return scope
+
+
+def render_scope_banner(result: POSuggestionResult):
+    """
+    Render persistent banner showing current PO scope.
+    Shown above tabs when scope is 'filtered'.
+    """
+    inp = getattr(result, 'input_summary', None) or {}
+    filter_scope = inp.get('filter_scope', 'full')
+    scope_info = inp.get('scope_info', {})
+
+    if filter_scope != 'filtered' or not scope_info.get('has_filter', False):
+        return
+
+    label = scope_info.get('scope_label', '')
+    scope_stats = inp.get('scope_stats', {})
+    total_before = inp.get('total_before_scope', 0)
+    total_after = (
+        scope_stats.get('kept_fg', 0) + scope_stats.get('kept_raw', 0)
+    )
+    removed = total_before - total_after
+
+    st.info(
+        f"🎯 **Filtered scope: {label}** — "
+        f"{total_after} of {total_before} shortage items included "
+        f"({removed} excluded from other brands/products). "
+        f"[Switch to full scope by re-running with '📦 Full']",
+        icon="🎯"
+    )
+
+
+# =============================================================================
 # KPI CARDS
 # =============================================================================
 

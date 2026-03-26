@@ -36,6 +36,7 @@ from .po_result import POLineItem, VendorPOGroup, POSuggestionResult
 from .validators import (
     extract_all_shortages, validate_gap_result, validate_gap_filters,
     extract_demand_dates, extract_demand_composition,
+    extract_display_filter_scope, filter_shortages_by_scope,
     ValidationResult
 )
 
@@ -118,6 +119,7 @@ class POPlanner:
         default_demand_date: Optional[date] = None,
         deduct_pending_po: bool = True,
         skip_zero_shortage: bool = True,
+        filter_scope: str = 'full',
     ) -> POSuggestionResult:
         """
         Generate PO suggestions from SupplyChainGAPResult.
@@ -131,6 +133,7 @@ class POPlanner:
             default_demand_date: Fallback demand date if not derivable
             deduct_pending_po: Subtract existing pending POs from shortage
             skip_zero_shortage: Skip items where net shortage ≤ 0 after deduction
+            filter_scope: 'full' = all products, 'filtered' = respect GAP display filter
         """
         logger.info("POPlanner: extracting shortages from GAP result (with validation)...")
 
@@ -165,6 +168,40 @@ class POPlanner:
                 'filter_review': filter_review,
             }
             return result
+
+        # =====================================================================
+        # SCOPE FILTERING — respect GAP display filter if scope='filtered'
+        # =====================================================================
+        scope_info = extract_display_filter_scope(gap_result)
+        scope_stats = {}
+        total_before_scope = len(shortage_dicts)
+
+        if filter_scope == 'filtered' and scope_info.get('has_filter', False):
+            shortage_dicts, scope_stats = filter_shortages_by_scope(
+                shortage_dicts, scope_info
+            )
+            logger.info(
+                f"POPlanner: scope='filtered' — {total_before_scope} → "
+                f"{len(shortage_dicts)} items ({scope_info['scope_label']})"
+            )
+
+            if not shortage_dicts:
+                logger.info("POPlanner: no shortage items after scope filtering")
+                result = POSuggestionResult(
+                    strategy=strategy,
+                    default_demand_date=default_demand_date,
+                )
+                result.input_summary = {
+                    'source_mode': 'GAP_RESULT',
+                    'filter_review': filter_review,
+                    'filter_scope': filter_scope,
+                    'scope_info': scope_info,
+                    'scope_stats': scope_stats,
+                }
+                return result
+        elif filter_scope == 'filtered' and not scope_info.get('has_filter', False):
+            logger.info("POPlanner: scope='filtered' but no display filter active — using full data")
+            filter_scope = 'full'  # normalize
 
         # Extract per-product demand dates from GAP period data
         # Replaces fixed "today + 30 days" with actual earliest shortage period
@@ -243,6 +280,10 @@ class POPlanner:
         result.input_summary['demand_dates_from_gap'] = dates_found
         result.input_summary['demand_dates_fallback'] = len(shortages) - dates_found
         result.input_summary['demand_composition_tagged'] = comp_tagged
+        result.input_summary['filter_scope'] = filter_scope
+        result.input_summary['scope_info'] = scope_info
+        result.input_summary['scope_stats'] = scope_stats
+        result.input_summary['total_before_scope'] = total_before_scope
 
         # Attach filter warnings (non-blocking) to metrics for UI display
         if filter_review.get('items'):

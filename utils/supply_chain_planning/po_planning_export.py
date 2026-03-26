@@ -116,6 +116,16 @@ def _apply_sheet_formatting(ws, df, col_widths=None, currency_cols=None,
 # MAIN EXPORT
 # =============================================================================
 
+def _get_scope_display(result):
+    """Get human-readable scope label for export."""
+    inp = getattr(result, 'input_summary', None) or {}
+    scope = inp.get('filter_scope', 'full')
+    scope_info = inp.get('scope_info', {})
+    if scope == 'filtered' and scope_info.get('has_filter'):
+        return f"Filtered ({scope_info.get('scope_label', 'custom')})"
+    return 'Full (all products)'
+
+
 def export_po_suggestions_to_excel(result, gap_summary=None):
     """Export PO suggestions to formatted Excel workbook."""
     buffer = BytesIO()
@@ -137,6 +147,7 @@ def _write_summary_sheet(writer, result, gap_summary):
         ['PO Planning Summary', ''],
         ['Generated', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
         ['Strategy', metrics.get('strategy', 'CHEAPEST')],
+        ['Scope', _get_scope_display(result)],
         ['', ''],
         ['--- PO SUGGESTIONS ---', ''],
         ['Total PO Lines', metrics.get('total_po_lines', 0)],
@@ -163,6 +174,9 @@ def _write_summary_sheet(writer, result, gap_summary):
     recon = metrics.get('reconciliation', {})
     if recon:
         data += [['', ''], ['--- DATA RECONCILIATION ---', '']]
+        scope_label = recon.get('filter_scope', 'full')
+        if scope_label == 'filtered':
+            data.append(['Scope', f"Filtered — see scope info above"])
         data.append(['Input from GAP', recon.get('total_input', 0)])
         data.append([f'  FG Trading', recon.get('input_fg', 0)])
         data.append([f'  Raw Material', recon.get('input_raw', 0)])
@@ -171,6 +185,11 @@ def _write_summary_sheet(writer, result, gap_summary):
         data.append(['→ Skipped (Pending PO)', recon.get('skipped_pending_po', 0)])
         data.append(['→ No Vendor Found', recon.get('unmatched', 0)])
         data.append(['→ Validation Skipped', recon.get('input_skipped_validation', 0)])
+        scope_removed = recon.get('scope_removed', 0)
+        if scope_removed > 0:
+            data.append([f'→ Scope Filtered Out', scope_removed])
+            data.append([f'    FG removed by scope', recon.get('scope_removed_fg', 0)])
+            data.append([f'    Raw removed by scope', recon.get('scope_removed_raw', 0)])
         data.append(['→ Processing Errors', recon.get('processing_errors', 0)])
         data.append(['', ''])
         data.append(['Total Accounted', recon.get('total_accounted', 0)])
