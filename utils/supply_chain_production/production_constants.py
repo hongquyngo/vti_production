@@ -227,6 +227,27 @@ CONFIG_GROUPS = {
 }
 
 # =============================================================================
+# RECOMMENDED DEFAULTS — for Quick-Start feature
+# =============================================================================
+# These are SUGGESTIONS shown to users, not auto-applied.
+# User must explicitly click "Apply" then "Save". ZERO ASSUMPTION preserved.
+RECOMMENDED_DEFAULTS = {
+    'lead_time': {
+        'CUTTING': 3,       # Based on historical avg 2.5d, rounded up for buffer
+        'REPACKING': 1,     # Based on historical avg 0.0d, minimum 1d
+        'KITTING': 2,       # Based on historical avg 1.8d, rounded up
+    },
+    'priority_weights': {
+        'time': 40,
+        'readiness': 25,
+        'value': 20,
+        'customer': 15,
+    },
+    'planning_horizon_days': 60,
+    'historical_override': False,  # Conservative — user opts in
+}
+
+# =============================================================================
 # UI CONFIG — layout settings (not business logic)
 # =============================================================================
 PRODUCTION_UI = {

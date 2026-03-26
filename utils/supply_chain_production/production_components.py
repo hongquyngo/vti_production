@@ -64,180 +64,366 @@ def _styled_dataframe(
 
 
 # =============================================================================
-# SETTINGS TAB (TAB 0)
+# SETTINGS TAB (TAB 0) — Phase A UX Upgrade
 # =============================================================================
+
+def _count_configured(config: ProductionConfig) -> dict:
+    """Count configured vs required fields per group for progress display."""
+    groups = {
+        'lead_time': {
+            'fields': [
+                ('lead_time_cutting_days', 'Cutting lead time'),
+                ('lead_time_repacking_days', 'Repacking lead time'),
+                ('lead_time_kitting_days', 'Kitting lead time'),
+            ],
+            'label': 'Lead Time Setup',
+            'icon': '📅',
+        },
+        'priority': {
+            'fields': [
+                ('priority_weight_time', 'Time urgency weight'),
+                ('priority_weight_readiness', 'Readiness weight'),
+                ('priority_weight_value', 'At-risk value weight'),
+                ('priority_weight_customer', 'Customer linkage weight'),
+            ],
+            'label': 'Priority Weights',
+            'icon': '⚖️',
+        },
+        'planning': {
+            'fields': [
+                ('planning_horizon_days', 'Planning horizon'),
+            ],
+            'label': 'Planning Parameters',
+            'icon': '📋',
+        },
+    }
+
+    total_required = 0
+    total_configured = 0
+    for gkey, g in groups.items():
+        configured = 0
+        for field_name, _ in g['fields']:
+            val = getattr(config, field_name, None)
+            if val is not None and val != 0:
+                configured += 1
+        g['configured'] = configured
+        g['total'] = len(g['fields'])
+        g['complete'] = configured == len(g['fields'])
+        total_required += len(g['fields'])
+        total_configured += configured
+
+    return {
+        'groups': groups,
+        'total_required': total_required,
+        'total_configured': total_configured,
+        'all_complete': total_configured == total_required,
+    }
+
+
+def _render_progress_bar(progress: dict, config: ProductionConfig):
+    """Render the progress bar replacing the wall of red X marks."""
+    configured = progress['total_configured']
+    total = progress['total_required']
+    pct = round(configured / total * 100) if total > 0 else 0
+
+    if config.is_ready:
+        st.success(
+            f"✅ All {total} required settings configured. Ready to generate MO suggestions."
+        )
+    else:
+        # Progress bar with positive framing
+        errors = config.validation_errors or []
+
+        st.markdown(
+            f"**{configured} of {total}** required settings configured"
+        )
+        st.progress(pct / 100, text=f"{pct}%")
+
+        # Show validation errors compactly (not the missing list)
+        if errors:
+            for err in errors:
+                st.warning(f"⚠️ {err}")
+
+
+def _render_quick_start(config: ProductionConfig, lt_stats_df, historical_summary):
+    """Render quick-start defaults bar for first-time setup."""
+    if config.is_ready:
+        return False
+
+    # Build display text from historical data
+    parts = []
+    for bom_type in ('CUTTING', 'REPACKING', 'KITTING'):
+        hist = historical_summary.get(bom_type) if historical_summary else None
+        if hist and hist.get('total_mos', 0) >= 5:
+            avg = float(hist.get('avg_days', 0) or 0)
+            total = hist['total_mos']
+            parts.append(f"{bom_type}: avg {avg:.1f}d ({total} MOs)")
+
+    if parts:
+        detail = ", ".join(parts)
+        msg = (
+            f"💡 **Quick start available.** "
+            f"Historical data found: {detail}. "
+            f"Apply recommended defaults based on your production history, then review and adjust."
+        )
+    else:
+        msg = (
+            "💡 **Quick start available.** "
+            "Apply industry-standard defaults (lead times, priority weights, horizon), "
+            "then review and adjust."
+        )
+
+    qs_cols = st.columns([5, 1])
+    with qs_cols[0]:
+        st.info(msg)
+    with qs_cols[1]:
+        clicked = st.button(
+            "⚡ Apply Defaults",
+            type="primary",
+            use_container_width=True,
+            key="apply_quick_start",
+        )
+    return clicked
+
+
+def _build_historical_hint(lt_stats_df, bom_type: str) -> str:
+    """Build inline hint text from historical stats for a BOM type."""
+    if lt_stats_df is None or lt_stats_df.empty:
+        return ""
+    bom_rows = lt_stats_df[lt_stats_df['bom_type'] == bom_type] if 'bom_type' in lt_stats_df.columns else None
+    if bom_rows is None or bom_rows.empty:
+        return ""
+
+    row = bom_rows.iloc[0]
+    avg = row.get('avg_lead_time_days')
+    mos = row.get('completed_mo_count', 0)
+    if avg is not None and not pd.isna(avg):
+        return f"📊 Historical: avg {float(avg):.1f}d from {int(mos or 0)} completed MOs"
+    return ""
+
 
 def render_settings_tab(config: ProductionConfig, lead_time_stats_df: Optional[pd.DataFrame] = None):
     """
-    Render the Settings tab — config editor with gate check.
+    Render the Settings tab — Phase A UX upgrade.
 
-    Shows 4 groups: Lead Time, Yield, Priority Weights, Planning Parameters.
-    Provides historical stats as read-only reference.
-    Returns updated config if saved, None otherwise.
+    Features:
+    - Progress bar (replaces wall of red X marks)
+    - Quick-start defaults from historical data
+    - Collapsible groups with completion badges
+    - Inline historical hints per field
+    - Positive framing ("4 of 8 configured" not "8 errors")
     """
     st.markdown("### ⚙️ Production Planning Settings")
     st.caption(
-        "Configure before running. All settings are required — "
-        "there are no hidden defaults (ZERO ASSUMPTION principle)."
+        "Configure all required settings before running. "
+        "No hidden defaults — every parameter is set explicitly by you."
     )
 
-    # ---- Gate status banner ----
-    if config.is_ready:
-        st.success("✅ All required settings configured. Ready to run.")
-    else:
-        missing = config.missing_required or []
-        errors = config.validation_errors or []
-        msg = f"❌ **{len(missing)} required settings missing"
-        if errors:
-            msg += f", {len(errors)} validation errors"
-        msg += ".** Fix before running."
-        st.error(msg)
-        for key in missing:
-            st.markdown(f"  - ❌ `{key}` — not set")
-        for err in errors:
-            st.markdown(f"  - ⚠️ {err}")
+    # ── Compute progress ──
+    progress = _count_configured(config)
 
-    st.divider()
+    # ── Load historical summary for quick-start ──
+    historical_summary = {}
+    try:
+        from .production_config import ProductionConfigLoader
+        loader = ProductionConfigLoader()
+        historical_summary = loader.load_historical_lead_time_summary()
+    except Exception:
+        pass
+
+    # ── Quick-Start Bar ──
+    quick_start_clicked = _render_quick_start(config, lead_time_stats_df, historical_summary)
+    if quick_start_clicked:
+        # Return quick-start values as changes — page will save them
+        try:
+            loader = ProductionConfigLoader()
+            defaults = loader.get_recommended_defaults(historical_summary)
+            return defaults.get('values', {})
+        except Exception as e:
+            st.error(f"Failed to compute defaults: {e}")
+
+    # ── Progress Bar ──
+    _render_progress_bar(progress, config)
+
+    st.markdown("")
 
     # Track changes
     changes = {}
+    groups = progress['groups']
 
-    # ── GROUP 1: Lead Time ──
-    st.markdown("#### 📅 Lead Time Setup")
+    # =====================================================================
+    # GROUP 1: Lead Time Setup
+    # =====================================================================
+    lt_info = groups['lead_time']
+    lt_badge = "✅ Complete" if lt_info['complete'] else f"⚠️ {lt_info['total'] - lt_info['configured']} remaining"
 
-    if lead_time_stats_df is not None and not lead_time_stats_df.empty:
-        st.caption("Historical averages shown for reference (read-only). You decide what to configure.")
-        _render_lead_time_reference(lead_time_stats_df)
-
-    lt_cols = st.columns(3)
-    for i, (bom_key, bom_label) in enumerate([
-        ('cutting', 'CUTTING'), ('repacking', 'REPACKING'), ('kitting', 'KITTING')
-    ]):
-        current = getattr(config, f'lead_time_{bom_key}_days', None)
-        with lt_cols[i]:
-            val = st.number_input(
-                f"{bom_label} (days)",
-                min_value=0, max_value=90,
-                value=current if current is not None else 0,
-                step=1, key=f"lt_{bom_key}",
-                help=f"Production lead time for {bom_label} BOM type in calendar days",
-            )
-            if val != current and val > 0:
-                changes[f'LEAD_TIME.{bom_label}.DAYS'] = val
-
-    st.markdown("")
-    use_hist_lt = st.checkbox(
-        "Use historical lead time override when data is sufficient",
-        value=bool(config.lead_time_use_historical),
-        key="use_hist_lt",
-        help=(
-            "When enabled: if a product (or BOM type) has enough completed MOs, "
-            "override the config value with historical average."
-        ),
-    )
-    if use_hist_lt != config.lead_time_use_historical:
-        changes['LEAD_TIME.USE_HISTORICAL'] = use_hist_lt
-
-    if use_hist_lt:
-        hc1, hc2 = st.columns(2)
-        with hc1:
-            min_prod = st.number_input(
-                "Min MOs per product", min_value=1, max_value=100,
-                value=config.lead_time_min_history_product or 5,
-                key="lt_min_prod",
-            )
-            if min_prod != config.lead_time_min_history_product:
-                changes['LEAD_TIME.MIN_HISTORY_COUNT_PRODUCT'] = min_prod
-        with hc2:
-            min_bom = st.number_input(
-                "Min MOs per BOM type", min_value=1, max_value=500,
-                value=config.lead_time_min_history_bom_type or 10,
-                key="lt_min_bom",
-            )
-            if min_bom != config.lead_time_min_history_bom_type:
-                changes['LEAD_TIME.MIN_HISTORY_COUNT_BOM_TYPE'] = min_bom
-
-    st.divider()
-
-    # ── GROUP 2: Yield ──
-    st.markdown("#### 📊 Yield Setup")
-
-    use_hist_yield = st.checkbox(
-        "Use historical yield override",
-        value=bool(config.yield_use_historical),
-        key="use_hist_yield",
-        help="Override BOM scrap_rate with actual yield from completed MOs.",
-    )
-    if use_hist_yield != config.yield_use_historical:
-        changes['YIELD.USE_HISTORICAL'] = use_hist_yield
-
-    if use_hist_yield:
-        min_yield_hist = st.number_input(
-            "Min completed MOs for yield data", min_value=1, max_value=100,
-            value=config.yield_min_history_count or 5,
-            key="yield_min_hist",
+    with st.expander(
+        f"{lt_info['icon']} **{lt_info['label']}** — {lt_badge}",
+        expanded=not lt_info['complete'],
+    ):
+        st.caption(
+            "Production lead time per BOM type in calendar days. "
+            "These are required — scheduling cannot proceed without them."
         )
-        if min_yield_hist != config.yield_min_history_count:
-            changes['YIELD.MIN_HISTORY_COUNT'] = min_yield_hist
 
-    st.divider()
+        lt_cols = st.columns(3)
+        for i, (bom_key, bom_label) in enumerate([
+            ('cutting', 'CUTTING'), ('repacking', 'REPACKING'), ('kitting', 'KITTING')
+        ]):
+            current = getattr(config, f'lead_time_{bom_key}_days', None)
+            hint = _build_historical_hint(lead_time_stats_df, bom_label)
+            with lt_cols[i]:
+                val = st.number_input(
+                    f"{bom_label.title()} (days)",
+                    min_value=0, max_value=90,
+                    value=current if current is not None else 0,
+                    step=1, key=f"lt_{bom_key}",
+                    help=f"Calendar days to complete {bom_label.lower()} production",
+                )
+                if hint:
+                    st.caption(hint)
+                if val != current and val > 0:
+                    changes[f'LEAD_TIME.{bom_label}.DAYS'] = val
 
-    # ── GROUP 3: Priority Weights ──
-    st.markdown("#### ⚖️ Priority Weights (must sum to 100%)")
+        # Historical override (advanced — collapsed by default)
+        st.markdown("")
+        use_hist_lt = st.checkbox(
+            "Use historical lead time override when data is sufficient",
+            value=bool(config.lead_time_use_historical),
+            key="use_hist_lt",
+            help=(
+                "When enabled: if a product (or BOM type) has enough completed MOs, "
+                "override the config value with historical average."
+            ),
+        )
+        if use_hist_lt != config.lead_time_use_historical:
+            changes['LEAD_TIME.USE_HISTORICAL'] = use_hist_lt
 
-    pw_cols = st.columns(4)
-    weight_keys = [
-        ('priority_weight_time', 'Time urgency', 'PRIORITY.WEIGHT.TIME_URGENCY'),
-        ('priority_weight_readiness', 'Material readiness', 'PRIORITY.WEIGHT.MATERIAL_READINESS'),
-        ('priority_weight_value', 'At-risk value', 'PRIORITY.WEIGHT.AT_RISK_VALUE'),
-        ('priority_weight_customer', 'Customer linkage', 'PRIORITY.WEIGHT.CUSTOMER_LINKAGE'),
-    ]
-    weight_sum = 0
-    for i, (attr, label, config_key) in enumerate(weight_keys):
-        current = getattr(config, attr, None) or 0
-        with pw_cols[i]:
-            val = st.number_input(
-                f"{label} (%)", min_value=0, max_value=100,
-                value=current, step=5, key=f"pw_{attr}",
+        if use_hist_lt:
+            hc1, hc2 = st.columns(2)
+            with hc1:
+                min_prod = st.number_input(
+                    "Min MOs per product", min_value=1, max_value=100,
+                    value=config.lead_time_min_history_product or 5,
+                    key="lt_min_prod",
+                )
+                if min_prod != config.lead_time_min_history_product:
+                    changes['LEAD_TIME.MIN_HISTORY_COUNT_PRODUCT'] = min_prod
+            with hc2:
+                min_bom = st.number_input(
+                    "Min MOs per BOM type", min_value=1, max_value=500,
+                    value=config.lead_time_min_history_bom_type or 10,
+                    key="lt_min_bom",
+                )
+                if min_bom != config.lead_time_min_history_bom_type:
+                    changes['LEAD_TIME.MIN_HISTORY_COUNT_BOM_TYPE'] = min_bom
+
+    # =====================================================================
+    # GROUP 2: Priority Weights
+    # =====================================================================
+    pw_info = groups['priority']
+    pw_badge = "✅ Complete" if pw_info['complete'] else f"⚠️ {pw_info['total'] - pw_info['configured']} remaining"
+
+    with st.expander(
+        f"{pw_info['icon']} **{pw_info['label']}** — {pw_badge}",
+        expanded=not pw_info['complete'] and lt_info['complete'],
+    ):
+        st.caption(
+            "How to rank MO urgency. Weights must sum to exactly 100%. "
+            "Recommended: Time 40%, Readiness 25%, Value 20%, Customer 15%."
+        )
+
+        pw_cols = st.columns(4)
+        weight_keys = [
+            ('priority_weight_time', 'Time urgency', 'PRIORITY.WEIGHT.TIME_URGENCY'),
+            ('priority_weight_readiness', 'Material readiness', 'PRIORITY.WEIGHT.MATERIAL_READINESS'),
+            ('priority_weight_value', 'At-risk value', 'PRIORITY.WEIGHT.AT_RISK_VALUE'),
+            ('priority_weight_customer', 'Customer linkage', 'PRIORITY.WEIGHT.CUSTOMER_LINKAGE'),
+        ]
+        weight_sum = 0
+        for i, (attr, label, config_key) in enumerate(weight_keys):
+            current = getattr(config, attr, None) or 0
+            with pw_cols[i]:
+                val = st.number_input(
+                    f"{label} (%)", min_value=0, max_value=100,
+                    value=current, step=5, key=f"pw_{attr}",
+                )
+                weight_sum += val
+                if val != current:
+                    changes[config_key] = val
+
+        if weight_sum == 100:
+            st.success(f"Total: **{weight_sum}%** ✅")
+        elif weight_sum > 0:
+            st.error(f"Total: **{weight_sum}%** — must be exactly 100%")
+        else:
+            st.caption("Total: 0% — enter weights above")
+
+    # =====================================================================
+    # GROUP 3: Planning Parameters
+    # =====================================================================
+    pl_info = groups['planning']
+    pl_badge = "✅ Complete" if pl_info['complete'] else f"⚠️ {pl_info['total'] - pl_info['configured']} remaining"
+
+    with st.expander(
+        f"{pl_info['icon']} **{pl_info['label']}** — {pl_badge}",
+        expanded=not pl_info['complete'] and lt_info['complete'] and pw_info['complete'],
+    ):
+        pp_cols = st.columns(2)
+        with pp_cols[0]:
+            horizon = st.number_input(
+                "Planning horizon (days)",
+                min_value=14, max_value=365,
+                value=config.planning_horizon_days or 60,
+                key="plan_horizon",
+                help="Fallback demand date = today + this value when GAP has no period data.",
             )
-            weight_sum += val
-            if val != current:
-                changes[config_key] = val
+            if horizon != config.planning_horizon_days:
+                changes['PLANNING.DEFAULT_HORIZON_DAYS'] = horizon
 
-    if weight_sum == 100:
-        st.success(f"Total: **{weight_sum}%** ✅")
-    else:
-        st.error(f"Total: **{weight_sum}%** — must be exactly 100%")
+        with pp_cols[1]:
+            allow_partial = st.checkbox(
+                "Allow partial production",
+                value=bool(config.allow_partial_production),
+                key="allow_partial",
+                help="Show max producible quantity when materials are partially available.",
+            )
+            if allow_partial != config.allow_partial_production:
+                changes['PLANNING.ALLOW_PARTIAL_PRODUCTION'] = allow_partial
 
-    st.divider()
+    # =====================================================================
+    # GROUP 4: Yield Setup (optional — not counted in required progress)
+    # =====================================================================
+    with st.expander("📊 **Yield Setup** — Optional", expanded=False):
+        st.caption(
+            "Optional: override BOM scrap rates with actual yield from completed MOs. "
+            "Leave off to use BOM-level scrap rates only."
+        )
 
-    # ── GROUP 4: Planning Parameters ──
-    st.markdown("#### 📋 Planning Parameters")
+        use_hist_yield = st.checkbox(
+            "Use historical yield override",
+            value=bool(config.yield_use_historical),
+            key="use_hist_yield",
+            help="Override BOM scrap_rate with actual yield from completed MOs.",
+        )
+        if use_hist_yield != config.yield_use_historical:
+            changes['YIELD.USE_HISTORICAL'] = use_hist_yield
 
-    horizon = st.number_input(
-        "Planning horizon (days)",
-        min_value=14, max_value=365,
-        value=config.planning_horizon_days or 60,
-        key="plan_horizon",
-        help="Fallback demand date = today + this value when GAP has no period data.",
-    )
-    if horizon != config.planning_horizon_days:
-        changes['PLANNING.DEFAULT_HORIZON_DAYS'] = horizon
+        if use_hist_yield:
+            min_yield_hist = st.number_input(
+                "Min completed MOs for yield data", min_value=1, max_value=100,
+                value=config.yield_min_history_count or 5,
+                key="yield_min_hist",
+            )
+            if min_yield_hist != config.yield_min_history_count:
+                changes['YIELD.MIN_HISTORY_COUNT'] = min_yield_hist
 
-    allow_partial = st.checkbox(
-        "Allow partial production (show max producible now)",
-        value=bool(config.allow_partial_production),
-        key="allow_partial",
-        help="When materials are partially available, show how much can be produced now.",
-    )
-    if allow_partial != config.allow_partial_production:
-        changes['PLANNING.ALLOW_PARTIAL_PRODUCTION'] = allow_partial
-
-    st.divider()
-
-    # ── SAVE BUTTON ──
+    # =====================================================================
+    # SAVE BUTTON
+    # =====================================================================
+    st.markdown("")
     if changes:
-        st.info(f"📝 **{len(changes)} unsaved changes.** Click Save to apply.")
+        st.info(f"📝 **{len(changes)} unsaved change(s).** Click Save to apply.")
 
     save_col, _ = st.columns([1, 3])
     with save_col:

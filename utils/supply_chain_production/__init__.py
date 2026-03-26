@@ -15,7 +15,7 @@ from .production_constants import (
     MO_URGENCY_LEVELS, MO_URGENCY_THRESHOLDS, URGENCY_LEVELS,
     MO_ACTION_TYPES, LEAD_TIME_SOURCE, YIELD_SOURCE,
     UNSCHEDULABLE_REASONS, CONFIG_GROUPS,
-    PRODUCTION_UI,
+    PRODUCTION_UI, RECOMMENDED_DEFAULTS,
 )
 from .production_config import (
     ProductionConfig, ProductionConfigLoader, get_config_loader,

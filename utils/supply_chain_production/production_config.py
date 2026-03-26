@@ -443,6 +443,78 @@ class ProductionConfigLoader:
             logger.warning(f"Could not load historical summary: {e}")
             return {}
 
+    # -----------------------------------------------------------------
+    # RECOMMENDED DEFAULTS (for Quick-Start)
+    # -----------------------------------------------------------------
+
+    def get_recommended_defaults(
+        self,
+        historical_summary: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Build recommended defaults for quick-start, merging historical data
+        with static fallbacks from RECOMMENDED_DEFAULTS.
+
+        Lead times: use ceil(historical avg) if available, else static fallback.
+        Always at least 1 day minimum.
+
+        Returns flat dict of {compound_config_key: value} ready for save_config.
+        Also includes '_display' key with human-readable summary for UI.
+        """
+        import math
+        from .production_constants import RECOMMENDED_DEFAULTS
+
+        defaults = RECOMMENDED_DEFAULTS
+        lt_defaults = dict(defaults['lead_time'])
+        display_parts = []
+
+        # Override lead times with historical data if available
+        if historical_summary:
+            for bom_type in ('CUTTING', 'REPACKING', 'KITTING'):
+                hist = historical_summary.get(bom_type)
+                if hist and hist.get('avg_days') is not None and hist['total_mos'] >= 5:
+                    avg = float(hist['avg_days'])
+                    recommended = max(1, math.ceil(avg))
+                    lt_defaults[bom_type] = recommended
+                    display_parts.append(
+                        f"{bom_type}: {recommended}d "
+                        f"(avg {avg:.1f}d from {hist['total_mos']} MOs)"
+                    )
+                else:
+                    display_parts.append(
+                        f"{bom_type}: {lt_defaults[bom_type]}d (static default)"
+                    )
+
+        pw = defaults['priority_weights']
+
+        # Build flat config dict for saving
+        config_values = {
+            'LEAD_TIME.CUTTING.DAYS': str(lt_defaults['CUTTING']),
+            'LEAD_TIME.REPACKING.DAYS': str(lt_defaults['REPACKING']),
+            'LEAD_TIME.KITTING.DAYS': str(lt_defaults['KITTING']),
+            'LEAD_TIME.USE_HISTORICAL': 'false',
+            'LEAD_TIME.MIN_HISTORY_COUNT_PRODUCT': '5',
+            'LEAD_TIME.MIN_HISTORY_COUNT_BOM_TYPE': '10',
+            'PRIORITY.WEIGHT.TIME_URGENCY': str(pw['time']),
+            'PRIORITY.WEIGHT.MATERIAL_READINESS': str(pw['readiness']),
+            'PRIORITY.WEIGHT.AT_RISK_VALUE': str(pw['value']),
+            'PRIORITY.WEIGHT.CUSTOMER_LINKAGE': str(pw['customer']),
+            'PLANNING.DEFAULT_HORIZON_DAYS': str(defaults['planning_horizon_days']),
+            'PLANNING.ALLOW_PARTIAL_PRODUCTION': 'true',
+            'YIELD.USE_HISTORICAL': 'false',
+            'YIELD.MIN_HISTORY_COUNT': '5',
+        }
+
+        return {
+            'values': config_values,
+            '_display': {
+                'lead_time_parts': display_parts,
+                'weights': f"{pw['time']}/{pw['readiness']}/{pw['value']}/{pw['customer']}",
+                'horizon': defaults['planning_horizon_days'],
+                'has_historical': bool(historical_summary),
+            },
+        }
+
 
 # =============================================================================
 # MODULE-LEVEL CONVENIENCE
