@@ -27,7 +27,7 @@ SESSION_KEYS = ['mo_result', 'mo_planner', 'mo_config', 'mo_lt_stats']
 
 def main():
     st.title("🏭 Production Planning — MO Suggestions")
-    st.caption("Layer 3 Phase 2: GAP → Material readiness → Scheduled MO suggestions with priority")
+    st.caption("Layer 3: GAP → Material readiness → Scheduled MO suggestions with priority")
 
     # Session state init
     for key in SESSION_KEYS:
@@ -42,12 +42,29 @@ def main():
     st.session_state['mo_lt_stats'] = lt_stats
 
     # =========================================================================
+    # PIPELINE STATUS BAR (Phase B)
+    # =========================================================================
+    from utils.supply_chain_production.production_components import (
+        get_pipeline_status, render_pipeline_status_bar,
+        build_tab_labels, render_empty_state_for_tab,
+    )
+
+    pipeline = get_pipeline_status()
+    render_pipeline_status_bar(pipeline)
+
+    gap_available = pipeline['gap']['available']
+
+    # =========================================================================
     # ACTION BUTTONS
     # =========================================================================
     btn_cols = st.columns([3, 1, 1])
 
     with btn_cols[0]:
-        can_run = config is not None and config.is_ready
+        can_run = (
+            config is not None
+            and config.is_ready
+            and gap_available
+        )
         run_clicked = st.button(
             "🔄 Generate MO Suggestions",
             type="primary",
@@ -55,12 +72,18 @@ def main():
             disabled=not can_run,
         )
         if not can_run and config is not None:
-            missing = len(config.missing_required or [])
-            errors = len(config.validation_errors or [])
-            st.caption(
-                f"⚠️ Cannot run — {missing} missing, {errors} errors. "
-                f"Fix in **⚙️ Settings** tab."
-            )
+            if not gap_available:
+                st.caption(
+                    "⚠️ Cannot run — SCM GAP result not available. "
+                    "Run **Supply Chain GAP** first."
+                )
+            elif not config.is_ready:
+                missing = len(config.missing_required or [])
+                errors = len(config.validation_errors or [])
+                st.caption(
+                    f"⚠️ Cannot run — {missing} missing, {errors} errors. "
+                    f"Fix in **Settings** tab."
+                )
 
     with btn_cols[1]:
         reset_clicked = st.button("🗑️ Clear Results", use_container_width=True)
@@ -80,19 +103,12 @@ def main():
         _run_planning(config)
 
     # =========================================================================
-    # TABS
+    # TABS (Phase B — dot indicators)
     # =========================================================================
     result = st.session_state.get('mo_result')
-    m = result.get_summary() if result and result.has_lines() else {}
+    config_ready = config is not None and config.is_ready
 
-    tab_labels = [
-        "⚙️ Settings",
-        f"✅ Ready ({m.get('ready_count', 0)})" if m else "✅ Ready",
-        f"⏳ Waiting ({m.get('waiting_count', 0)})" if m else "⏳ Waiting",
-        f"🔴 Blocked ({m.get('blocked_count', 0)})" if m else "🔴 Blocked",
-        "📅 Timeline",
-        "📊 Overview",
-    ]
+    tab_labels = build_tab_labels(result, config_ready, gap_available)
 
     tab_settings, tab_ready, tab_waiting, tab_blocked, tab_timeline, tab_overview = (
         st.tabs(tab_labels)
@@ -105,12 +121,18 @@ def main():
         if changes:
             _save_config(changes)
 
-    # ── Tab 1–5: Results (only if available) ──
+    # ── Tab 1–5: Results or per-tab empty states ──
     if result is None or not result.has_lines():
-        for tab in [tab_ready, tab_waiting, tab_blocked, tab_timeline, tab_overview]:
+        tab_map = {
+            tab_ready: 'ready',
+            tab_waiting: 'waiting',
+            tab_blocked: 'blocked',
+            tab_timeline: 'timeline',
+            tab_overview: 'overview',
+        }
+        for tab, tab_name in tab_map.items():
             with tab:
-                from utils.supply_chain_production.production_components import render_empty_state
-                render_empty_state()
+                render_empty_state_for_tab(tab_name, config_ready, gap_available)
     else:
         from utils.supply_chain_production.production_components import (
             ready_tab_fragment,

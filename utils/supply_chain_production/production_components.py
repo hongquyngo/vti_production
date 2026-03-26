@@ -64,6 +64,327 @@ def _styled_dataframe(
 
 
 # =============================================================================
+# PIPELINE STATUS BAR (Phase B)
+# =============================================================================
+
+def get_pipeline_status() -> Dict[str, Any]:
+    """
+    Check upstream module status from session state.
+
+    Pipeline:  GAP ──┬── PO Planning
+                     └── Production Planning (MO)
+
+    GAP is the root. PO and MO are parallel branches.
+    """
+    import streamlit as _st
+
+    # GAP result
+    gap_available = False
+    gap_summary = ''
+    try:
+        from utils.supply_chain_gap.state import get_state as get_gap_state
+        gap_state = get_gap_state()
+        if gap_state.has_result():
+            gap_available = True
+            result = gap_state.get_result()
+            fg_count = 0
+            shortage_count = 0
+            if hasattr(result, 'fg_gap_df') and result.fg_gap_df is not None:
+                fg_count = len(result.fg_gap_df)
+                shortage_count = len(result.fg_gap_df[result.fg_gap_df.get('net_gap', 0) < 0]) \
+                    if 'net_gap' in result.fg_gap_df.columns else 0
+            gap_summary = f"{fg_count} products, {shortage_count} shortages"
+    except Exception:
+        pass
+
+    # PO result
+    po_available = False
+    po_summary = ''
+    try:
+        po_result = _st.session_state.get('po_result')
+        if po_result is not None and hasattr(po_result, 'all_lines') and po_result.all_lines:
+            po_available = True
+            po_summary = f"{len(po_result.all_lines)} PO lines"
+    except Exception:
+        pass
+
+    # MO result
+    mo_available = False
+    mo_summary = ''
+    try:
+        mo_result = _st.session_state.get('mo_result')
+        if mo_result is not None and hasattr(mo_result, 'has_lines') and mo_result.has_lines():
+            mo_available = True
+            m = mo_result.get_summary()
+            mo_summary = f"{m.get('total_mo_lines', 0)} MO lines"
+    except Exception:
+        pass
+
+    # Config ready?
+    config_ready = False
+    try:
+        mo_config = _st.session_state.get('mo_config')
+        if mo_config and hasattr(mo_config, 'is_ready'):
+            config_ready = mo_config.is_ready
+    except Exception:
+        pass
+
+    return {
+        'gap': {'available': gap_available, 'summary': gap_summary},
+        'po': {'available': po_available, 'summary': po_summary},
+        'mo': {'available': mo_available, 'summary': mo_summary},
+        'config_ready': config_ready,
+    }
+
+
+def render_pipeline_status_bar(pipeline: Dict[str, Any]):
+    """
+    Render horizontal pipeline status bar.
+
+    GAP ──┬── PO Planning
+          └── Production Planning (current)
+    """
+    gap = pipeline['gap']
+    po = pipeline['po']
+    mo = pipeline['mo']
+
+    # Build step indicators
+    def _step_html(icon: str, label: str, status: str, detail: str = '') -> str:
+        if status == 'done':
+            bg = '#C6EFCE'
+            border = '#10B981'
+            color = '#006100'
+            sym = '✓'
+        elif status == 'active':
+            bg = '#D6EAFF'
+            border = '#3B82F6'
+            color = '#185FA5'
+            sym = '●'
+        elif status == 'warning':
+            bg = '#FFEB9C'
+            border = '#F59E0B'
+            color = '#9C5700'
+            sym = '!'
+        else:  # pending
+            bg = 'transparent'
+            border = '#D3D1C7'
+            color = '#888780'
+            sym = '○'
+
+        title_attr = f' title="{detail}"' if detail else ''
+        return (
+            f'<span style="display:inline-flex;align-items:center;gap:5px;'
+            f'padding:5px 12px;border-radius:6px;font-size:13px;'
+            f'background:{bg};border:1px solid {border};color:{color}"'
+            f'{title_attr}>'
+            f'<b>{sym}</b> {label}</span>'
+        )
+
+    arrow = '<span style="color:#B4B2A9;font-size:11px;margin:0 2px">▸</span>'
+    branch = '<span style="color:#B4B2A9;font-size:11px;margin:0 2px">┬▸</span>'
+    branch2 = '<span style="color:#B4B2A9;font-size:11px;margin:0 2px">└▸</span>'
+
+    # GAP status
+    gap_status = 'done' if gap['available'] else 'warning'
+    gap_html = _step_html('🔬', 'SCM GAP', gap_status, gap['summary'])
+
+    # PO status
+    if po['available']:
+        po_status = 'done'
+    elif gap['available']:
+        po_status = 'pending'
+    else:
+        po_status = 'pending'
+    po_html = _step_html('📦', 'PO Planning', po_status, po['summary'])
+
+    # MO status (current page)
+    if mo['available']:
+        mo_status = 'done'
+    else:
+        mo_status = 'active'
+    mo_html = _step_html('🏭', 'MO Planning', mo_status, mo['summary'])
+
+    # Render as two-line branch layout
+    html = (
+        f'<div style="display:flex;flex-direction:column;gap:4px;'
+        f'padding:10px 14px;border-radius:8px;'
+        f'background:var(--color-background-secondary, #F8F8F6);margin-bottom:12px">'
+        # Row 1: GAP → PO
+        f'<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">'
+        f'{gap_html}{branch}{po_html}'
+        f'</div>'
+        # Row 2: indent + MO (current)
+        f'<div style="display:flex;align-items:center;gap:4px;margin-left:0;flex-wrap:wrap">'
+        f'<span style="display:inline-block;width:{_estimate_step_width(gap_html)}px"></span>'
+        f'{branch2}{mo_html}'
+        f'<span style="font-size:11px;color:var(--color-text-tertiary, #888);margin-left:4px">(current page)</span>'
+        f'</div>'
+        f'</div>'
+    )
+
+    st.markdown(html, unsafe_allow_html=True)
+
+    # Warning if GAP not run
+    if not gap['available']:
+        st.warning(
+            "⚠️ **SCM GAP not run yet.** Run Supply Chain GAP Analysis first — "
+            "Production Planning needs GAP shortage data to generate MO suggestions."
+        )
+
+
+def _estimate_step_width(html: str) -> int:
+    """Rough width estimate for alignment. Not pixel-perfect but good enough."""
+    # Count visible text chars roughly
+    import re
+    text = re.sub(r'<[^>]+>', '', html)
+    return max(80, len(text) * 7)
+
+
+# =============================================================================
+# TAB LABEL HELPERS (Phase B)
+# =============================================================================
+
+def build_tab_labels(
+    result,
+    config_ready: bool,
+    gap_available: bool,
+) -> list:
+    """
+    Build tab labels with status indicators.
+
+    Dot colors:
+      🟢 = has data (result available)
+      🟡 = settings incomplete or GAP not run
+      ⚪ = not yet run (ready to generate)
+    """
+    m = result.get_summary() if result and result.has_lines() else {}
+    has_result = bool(m)
+
+    # Settings dot
+    if config_ready:
+        settings_dot = '🟢'
+    else:
+        settings_dot = '🟡'
+
+    # Result tabs dot
+    if has_result:
+        result_dot = '🟢'
+    elif not config_ready or not gap_available:
+        result_dot = '🟡'
+    else:
+        result_dot = '⚪'
+
+    labels = [
+        f"{settings_dot} Settings",
+        f"{result_dot} Ready ({m.get('ready_count', 0)})" if has_result else f"{result_dot} Ready",
+        f"{result_dot} Waiting ({m.get('waiting_count', 0)})" if has_result else f"{result_dot} Waiting",
+        f"{result_dot} Blocked ({m.get('blocked_count', 0)})" if has_result else f"{result_dot} Blocked",
+        f"{result_dot} Timeline",
+        f"{result_dot} Overview",
+    ]
+    return labels
+
+
+# =============================================================================
+# ENHANCED EMPTY STATES (Phase B)
+# =============================================================================
+
+def render_empty_state_for_tab(
+    tab_name: str,
+    config_ready: bool,
+    gap_available: bool,
+):
+    """
+    Context-aware empty state per tab — shows what the tab will display
+    and what's needed to get there.
+    """
+    # Determine blocker
+    if not gap_available:
+        blocker = 'gap'
+    elif not config_ready:
+        blocker = 'config'
+    else:
+        blocker = 'run'  # everything ready, just need to click Generate
+
+    # Blocker message
+    if blocker == 'gap':
+        st.warning(
+            "🔬 **Run Supply Chain GAP first.** "
+            "Go to **Supply Chain GAP** page → run analysis → then return here."
+        )
+    elif blocker == 'config':
+        st.info(
+            "⚙️ **Complete Settings first.** "
+            "Go to **Settings** tab → fill required fields → then click Generate."
+        )
+    else:
+        st.info(
+            "🔄 **Ready to generate.** "
+            "Click **Generate MO Suggestions** above to populate this tab."
+        )
+
+    # Tab-specific preview
+    previews = {
+        'ready': {
+            'icon': '✅',
+            'title': 'Ready to produce',
+            'desc': (
+                'MO suggestions where all BOM materials are available. '
+                'Each line shows product, suggested quantity, batch count, '
+                'priority score, and a "Create MO" action button.'
+            ),
+            'columns': 'Priority · Code · Product · BOM · Shortage · Suggested Qty · Start Date · Action',
+        },
+        'waiting': {
+            'icon': '⏳',
+            'title': 'Waiting for materials',
+            'desc': (
+                'Items with partial material availability. Shows bottleneck material, '
+                'ETA for full coverage, max producible now, and contention alerts.'
+            ),
+            'columns': 'Priority · Code · Readiness · Materials · Bottleneck · ETA · Max Now',
+        },
+        'blocked': {
+            'icon': '🔴',
+            'title': 'Blocked + Unschedulable',
+            'desc': (
+                'Items where materials are unavailable with no ETA, plus items '
+                'that cannot be scheduled (missing BOM config). Each shows a fix action.'
+            ),
+            'columns': 'Code · Product · Reason · Blocked Materials · Fix Action',
+        },
+        'timeline': {
+            'icon': '📅',
+            'title': 'Production timeline',
+            'desc': (
+                'Gantt chart showing each MO suggestion as a bar from start to completion date. '
+                'Color-coded by readiness: green = ready, yellow = waiting, red = blocked. '
+                'Red dashed line marks today.'
+            ),
+            'columns': 'Gantt chart + weekly production schedule table',
+        },
+        'overview': {
+            'icon': '📊',
+            'title': 'Overview & reconciliation',
+            'desc': (
+                'KPI cards (ready/waiting/blocked counts + at-risk values), '
+                'urgency distribution bar, top 5 most urgent items, '
+                'BOM type breakdown, and data reconciliation check.'
+            ),
+            'columns': 'KPIs · Urgency bar · Top urgent · BOM breakdown · Reconciliation',
+        },
+    }
+
+    p = previews.get(tab_name)
+    if p:
+        st.markdown(f"### {p['icon']} {p['title']}")
+        st.markdown(p['desc'])
+        st.caption(f"**Columns:** {p['columns']}")
+
+    st.caption(f"Production Planning Module v{VERSION}")
+
+
+# =============================================================================
 # SETTINGS TAB (TAB 0) — Phase A UX Upgrade
 # =============================================================================
 
@@ -1212,21 +1533,9 @@ def overview_tab_fragment(result: MOSuggestionResult):
 
 
 # =============================================================================
-# EMPTY STATE
+# EMPTY STATE (backward compat — page now uses render_empty_state_for_tab)
 # =============================================================================
 
 def render_empty_state():
-    """Show when no results yet — how-to guide."""
-    st.markdown("---")
-    st.markdown("""
-    ### 🚀 How to use Production Planning
-    1. Go to **⚙️ Settings** tab → configure lead times, yield, priority weights
-    2. Run **Supply Chain GAP Analysis** → then come back here
-    3. Click **🔄 Generate MO Suggestions**
-    4. Review tabs: Ready → Waiting → Blocked → Timeline → Overview
-    5. Export to Excel for production team
-
-    **Key principle:** ZERO ASSUMPTION — all parameters must be explicitly configured.
-    No hidden defaults, no silent fallback.
-    """)
-    st.caption(f"Production Planning Module v{VERSION}")
+    """Legacy — show generic empty state. Page now uses render_empty_state_for_tab."""
+    render_empty_state_for_tab('ready', config_ready=False, gap_available=False)
