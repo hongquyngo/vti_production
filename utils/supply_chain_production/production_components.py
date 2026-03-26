@@ -274,13 +274,14 @@ def build_tab_labels(
     else:
         result_dot = '⚪'
 
+    # Order: Overview → Ready → Waiting → Blocked → Timeline → Settings
     labels = [
-        f"{settings_dot} Settings",
+        f"{result_dot} Overview",
         f"{result_dot} Ready ({m.get('ready_count', 0)})" if has_result else f"{result_dot} Ready",
         f"{result_dot} Waiting ({m.get('waiting_count', 0)})" if has_result else f"{result_dot} Waiting",
         f"{result_dot} Blocked ({m.get('blocked_count', 0)})" if has_result else f"{result_dot} Blocked",
         f"{result_dot} Timeline",
-        f"{result_dot} Overview",
+        f"{settings_dot} Settings",
     ]
     return labels
 

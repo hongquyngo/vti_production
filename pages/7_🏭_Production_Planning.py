@@ -1,7 +1,7 @@
 # pages/7_🏭_Production_Planning.py
 
 """
-Production Planning Page — Layer 3 Phase 2 of SCM Planning Pipeline.
+Production Planning Page — Layer 3 of SCM Planning Pipeline.
 
 GAP → MO Suggestions with material readiness, scheduling, and priority.
 
@@ -17,17 +17,56 @@ GAP → MO Suggestions with material readiness, scheduling, and priority.
 import streamlit as st
 import logging
 from datetime import date, timedelta
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Production Planning", page_icon="🏭", layout="wide")
 
+# Project root for imports
+project_root = os.environ.get('PROJECT_ROOT', Path(__file__).parent.parent)
+if str(project_root) not in os.sys.path:
+    os.sys.path.insert(0, str(project_root))
+
+from utils.auth import AuthManager
+
 SESSION_KEYS = ['mo_result', 'mo_planner', 'mo_config', 'mo_lt_stats']
 
 
 def main():
-    st.title("🏭 Production Planning — MO Suggestions")
-    st.caption("Layer 3: GAP → Material readiness → Scheduled MO suggestions with priority")
+    # =========================================================================
+    # AUTHENTICATION
+    # =========================================================================
+    auth_manager = AuthManager()
+    if not auth_manager.check_session():
+        st.warning("⚠️ Please login to access this page")
+        st.stop()
+
+    # =========================================================================
+    # SIDEBAR
+    # =========================================================================
+    with st.sidebar:
+        st.markdown(f"👤 **User:** {auth_manager.get_user_display_name()}")
+        if st.button("🚪 Logout", use_container_width=True):
+            auth_manager.logout()
+            st.rerun()
+
+        st.divider()
+        from utils.supply_chain_production.production_constants import VERSION
+        st.caption(f"Production Planning v{VERSION}")
+
+    # =========================================================================
+    # PAGE HEADER + GUIDE BUTTON
+    # =========================================================================
+    hdr_cols = st.columns([5, 1])
+    with hdr_cols[0]:
+        st.title("🏭 Production Planning — MO Suggestions")
+        st.caption("Layer 3: GAP → Material readiness → Scheduled MO suggestions with priority")
+    with hdr_cols[1]:
+        st.markdown("")  # spacer
+        from utils.supply_chain_production.production_help import render_user_guide_button
+        render_user_guide_button()
 
     # Session state init
     for key in SESSION_KEYS:
@@ -103,32 +142,32 @@ def main():
         _run_planning(config)
 
     # =========================================================================
-    # TABS (Phase B — dot indicators)
+    # TABS — Overview first (daily landing), Settings last (one-time config)
     # =========================================================================
     result = st.session_state.get('mo_result')
     config_ready = config is not None and config.is_ready
 
     tab_labels = build_tab_labels(result, config_ready, gap_available)
 
-    tab_settings, tab_ready, tab_waiting, tab_blocked, tab_timeline, tab_overview = (
+    tab_overview, tab_ready, tab_waiting, tab_blocked, tab_timeline, tab_settings = (
         st.tabs(tab_labels)
     )
 
-    # ── Tab 0: Settings ──
+    # ── Tab: Settings (last — one-time config) ──
     with tab_settings:
         from utils.supply_chain_production.production_components import render_settings_tab
         changes = render_settings_tab(config, lt_stats)
         if changes:
             _save_config(changes)
 
-    # ── Tab 1–5: Results or per-tab empty states ──
+    # ── Tabs: Results or per-tab empty states ──
     if result is None or not result.has_lines():
         tab_map = {
+            tab_overview: 'overview',
             tab_ready: 'ready',
             tab_waiting: 'waiting',
             tab_blocked: 'blocked',
             tab_timeline: 'timeline',
-            tab_overview: 'overview',
         }
         for tab, tab_name in tab_map.items():
             with tab:
