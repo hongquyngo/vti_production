@@ -3,8 +3,12 @@
 Database queries for Production Receipts domain
 All SQL queries are centralized here for easy maintenance
 
-Version: 2.1.0
+Version: 2.2.0
 Changes:
+- v2.2.0: Allow under-production MO completion
+  - Removed produced_qty >= planned_qty filter from ready-to-close queries
+  - _derive_ready_to_close(), get_ready_to_close_orders(), get_live_stats()
+  - MOs with receipts + no pending QC are now completable regardless of produced vs planned
 - v2.1.0: Date filter improvements
   - Added DATE_FIELD_MAP for multi-column date filtering
   - Added date_field param to get_receipts() and get_filtered_stats()
@@ -540,7 +544,6 @@ class CompletionQueries:
                 (SELECT COUNT(*) FROM manufacturing_orders mo
                  WHERE mo.delete_flag = 0 
                    AND mo.status = 'IN_PROGRESS'
-                   AND mo.produced_qty >= mo.planned_qty
                    AND NOT EXISTS (
                        SELECT 1 FROM production_receipts pr 
                        WHERE pr.manufacturing_order_id = mo.id 
@@ -751,6 +754,8 @@ class CompletionQueries:
         """
         Get counts and lists of orders ready to close vs blocked by pending QC.
         For Ready-to-Close banner display.
+        
+        Note: No produced_qty >= planned_qty filter — under-production close allowed.
         """
         query = """
             SELECT
@@ -780,7 +785,7 @@ class CompletionQueries:
             ) pr_stats ON mo.id = pr_stats.manufacturing_order_id
             WHERE mo.status = 'IN_PROGRESS' 
                 AND mo.delete_flag = 0
-                AND mo.produced_qty >= mo.planned_qty
+                AND COALESCE(pr_stats.receipt_count, 0) > 0
             ORDER BY mo.order_no
         """
         
@@ -979,9 +984,12 @@ class CompletionQueries:
         
         Logic: Group receipts by order → check:
         - order_status = IN_PROGRESS
-        - produced_qty >= planned_qty
+        - has at least 1 receipt
         - pending_count = 0 → READY
         - pending_count > 0 → BLOCKED
+        
+        Note: produced_qty < planned_qty is ALLOWED (under-production close).
+        Under-production orders show a warning but are not blocked.
         """
         empty = {'ready_count': 0, 'blocked_count': 0, 'ready_orders': [], 'blocked_orders': []}
         
@@ -1004,14 +1012,9 @@ class CompletionQueries:
             pending_count=('quality_status', lambda x: (x == 'PENDING').sum()),
         ).reset_index()
         
-        # Filter: produced >= planned (target met)
-        target_met = order_stats[order_stats['produced_qty'] >= order_stats['planned_qty']]
-        
-        if target_met.empty:
-            return empty
-        
-        ready = target_met[target_met['pending_count'] == 0]
-        blocked = target_met[target_met['pending_count'] > 0]
+        # No target_met filter — under-production MOs are allowed to close
+        ready = order_stats[order_stats['pending_count'] == 0]
+        blocked = order_stats[order_stats['pending_count'] > 0]
         
         # Rename order_id → id for dialog compatibility (dialogs.py uses order['id'])
         def _to_records(df):

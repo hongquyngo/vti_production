@@ -3,8 +3,11 @@
 Main UI orchestrator for Production Receipts domain
 Renders the Production Receipts tab with unified metrics, filters, and receipts list
 
-Version: 5.0.1
+Version: 5.1.0
 Changes:
+- v5.1.0: Allow under-production MO completion
+  - Ready-to-close banner differentiates target-met vs under-target orders
+  - Blocked banner text simplified (no longer implies target must be met)
 - v5.0.1: Fix dialog-opening buttons inside @st.fragment
   - st.rerun() inside @st.fragment defaults to scope="fragment" (Streamlit ≥1.37)
   - check_pending_dialogs() runs at page-level → needs scope="app" to trigger
@@ -520,24 +523,49 @@ def _render_metrics(stats: Dict[str, Any], avg_yield: float):
 # ==================== Ready-to-Close Banner ====================
 
 def _render_ready_to_close_banner(ready_info: Dict[str, Any]):
-    """Render banner — v5.0: accepts pre-loaded data from bootstrap."""
+    """Render banner — v5.1: supports under-production MOs in ready list."""
     
     if ready_info['ready_count'] > 0:
-        orders_text = ", ".join(
-            o['order_no'] for o in ready_info['ready_orders'][:5]
-        )
+        ready_orders = ready_info['ready_orders']
+        
+        # Split into target-met vs under-target
+        target_met = [o for o in ready_orders if float(o.get('produced_qty', 0)) >= float(o.get('planned_qty', 1))]
+        under_target = [o for o in ready_orders if float(o.get('produced_qty', 0)) < float(o.get('planned_qty', 1))]
+        
+        orders_text = ", ".join(o['order_no'] for o in ready_orders[:5])
         if ready_info['ready_count'] > 5:
             orders_text += f" +{ready_info['ready_count'] - 5} more"
         
-        st.success(
-            f"✅ **{ready_info['ready_count']} MO(s) ready to complete** — "
-            f"production target met, all QC resolved. "
-            f"({orders_text})"
-        )
+        if target_met and not under_target:
+            # All target met
+            st.success(
+                f"✅ **{ready_info['ready_count']} MO(s) ready to complete** — "
+                f"production target met, all QC resolved. "
+                f"({orders_text})"
+            )
+        elif under_target and not target_met:
+            # All under target
+            st.info(
+                f"🔒 **{ready_info['ready_count']} MO(s) ready to complete** — "
+                f"all QC resolved (⚠️ all under target). "
+                f"({orders_text})"
+            )
+        else:
+            # Mixed
+            st.success(
+                f"✅ **{len(target_met)} MO(s) ready to complete** (target met) — "
+                f"({', '.join(o['order_no'] for o in target_met[:3])})"
+            )
+            if under_target:
+                under_text = ", ".join(o['order_no'] for o in under_target[:3])
+                st.info(
+                    f"🔒 **{len(under_target)} MO(s) ready to complete** (⚠️ under target) — "
+                    f"({under_text})"
+                )
     
     if ready_info['blocked_count'] > 0:
         st.warning(
-            f"⏳ **{ready_info['blocked_count']} MO(s) met target but have pending QC** — "
+            f"⏳ **{ready_info['blocked_count']} MO(s) have pending QC** — "
             f"resolve QC before completing."
         )
 

@@ -3,8 +3,12 @@
 Dialog components for Production Receipts domain
 Receipt detail, quality update (with guards), PDF export, close order dialogs
 
-Version: 4.2.1
+Version: 4.3.0
 Changes:
+- v4.3.0: Allow under-production MO completion
+  - show_close_order_select_dialog: show under-target indicator (⚠️ icon + shortfall)
+  - show_close_order_dialog: add under-production warning (non-blocking)
+  - Permanent warning includes under-production note when applicable
 - v4.2.1: Fix check_pending_dialogs() — use elif chain instead of sequential if
   - Streamlit allows only 1 dialog per render cycle
   - Sequential if could attempt to open multiple dialogs, losing flags silently
@@ -530,6 +534,15 @@ def show_close_order_dialog(order_id: int):
     with col3:
         st.metric("Yield", f"{yield_pct}%")
     
+    # Under-production warning (non-blocking)
+    if produced < planned:
+        shortfall = planned - produced
+        st.warning(
+            f"📉 **Under target:** produced {format_number(produced, 2)} / "
+            f"planned {format_number(planned, 2)} {uom} "
+            f"(shortfall: {format_number(shortfall, 2)} {uom}, yield: {yield_pct}%)"
+        )
+    
     st.markdown("---")
     
     # Validation checklist
@@ -567,11 +580,14 @@ def show_close_order_dialog(order_id: int):
     
     if can_close:
         st.markdown("---")
+        under_target = produced < planned
+        under_note = "\n- ⚠️ **Under-production will be recorded as final**" if under_target else ""
         st.warning(
             "⚠️ **This action is permanent.** After completion:\n"
             "- No more production receipts can be created\n"
             "- QC decisions cannot be changed\n"
             "- Material issues/returns are blocked"
+            f"{under_note}"
         )
     
     st.markdown("---")
@@ -635,14 +651,19 @@ def show_close_order_select_dialog():
                 col1, col2, col3 = st.columns([3, 2, 1])
                 with col1:
                     yield_pct = calculate_percentage(order['produced_qty'], order['planned_qty'])
+                    under_target = float(order['produced_qty']) < float(order['planned_qty'])
+                    target_icon = "⚠️" if under_target else "✅"
                     st.markdown(
                         f"**{order['order_no']}** | {order['product_name']}"
                     )
                     st.caption(
-                        f"Produced: {format_number(order['produced_qty'], 2)}"
+                        f"{target_icon} Produced: {format_number(order['produced_qty'], 2)}"
                         f" / {format_number(order['planned_qty'], 2)} {order['uom']}"
                         f" ({yield_pct}%)"
                     )
+                    if under_target:
+                        shortfall = float(order['planned_qty']) - float(order['produced_qty'])
+                        st.caption(f"📉 Under target by {format_number(shortfall, 2)} {order['uom']}")
                 with col2:
                     st.caption(f"Receipts: {order['receipt_count']}")
                 with col3:

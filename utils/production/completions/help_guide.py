@@ -3,7 +3,12 @@
 Production Receipts — User Guide & Reference
 Comprehensive help rendered as floating popover dialog
 
-Version: 1.0.0
+Version: 1.1.0
+Changes:
+- v1.1.0: Updated for under-production MO completion
+  - Close order conditions no longer require produced >= planned
+  - Added under-production info note
+  - Updated banner documentation and workflow diagram
 """
 
 import streamlit as st
@@ -64,6 +69,7 @@ người dùng chủ động đóng khi sẵn sàng.
                     (không auto-complete)            ✅ Có receipt
                                                     ✅ 0 PENDING QC
                                                     ✅ NVL đã xuất
+                                                    ⚠️ Dưới KH → cảnh báo (không chặn)
 ```
 """)
 
@@ -266,6 +272,13 @@ Sau khi đóng, **không thể** nhập thêm, sửa QC, hay xuất/trả NVL.
 | 4 | NVL chính | issued | RAW_MATERIAL phải đã xuất kho |
 """)
 
+        st.info(
+            "💡 **Sản lượng dưới kế hoạch (under-production)?** "
+            "Hệ thống **cho phép** đóng lệnh ngay cả khi produced < planned. "
+            "Sẽ hiện cảnh báo ⚠️ nhưng **không chặn**. "
+            "Ghi nhận đúng thực tế sản xuất."
+        )
+
         st.markdown("### Hướng dẫn đóng lệnh")
         st.markdown("""
 **Cách 1: Từ Action Bar**
@@ -380,8 +393,9 @@ Hiển thị phía trên bảng khi có MO đủ điều kiện đóng:
 
 | Banner | Ý nghĩa |
 |:-------|:--------|
-| ✅ **N order(s) ready to close** | Đạt kế hoạch + QC xong → có thể đóng |
-| ⏳ **N order(s) met target but have pending QC** | Đạt kế hoạch nhưng còn PENDING → giải quyết QC trước |
+| ✅ **N order(s) ready to complete** (target met) | Đạt kế hoạch + QC xong → sẵn sàng đóng |
+| 🔒 **N order(s) ready to complete** (⚠️ under target) | Chưa đạt KH nhưng QC xong → có thể đóng |
+| ⏳ **N order(s) have pending QC** | Còn PENDING → giải quyết QC trước |
 """)
 
         st.markdown("### Cảnh báo khi nhập sản lượng")
