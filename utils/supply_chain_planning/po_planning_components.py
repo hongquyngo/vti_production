@@ -923,13 +923,32 @@ def po_overview_fragment(result: POSuggestionResult):
         matched = recon.get('matched', 0)
         unmatched = recon.get('unmatched', 0)
         skipped = recon.get('skipped_pending_po', 0)
-        st.markdown(
-            f"**Data flow:** GAP produced **{total_input}** shortage items "
-            f"({recon.get('input_fg', 0)} FG + {recon.get('input_raw', 0)} Raw) → "
-            f"**{matched}** PO lines created, "
-            f"{unmatched} no vendor, "
-            f"{skipped} already covered by pending PO"
-        )
+        scope_removed = recon.get('scope_removed', 0)
+        filter_scope = recon.get('filter_scope', 'full')
+
+        if filter_scope == 'filtered' and scope_removed > 0:
+            # Filtered scope — show 2-step: full extraction → scope → processing
+            total_after = recon.get('total_after_scope', total_input - scope_removed)
+            scope_info = inp.get('scope_info', {})
+            scope_label = scope_info.get('scope_label', 'filtered')
+            st.markdown(
+                f"**Data flow:** GAP produced **{total_input}** shortage items → "
+                f"**scope filter ({scope_label}): {total_after} kept** "
+                f"({recon.get('input_fg', 0)} FG + {recon.get('input_raw', 0)} Raw), "
+                f"{scope_removed} excluded → "
+                f"**{matched}** PO lines created, "
+                f"{unmatched} no vendor"
+                f"{f', {skipped} already covered by pending PO' if skipped else ''}"
+            )
+        else:
+            # Full scope — original format
+            st.markdown(
+                f"**Data flow:** GAP produced **{total_input}** shortage items "
+                f"({recon.get('input_fg', 0)} FG + {recon.get('input_raw', 0)} Raw) → "
+                f"**{matched}** PO lines created, "
+                f"{unmatched} no vendor, "
+                f"{skipped} already covered by pending PO"
+            )
 
         # Demand date source
         dates_gap = inp.get('demand_dates_from_gap', 0)
