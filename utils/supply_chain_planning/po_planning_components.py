@@ -202,9 +202,12 @@ def render_vendor_summary_table(result: POSuggestionResult):
             'vendor_name': st.column_config.TextColumn('Vendor', width='large'),
             'vendor_code': st.column_config.TextColumn('Code', width='small'),
             'vendor_location_type': st.column_config.TextColumn('Location', width='small'),
+            'primary_currency': st.column_config.TextColumn(
+                'Currency', width='small',
+                help='Vendor quotation currency (costbook/PO). Value column is already converted to USD.',
+            ),
             'total_lines': st.column_config.NumberColumn('Lines', format="%d"),
             'total_value_usd': st.column_config.NumberColumn('Value (USD)'),
-            'primary_currency': st.column_config.TextColumn('Currency', width='small'),
             'urgency_display': st.column_config.TextColumn('Urgency', width='medium'),
             'trade_term': st.column_config.TextColumn('Trade Term', width='small'),
             'payment_term': st.column_config.TextColumn('Payment', width='small'),
@@ -370,11 +373,14 @@ def render_po_lines_table(
             'brand': st.column_config.TextColumn('Brand', width='small'),
             'standard_uom': st.column_config.TextColumn('UOM', width='small'),
             'vendor_name': st.column_config.TextColumn('Vendor', width='medium'),
+            'currency_code': st.column_config.TextColumn(
+                'Currency', width='small',
+                help='Vendor quotation currency (costbook/PO). Price & value columns are converted to USD.',
+            ),
             'net_shortage_qty': st.column_config.NumberColumn('Need'),
             'suggested_qty': st.column_config.NumberColumn('Order Qty'),
             'unit_price_usd': st.column_config.NumberColumn('$/unit'),
             'line_value_usd': st.column_config.NumberColumn('Value $'),
-            'currency_code': st.column_config.TextColumn('Curr', width='small'),
             'price_icon': st.column_config.TextColumn('Src', width='small'),
             'lead_time_days': st.column_config.NumberColumn('LT', format="%d"),
             'must_order_by': st.column_config.DateColumn('Must Order', format='YYYY-MM-DD'),
@@ -964,8 +970,11 @@ def po_vendor_groups_fragment(result: POSuggestionResult):
         with st.expander(label, expanded=(group.max_urgency_priority <= 2)):
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Lines", group.total_lines)
-            c2.metric("Value", f"${group.total_value_usd:,.0f}")
-            c3.metric("Currency", group.primary_currency)
+            c2.metric("Value (USD)", f"${group.total_value_usd:,.0f}")
+            c3.metric(
+                "Currency", group.primary_currency,
+                help="Vendor quotation currency (costbook/PO). Value is already converted to USD.",
+            )
             c4.metric("Terms", f"{group.trade_term} / {group.payment_term}" if group.trade_term else "N/A")
 
             render_vendor_po_detail(result, vid)
