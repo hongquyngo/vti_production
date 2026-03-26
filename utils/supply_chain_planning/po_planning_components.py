@@ -233,7 +233,8 @@ def render_vendor_po_detail(result: POSuggestionResult, vendor_id: int):
     df = pd.DataFrame(lines_data)
 
     display_cols = [
-        'pt_code', 'product_name', 'shortage_source', 'standard_uom',
+        'pt_code', 'product_name', 'package_size', 'brand',
+        'shortage_source', 'standard_uom',
         'shortage_qty', 'pending_po_qty', 'net_shortage_qty', 'suggested_qty',
         'unit_price_usd', 'line_value_usd',
         'price_source', 'lead_time_days', 'urgency_display',
@@ -263,6 +264,8 @@ def render_vendor_po_detail(result: POSuggestionResult, vendor_id: int):
         column_config={
             'pt_code': st.column_config.TextColumn('Code', width='small'),
             'product_name': st.column_config.TextColumn('Product', width='medium'),
+            'package_size': st.column_config.TextColumn('Pkg Size', width='small'),
+            'brand': st.column_config.TextColumn('Brand', width='small'),
             'shortage_source': st.column_config.TextColumn('Source', width='small'),
             'standard_uom': st.column_config.TextColumn('UOM', width='small'),
             'shortage_qty': st.column_config.NumberColumn('Shortage'),
@@ -348,7 +351,7 @@ def render_po_lines_table(
     )
 
     display_cols = [
-        'urgency_display', 'source_icon', 'pt_code', 'product_name', 'brand',
+        'urgency_display', 'source_icon', 'pt_code', 'product_name', 'package_size', 'brand',
         'standard_uom', 'vendor_name',
         'net_shortage_qty', 'suggested_qty',
         'unit_price_usd', 'line_value_usd', 'currency_code',
@@ -370,6 +373,7 @@ def render_po_lines_table(
             'source_icon': st.column_config.TextColumn('', width='small'),
             'pt_code': st.column_config.TextColumn('Code', width='small'),
             'product_name': st.column_config.TextColumn('Product', width='large'),
+            'package_size': st.column_config.TextColumn('Pkg Size', width='small'),
             'brand': st.column_config.TextColumn('Brand', width='small'),
             'standard_uom': st.column_config.TextColumn('UOM', width='small'),
             'vendor_name': st.column_config.TextColumn('Vendor', width='medium'),
@@ -414,7 +418,7 @@ def render_unmatched_panel(result: POSuggestionResult):
         f"need costbook setup or vendor sourcing"
     )
 
-    display_cols = ['pt_code', 'product_name', 'brand', 'shortage_source',
+    display_cols = ['pt_code', 'product_name', 'package_size', 'brand', 'shortage_source',
                     'shortage_qty', 'uom', 'reason']
     available = [c for c in display_cols if c in unmatched_df.columns]
 
@@ -425,6 +429,7 @@ def render_unmatched_panel(result: POSuggestionResult):
         column_config={
             'pt_code': st.column_config.TextColumn('Code', width='small'),
             'product_name': st.column_config.TextColumn('Product', width='large'),
+            'package_size': st.column_config.TextColumn('Pkg Size', width='small'),
             'brand': st.column_config.TextColumn('Brand', width='small'),
             'shortage_source': st.column_config.TextColumn('Source', width='small'),
             'shortage_qty': st.column_config.NumberColumn('Shortage'),
@@ -550,7 +555,8 @@ def render_reconciliation_panel(result: POSuggestionResult):
         if result.has_skipped():
             st.markdown("**⏭️ Skipped Items — Pending PO Covers Shortage**")
             skipped_df = result.get_skipped_df()
-            display_cols = ['pt_code', 'product_name', 'shortage_source',
+            display_cols = ['pt_code', 'product_name', 'package_size', 'brand',
+                            'shortage_source',
                             'shortage_qty', 'pending_po_qty', 'vendor_name', 'reason']
             available = [c for c in display_cols if c in skipped_df.columns]
 
@@ -563,6 +569,8 @@ def render_reconciliation_panel(result: POSuggestionResult):
                 column_config={
                     'pt_code': st.column_config.TextColumn('Code', width='small'),
                     'product_name': st.column_config.TextColumn('Product', width='large'),
+                    'package_size': st.column_config.TextColumn('Pkg Size', width='small'),
+                    'brand': st.column_config.TextColumn('Brand', width='small'),
                     'shortage_source': st.column_config.TextColumn('Source', width='small'),
                     'shortage_qty': st.column_config.NumberColumn('Shortage'),
                     'pending_po_qty': st.column_config.NumberColumn('Pending PO'),
@@ -863,8 +871,10 @@ def _render_top_urgent_items(result: POSuggestionResult, top_n: int = 5):
         rows.append({
             'urgency': f"{urgency_cfg.get('icon', '')} {urgency_cfg.get('label', l.urgency_level)}",
             'code': l.pt_code,
-            'product': l.product_name[:40],
-            'vendor': l.vendor_name[:25],
+            'product': l.product_name,
+            'pkg_size': l.package_size,
+            'brand': l.brand,
+            'vendor': l.vendor_name,
             'qty': round(l.suggested_qty),
             'value': round(l.line_value_usd),
             'must_order': str(l.must_order_by) if l.must_order_by else '',
@@ -879,6 +889,8 @@ def _render_top_urgent_items(result: POSuggestionResult, top_n: int = 5):
             'urgency': st.column_config.TextColumn('Urgency', width='medium'),
             'code': st.column_config.TextColumn('Code', width='small'),
             'product': st.column_config.TextColumn('Product', width='large'),
+            'pkg_size': st.column_config.TextColumn('Pkg Size', width='small'),
+            'brand': st.column_config.TextColumn('Brand', width='small'),
             'vendor': st.column_config.TextColumn('Vendor', width='medium'),
             'qty': st.column_config.NumberColumn('Order Qty'),
             'value': st.column_config.NumberColumn('Value ($)'),
@@ -951,33 +963,39 @@ def _render_order_timeline(result: POSuggestionResult):
 
 @st.fragment
 def po_vendor_groups_fragment(result: POSuggestionResult):
-    """Fragment: Vendor summary + expandable PO detail per vendor."""
-    if not result.vendor_groups:
+    """Fragment: Vendor summary + expandable PO detail per vendor + unmatched."""
+    if not result.vendor_groups and not result.has_unmatched():
         st.info("No vendor groups — run PO planning first")
         return
 
-    st.markdown(f"##### 🏭 {len(result.vendor_groups)} Vendors")
-    render_vendor_summary_table(result)
+    if result.vendor_groups:
+        st.markdown(f"##### 🏭 {len(result.vendor_groups)} Vendors")
+        render_vendor_summary_table(result)
 
-    st.divider()
-    st.markdown("##### 📋 PO Lines by Vendor")
+        st.divider()
+        st.markdown("##### 📋 PO Lines by Vendor")
 
-    for vid, group in result.vendor_groups.items():
-        urgency_cfg = URGENCY_LEVELS.get(group.max_urgency_level, {})
-        icon = urgency_cfg.get('icon', '📦')
-        label = f"{icon} {group.vendor_name} — {group.total_lines} lines, ${group.total_value_usd:,.0f}"
+        for vid, group in result.vendor_groups.items():
+            urgency_cfg = URGENCY_LEVELS.get(group.max_urgency_level, {})
+            icon = urgency_cfg.get('icon', '📦')
+            label = f"{icon} {group.vendor_name} — {group.total_lines} lines, ${group.total_value_usd:,.0f}"
 
-        with st.expander(label, expanded=(group.max_urgency_priority <= 2)):
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Lines", group.total_lines)
-            c2.metric("Value (USD)", f"${group.total_value_usd:,.0f}")
-            c3.metric(
-                "Currency", group.primary_currency,
-                help="Vendor quotation currency (costbook/PO). Value is already converted to USD.",
-            )
-            c4.metric("Terms", f"{group.trade_term} / {group.payment_term}" if group.trade_term else "N/A")
+            with st.expander(label, expanded=(group.max_urgency_priority <= 2)):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Lines", group.total_lines)
+                c2.metric("Value (USD)", f"${group.total_value_usd:,.0f}")
+                c3.metric(
+                    "Currency", group.primary_currency,
+                    help="Vendor quotation currency (costbook/PO). Value is already converted to USD.",
+                )
+                c4.metric("Terms", f"{group.trade_term} / {group.payment_term}" if group.trade_term else "N/A")
 
-            render_vendor_po_detail(result, vid)
+                render_vendor_po_detail(result, vid)
+
+    # --- No Vendor section ---
+    if result.has_unmatched():
+        st.divider()
+        render_unmatched_panel(result)
 
 
 # =============================================================================

@@ -7,7 +7,7 @@ UI Fixes v1.2:
 - Removed "Skip zero-shortage items" (always True, GAP only sends shortage > 0)
 - Renamed demand offset → "Planning horizon" with default 60 days
 - Moved Export below tabs (near data)
-- Reordered tabs: By Vendor → All Lines → Overview → Coverage
+- Reordered tabs: Overview → By Vendor → All Lines → Coverage
 - Hidden "Data Source" into Advanced expander
 - Informed Consent filter review flow
 """
@@ -270,20 +270,25 @@ def _render_results(result):
 
     m = result.get_summary()
 
-    # Tabs: By Vendor first (procurement-friendly)
-    tab_vendor, tab_lines, tab_overview, tab_coverage = st.tabs([
-        f"🏭 By Vendor ({m.get('total_vendors', 0)})",
-        f"📋 All Lines ({m.get('total_po_lines', 0)})",
+    # Tabs: Overview first (executive summary), then detail views
+    unmatched_count = m.get('unmatched_count', 0)
+    vendor_label = f"🏭 By Vendor ({m.get('total_vendors', 0)})"
+    if unmatched_count > 0:
+        vendor_label += f" + {unmatched_count} no vendor"
+
+    tab_overview, tab_vendor, tab_lines, tab_coverage = st.tabs([
         f"📊 Overview",
+        vendor_label,
+        f"📋 All Lines ({m.get('total_po_lines', 0)})",
         f"📈 Coverage",
     ])
 
+    with tab_overview:
+        po_overview_fragment(result)
     with tab_vendor:
         po_vendor_groups_fragment(result)
     with tab_lines:
         po_all_lines_fragment(result)
-    with tab_overview:
-        po_overview_fragment(result)
     with tab_coverage:
         po_coverage_fragment(result)
 
