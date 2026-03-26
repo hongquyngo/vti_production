@@ -113,9 +113,9 @@ def _write_summary_sheet(
         ['Max BOM Depth', metrics.get('max_bom_depth', 1)],
         ['', ''],
         ['--- ACTIONS ---', ''],
-        ['MO to Create', metrics.get('mo_count', 0)],
-        ['PO for Finished Goods', metrics.get('po_fg_count', 0)],
-        ['PO for Raw Materials', metrics.get('po_raw_count', 0)]
+        ['MO to Create', f"{metrics.get('mo_filtered', metrics.get('mo_count', 0))} of {metrics.get('mo_count', 0)}"],
+        ['PO for Finished Goods', f"{metrics.get('po_fg_filtered', metrics.get('po_fg_count', 0))} of {metrics.get('po_fg_count', 0)}"],
+        ['PO for Raw Materials', f"{metrics.get('po_raw_filtered', metrics.get('po_raw_count', 0))} of {metrics.get('po_raw_count', 0)}"]
     ]
     
     # Period analysis section

@@ -298,7 +298,7 @@ class SupplyChainGAPResult:
             'at_risk_value': fg_shortage['at_risk_value'].sum() if not fg_shortage.empty and 'at_risk_value' in fg_shortage.columns else 0,
             'affected_customers': self._count_filtered_customers(),
             
-            # Action counts (FULL)
+            # Action counts (filtered + total)
             'mo_count': len(self.mo_suggestions),
             'po_fg_count': len(self.po_fg_suggestions),
             'po_raw_count': len(self.po_raw_suggestions),
@@ -313,6 +313,10 @@ class SupplyChainGAPResult:
             'filter_brands': self.applied_display_filter.get('brands', []),
             'filter_product_ids': self.applied_display_filter.get('product_ids', []),
         }
+        
+        # Filtered action counts (v2.3.1)
+        action_counts = self.get_filtered_action_counts()
+        metrics.update(action_counts)
         
         # Merge period metrics
         if self.fg_period_metrics:
@@ -606,6 +610,62 @@ class SupplyChainGAPResult:
         if not actions:
             return pd.DataFrame()
         return pd.DataFrame(actions)
+    
+    # =========================================================================
+    # FILTERED ACTION ACCESSORS (v2.3.1)
+    # MO/PO-FG: filter by brand/product (FG product scope)
+    # PO-Raw: filter by materials that have demand from selected brand/product
+    # =========================================================================
+    
+    def get_filtered_action_counts(self) -> Dict[str, Any]:
+        """
+        Get action counts split by filtered vs total.
+        
+        Returns dict with:
+            mo_filtered, mo_total, po_fg_filtered, po_fg_total,
+            po_raw_filtered, po_raw_total
+        """
+        counts = {
+            'mo_filtered': len(self.mo_suggestions),
+            'mo_total': len(self.mo_suggestions),
+            'po_fg_filtered': len(self.po_fg_suggestions),
+            'po_fg_total': len(self.po_fg_suggestions),
+            'po_raw_filtered': len(self.po_raw_suggestions),
+            'po_raw_total': len(self.po_raw_suggestions),
+        }
+        
+        if not self.has_display_filter():
+            return counts
+        
+        # Get filtered FG product IDs
+        filtered_fg_ids = set()
+        if not self.fg_gap_df.empty and 'in_filter' in self.fg_gap_df.columns:
+            filtered_fg_ids = set(
+                self.fg_gap_df[self.fg_gap_df['in_filter']]['product_id'].tolist()
+            )
+        
+        # MO: filter by FG product_id
+        counts['mo_filtered'] = sum(
+            1 for mo in self.mo_suggestions if mo.product_id in filtered_fg_ids
+        )
+        
+        # PO-FG: filter by FG product_id
+        counts['po_fg_filtered'] = sum(
+            1 for po in self.po_fg_suggestions if po.product_id in filtered_fg_ids
+        )
+        
+        # PO-Raw: filter by materials that have demand from selected brand/product
+        if not self.raw_gap_df.empty and 'demand_from_selected' in self.raw_gap_df.columns:
+            related_material_ids = set(
+                self.raw_gap_df[self.raw_gap_df['demand_from_selected'] > 0]['material_id'].tolist()
+            )
+            counts['po_raw_filtered'] = sum(
+                1 for po in self.po_raw_suggestions if po.product_id in related_material_ids
+            )
+        else:
+            counts['po_raw_filtered'] = counts['po_raw_total']
+        
+        return counts
     
     # =========================================================================
     # VALIDATION

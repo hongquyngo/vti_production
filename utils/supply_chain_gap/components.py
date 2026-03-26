@@ -215,15 +215,41 @@ def render_kpi_cards(result: SupplyChainGAPResult):
     st.markdown("##### 📋 Actions Required")
     cols = st.columns(3)
     
+    has_filter = metrics.get('has_display_filter', False)
+    
     with cols[0]:
-        st.metric(label="🏭 MO to Create", value=f"{metrics.get('mo_count', 0):,}",
-                  help="Lệnh sản xuất cần tạo cho sản phẩm Manufacturing có shortage")
+        mo_total = metrics.get('mo_count', 0)
+        mo_filtered = metrics.get('mo_filtered', mo_total)
+        if has_filter and mo_filtered != mo_total:
+            st.metric(label="🏭 MO to Create", value=f"{mo_filtered:,}",
+                      delta=f"of {mo_total:,} total",
+                      delta_color="off",
+                      help="Lệnh sản xuất cần tạo.\nSố đầu = sản phẩm trong filter. Số sau = toàn bộ entity.")
+        else:
+            st.metric(label="🏭 MO to Create", value=f"{mo_total:,}",
+                      help="Lệnh sản xuất cần tạo cho sản phẩm Manufacturing có shortage")
     with cols[1]:
-        st.metric(label="🛒 PO for FG", value=f"{metrics.get('po_fg_count', 0):,}",
-                  help="PO mua thành phẩm cần tạo cho sản phẩm Trading đang shortage")
+        po_fg_total = metrics.get('po_fg_count', 0)
+        po_fg_filtered = metrics.get('po_fg_filtered', po_fg_total)
+        if has_filter and po_fg_filtered != po_fg_total:
+            st.metric(label="🛒 PO for FG", value=f"{po_fg_filtered:,}",
+                      delta=f"of {po_fg_total:,} total",
+                      delta_color="off",
+                      help="PO mua thành phẩm cần tạo.\nSố đầu = sản phẩm trong filter. Số sau = toàn bộ entity.")
+        else:
+            st.metric(label="🛒 PO for FG", value=f"{po_fg_total:,}",
+                      help="PO mua thành phẩm cần tạo cho sản phẩm Trading đang shortage")
     with cols[2]:
-        st.metric(label="📦 PO for Raw", value=f"{metrics.get('po_raw_count', 0):,}",
-                  help="PO mua NVL cần tạo cho NVL chính đang shortage")
+        po_raw_total = metrics.get('po_raw_count', 0)
+        po_raw_filtered = metrics.get('po_raw_filtered', po_raw_total)
+        if has_filter and po_raw_filtered != po_raw_total:
+            st.metric(label="📦 PO for Raw", value=f"{po_raw_filtered:,}",
+                      delta=f"of {po_raw_total:,} total",
+                      delta_color="off",
+                      help="PO mua NVL cần tạo.\nSố đầu = NVL liên quan đến filter. Số sau = toàn bộ NVL shortage.")
+        else:
+            st.metric(label="📦 PO for Raw", value=f"{po_raw_total:,}",
+                      help="PO mua NVL cần tạo cho NVL chính đang shortage")
 
 
 @st.dialog("👥 Affected Customers Analysis", width="large")
