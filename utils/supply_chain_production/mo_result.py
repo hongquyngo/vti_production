@@ -13,7 +13,7 @@ Holds:
 
 import pandas as pd
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, Any, List, Optional
 
 from .production_interfaces import (
@@ -125,6 +125,7 @@ class MOLineItem:
             'materials_ready_pct': self.materials_ready_pct,
             'total_materials': self.total_materials,
             'ready_materials': self.ready_materials,
+            'partial_materials': self.partial_materials,
             'blocked_materials': self.blocked_materials,
             'bottleneck_material': self.bottleneck_material,
             'bottleneck_eta': self.bottleneck_eta,
@@ -292,7 +293,7 @@ class MOSuggestionResult:
                 # Target bar (no actual start — blocked)
                 entry['start'] = line.must_start_by.isoformat()
                 entry['end'] = (
-                    line.must_start_by + __import__('datetime').timedelta(days=line.lead_time_days)
+                    line.must_start_by + timedelta(days=line.lead_time_days)
                 ).isoformat()
                 entry['type'] = 'TARGET'
 

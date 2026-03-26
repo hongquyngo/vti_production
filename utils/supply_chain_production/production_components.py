@@ -147,7 +147,7 @@ def render_settings_tab(config: ProductionConfig, lead_time_stats_df: Optional[p
                 key="lt_min_prod",
             )
             if min_prod != config.lead_time_min_history_product:
-                changes['LEAD_TIME.MIN_HISTORY_PRODUCT'] = min_prod
+                changes['LEAD_TIME.MIN_HISTORY_COUNT_PRODUCT'] = min_prod
         with hc2:
             min_bom = st.number_input(
                 "Min MOs per BOM type", min_value=1, max_value=500,
@@ -155,7 +155,7 @@ def render_settings_tab(config: ProductionConfig, lead_time_stats_df: Optional[p
                 key="lt_min_bom",
             )
             if min_bom != config.lead_time_min_history_bom_type:
-                changes['LEAD_TIME.MIN_HISTORY_BOM_TYPE'] = min_bom
+                changes['LEAD_TIME.MIN_HISTORY_COUNT_BOM_TYPE'] = min_bom
 
     st.divider()
 
@@ -187,10 +187,10 @@ def render_settings_tab(config: ProductionConfig, lead_time_stats_df: Optional[p
 
     pw_cols = st.columns(4)
     weight_keys = [
-        ('priority_weight_time', 'Time urgency', 'PRIORITY.WEIGHT_TIME'),
-        ('priority_weight_readiness', 'Material readiness', 'PRIORITY.WEIGHT_READINESS'),
-        ('priority_weight_value', 'At-risk value', 'PRIORITY.WEIGHT_VALUE'),
-        ('priority_weight_customer', 'Customer linkage', 'PRIORITY.WEIGHT_CUSTOMER'),
+        ('priority_weight_time', 'Time urgency', 'PRIORITY.WEIGHT.TIME_URGENCY'),
+        ('priority_weight_readiness', 'Material readiness', 'PRIORITY.WEIGHT.MATERIAL_READINESS'),
+        ('priority_weight_value', 'At-risk value', 'PRIORITY.WEIGHT.AT_RISK_VALUE'),
+        ('priority_weight_customer', 'Customer linkage', 'PRIORITY.WEIGHT.CUSTOMER_LINKAGE'),
     ]
     weight_sum = 0
     for i, (attr, label, config_key) in enumerate(weight_keys):
@@ -222,7 +222,7 @@ def render_settings_tab(config: ProductionConfig, lead_time_stats_df: Optional[p
         help="Fallback demand date = today + this value when GAP has no period data.",
     )
     if horizon != config.planning_horizon_days:
-        changes['PLANNING.HORIZON_DAYS'] = horizon
+        changes['PLANNING.DEFAULT_HORIZON_DAYS'] = horizon
 
     allow_partial = st.checkbox(
         "Allow partial production (show max producible now)",
@@ -231,7 +231,7 @@ def render_settings_tab(config: ProductionConfig, lead_time_stats_df: Optional[p
         help="When materials are partially available, show how much can be produced now.",
     )
     if allow_partial != config.allow_partial_production:
-        changes['PLANNING.ALLOW_PARTIAL'] = allow_partial
+        changes['PLANNING.ALLOW_PARTIAL_PRODUCTION'] = allow_partial
 
     st.divider()
 
@@ -257,7 +257,7 @@ def _render_lead_time_reference(lt_stats_df: pd.DataFrame):
 
     display_cols = []
     col_map = {}
-    for col in ['bom_type', 'product_count', 'mo_count', 'avg_lead_time_days',
+    for col in ['bom_type', 'product_count', 'completed_mo_count', 'avg_lead_time_days',
                  'min_lead_time_days', 'max_lead_time_days']:
         if col in lt_stats_df.columns:
             display_cols.append(col)
@@ -574,7 +574,11 @@ def render_readiness_heatmap(result: MOSuggestionResult):
         else:
             return 'background-color: #ffc7ce; color: #9c0006'
 
-    styled = pivot.style.applymap(_color_cell).format('{:.0f}%', na_rep='-')
+    # Use .map() (pandas ≥2.1) with fallback to .applymap() for older versions
+    try:
+        styled = pivot.style.map(_color_cell).format('{:.0f}%', na_rep='-')
+    except AttributeError:
+        styled = pivot.style.applymap(_color_cell).format('{:.0f}%', na_rep='-')
 
     # Limit size for readability
     if len(pivot) <= 50 and len(pivot.columns) <= 30:
@@ -822,17 +826,20 @@ def render_filter_warning_banner(result: MOSuggestionResult):
     if not review:
         return
 
-    deviations = review.get('deviations', [])
-    if not deviations:
+    # validate_gap_filters_for_production returns 'items' key, not 'deviations'
+    filter_items = review.get('items', [])
+    if not filter_items:
         return
 
-    icons = {'OFF': '🔴', 'ON': '🟡', 'MISMATCH': '🟡'}
-    parts = [f"{icons.get(d.get('type', ''), '⚪')} {d.get('label', d.get('key', ''))}"
-             for d in deviations[:5]]
+    risk_icons = {'HIGH': '🔴', 'MEDIUM': '🟡', 'LOW': '🟢'}
+    parts = [
+        f"{risk_icons.get(item.get('risk', ''), '⚪')} {item.get('label', item.get('filter', ''))}"
+        for item in filter_items[:5]
+    ]
 
     msg = f"⚠️ **GAP Filter Deviations:** {' · '.join(parts)}"
-    if len(deviations) > 5:
-        msg += f" · +{len(deviations) - 5} more"
+    if len(filter_items) > 5:
+        msg += f" · +{len(filter_items) - 5} more"
 
     st.warning(msg)
 

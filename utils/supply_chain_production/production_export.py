@@ -92,7 +92,10 @@ def _lines_to_df(lines, include_readiness=True):
         row['Lead Time (days)'] = l.lead_time_days
         row['LT Source'] = l.lead_time_source
         row['Delayed'] = 'Yes' if l.is_delayed else ''
-        row['Delay Days'] = l.delay_days if l.is_delayed else ''
+        if l.is_delayed and l.delay_reason == 'MATERIAL_BLOCKED_NO_ETA':
+            row['Delay Days'] = 'N/A'
+        else:
+            row['Delay Days'] = l.delay_days if l.is_delayed else ''
         row['Delay Reason'] = l.delay_reason if l.is_delayed else ''
         row['At Risk Value ($)'] = round(l.at_risk_value, 2)
         row['Customers'] = l.customer_count

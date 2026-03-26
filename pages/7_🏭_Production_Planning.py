@@ -171,18 +171,32 @@ def _load_config():
 
 
 def _save_config(changes):
-    """Save config changes to DB and reload."""
+    """Save config changes to DB and reload.
+
+    Args:
+        changes: Dict[str, Any] — keys are 'GROUP.CONFIG_KEY' format
+                 e.g. 'LEAD_TIME.CUTTING.DAYS', 'PRIORITY.WEIGHT.TIME_URGENCY'
+                 Split on first '.' to get (config_group, config_key).
+    """
     try:
         from utils.supply_chain_production.production_config import ProductionConfigLoader
         loader = ProductionConfigLoader()
 
         saved = 0
-        for key, value in changes.items():
+        for compound_key, value in changes.items():
             try:
-                loader.save_config_value(key, value)
-                saved += 1
+                # Split 'LEAD_TIME.CUTTING.DAYS' → group='LEAD_TIME', key='CUTTING.DAYS'
+                parts = compound_key.split('.', 1)
+                if len(parts) != 2:
+                    st.error(f"Invalid config key format: {compound_key}")
+                    continue
+                config_group, config_key = parts
+                if loader.save_config(config_group, config_key, str(value)):
+                    saved += 1
+                else:
+                    st.error(f"Failed to save {compound_key}: no matching row in DB")
             except Exception as e:
-                st.error(f"Failed to save {key}: {e}")
+                st.error(f"Failed to save {compound_key}: {e}")
 
         if saved > 0:
             st.success(f"💾 Saved {saved} setting(s). Reloading...")

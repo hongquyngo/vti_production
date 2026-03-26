@@ -38,6 +38,7 @@ from .production_interfaces import (
     ProductReadiness,
 )
 from .production_validators import extract_material_requirements
+from .production_validators import _period_to_date as _validators_period_to_date
 
 logger = logging.getLogger(__name__)
 
@@ -353,7 +354,12 @@ class MaterialReadinessChecker:
         for material_id, demands in contested.items():
             available = supply_lookup.get(material_id, 0.0)
 
-            # Sort: highest at_risk_value first (proxy for priority before scoring)
+            # Sort: highest at_risk_value first (proxy for priority before scoring).
+            # NOTE: This uses at_risk_value as proxy because real priority_score
+            # is not yet computed (scheduling runs AFTER readiness check).
+            # Higher at_risk_value = more business-critical = gets material first.
+            # If refactoring to use real priority_score (lower=more urgent),
+            # reverse the sort order.
             sorted_demands = sorted(
                 demands, key=lambda d: d['priority_score'], reverse=True,
             )
@@ -536,25 +542,8 @@ class MaterialReadinessChecker:
 
     @staticmethod
     def _period_to_date(period_str: str) -> Optional[date]:
-        """Convert period string → date. Reuses logic from validators."""
-        if not period_str or pd.isna(period_str):
-            return None
-        s = str(period_str).strip()
-        try:
-            if 'Week' in s and ' - ' in s:
-                parts = s.split(' - ')
-                week = int(parts[0].replace('Week ', '').strip())
-                year = int(parts[1].strip())
-                return date.fromisocalendar(year, week, 1)
-            from datetime import datetime
-            try:
-                dt = datetime.strptime(f"01 {s}", "%d %b %Y")
-                return dt.date()
-            except ValueError:
-                pass
-        except Exception:
-            pass
-        return None
+        """Convert period string → date. Delegates to production_validators."""
+        return _validators_period_to_date(period_str)
 
     @staticmethod
     def _to_date(value) -> Optional[date]:
