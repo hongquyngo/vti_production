@@ -827,11 +827,10 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
     """
     BOM Lead Time management panel (Phase 2).
 
-    Features:
-    - Read-only overview table with historical stats
-    - Bulk Fill from Historical button
-    - Single BOM lead time editor (add/edit)
-    - Plant management (add)
+    Architecture:
+    - Action buttons → open @st.dialog modals (no inline rendering)
+    - Overview table → @st.fragment (sort changes only rerun table, not page)
+    - Dialog save/cancel → st.rerun() closes dialog + refreshes page
     """
     # Try loading data
     bom_lt_df = pd.DataFrame()
@@ -858,6 +857,11 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
         return
 
     with st.expander("🏭 **BOM Lead Times** — per-BOM management", expanded=False):
+        # Show toast from previous dialog action
+        _toast = st.session_state.pop('_blt_toast', None)
+        if _toast:
+            st.toast(_toast, icon="✅")
+
         st.caption(
             "Lead time per BOM, managed by Production team. "
             "BOMs without a configured lead time use the fallback defaults below."
@@ -871,117 +875,28 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
             ]
             st.caption(f"🏭 Plants: {' · '.join(plant_names)}")
 
-        # ── ACTION BUTTONS ROW ──
+        # ── ACTION BUTTONS → open dialogs ──
         act_cols = st.columns([1, 1, 1, 2])
 
         with act_cols[0]:
-            bulk_fill_clicked = st.button(
+            if st.button(
                 "📥 Bulk Fill from Historical",
                 key="blt_bulk_fill",
-                help="Auto-fill standard lead time for all BOMs using historical avg (rounded up). Only fills BOMs without existing config.",
-            )
+                help="Auto-fill lead times for unconfigured BOMs using historical avg.",
+            ):
+                _bulk_fill_dialog(lead_time_stats_df, bom_lt_df, all_boms_df)
 
         with act_cols[1]:
-            show_editor = st.button(
-                "✏️ Edit BOM Lead Time",
-                key="blt_show_editor",
-            )
+            if st.button("✏️ Edit BOM Lead Time", key="blt_show_editor"):
+                _bom_lt_editor_dialog(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
 
         with act_cols[2]:
-            show_plant_form = st.button(
-                "🏭 Manage Plants",
-                key="blt_show_plant",
-            )
+            if st.button("🏭 Manage Plants", key="blt_show_plant"):
+                _manage_plants_dialog(plants_df)
 
-        # ── BULK FILL EXECUTION ──
-        if bulk_fill_clicked:
-            _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df)
-
-        # ── SINGLE BOM EDITOR ──
-        if show_editor or st.session_state.get('_blt_editor_open'):
-            st.session_state['_blt_editor_open'] = True
-            _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
-
-        # ── PLANT FORM ──
-        if show_plant_form or st.session_state.get('_plant_form_open'):
-            st.session_state['_plant_form_open'] = True
-            _render_plant_form(plants_df)
-
-        # ── OVERVIEW TABLE ──
-        st.markdown("")
+        # ── OVERVIEW TABLE (as @st.fragment — sort doesn't rerun page) ──
         rows = _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historical)
-
-        if rows:
-            df = pd.DataFrame(rows)
-
-            # Keep _blt_id for delete action but don't display it
-            display_df = df.drop(columns=['_blt_id'], errors='ignore')
-
-            # Drop noise columns when no BOM LT configured
-            if not has_bom_lt:
-                drop_cols = [c for c in ['Std LT', 'Min', 'Max', 'Plant', 'Source', 'Effective']
-                             if c in display_df.columns]
-                display_df = display_df.drop(columns=drop_cols)
-
-            # Sort options (Fix #15)
-            sort_options = ['MOs (most used first)', 'BOM Type', 'Unconfigured first']
-            if has_bom_lt:
-                sort_options.append('Source')
-            sort_choice = st.radio(
-                "Sort by:", sort_options, key="blt_overview_sort",
-                horizontal=True, label_visibility="collapsed",
-            )
-
-            if sort_choice == 'BOM Type' and 'Type' in display_df.columns:
-                display_df = display_df.sort_values(
-                    ['Type', 'BOM Code'], ascending=True,
-                ).reset_index(drop=True)
-            elif sort_choice == 'Unconfigured first':
-                # _blt_id is in original df, use it for sort then drop
-                display_df['_sort'] = df['_blt_id'].apply(
-                    lambda x: 0 if pd.isna(x) or x is None else 1
-                )
-                display_df = display_df.sort_values(
-                    ['_sort', 'Type', 'BOM Code'], ascending=True,
-                ).drop(columns=['_sort']).reset_index(drop=True)
-            elif sort_choice == 'Source' and 'Source' in display_df.columns:
-                display_df = display_df.sort_values(
-                    ['Source', 'Type', 'BOM Code'], ascending=True,
-                ).reset_index(drop=True)
-            else:
-                # Default: MOs descending
-                if 'MOs' in display_df.columns:
-                    display_df = display_df.sort_values('MOs', ascending=False).reset_index(drop=True)
-
-            st.dataframe(display_df, hide_index=True, use_container_width=True,
-                         height=min(35 * len(display_df) + 38, 400))
-
-            # Summary
-            configured = sum(1 for r in rows if r.get('_blt_id') is not None)
-            total = len(rows)
-            if configured == total and total > 0:
-                st.success(f"✅ {configured}/{total} BOMs have lead time configured")
-            elif configured > 0:
-                st.info(
-                    f"📊 {configured}/{total} BOMs configured · "
-                    f"**{total - configured}** using fallback defaults"
-                )
-            else:
-                st.warning(
-                    f"⚠️ No BOM-level lead times configured yet — "
-                    f"all {total} BOMs using fallback defaults below. "
-                    f"Set per-BOM lead times for more accurate scheduling."
-                )
-
-            # ── DELETE ACTION (Fix #3) ──
-            configured_rows = [r for r in rows if r.get('_blt_id') is not None]
-            if configured_rows:
-                _render_bom_lt_delete_action(configured_rows)
-        else:
-            st.info(
-                "No BOM lead time data available yet. "
-                "Configure per-BOM lead times or use fallback defaults below."
-            )
+        _bom_lt_overview_table(rows, has_bom_lt)
 
 
 def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historical):
@@ -1078,105 +993,177 @@ def _enrich_with_historical(r: dict, bom_id, lead_time_stats_df):
 
 
 # =============================================================================
-# BOM LEAD TIME — DELETE ACTION (Fix #3)
+# BOM LEAD TIME — OVERVIEW TABLE FRAGMENT
 # =============================================================================
 
-def _render_bom_lt_delete_action(configured_rows: list):
+@st.fragment
+def _bom_lt_overview_table(rows: list, has_bom_lt: bool):
     """
-    Render delete action for configured BOM lead times.
+    Overview table rendered as @st.fragment — sort radio changes only rerun
+    this fragment, not the full page. Delete button opens a dialog.
+    """
+    if not rows:
+        st.info(
+            "No BOM lead time data available yet. "
+            "Configure per-BOM lead times or use fallback defaults below."
+        )
+        return
 
-    Shows a selectbox of configured BOMs + Delete button inside a collapsed expander.
-    Uses soft-delete (is_active=0) via data_loader.delete_bom_lead_time().
-    """
-    with st.expander("🗑️ **Remove BOM Lead Time**", expanded=False):
+    df = pd.DataFrame(rows)
+    display_df = df.drop(columns=['_blt_id'], errors='ignore')
+
+    # Drop noise columns when no BOM LT configured
+    if not has_bom_lt:
+        drop_cols = [c for c in ['Std LT', 'Min', 'Max', 'Plant', 'Source', 'Effective']
+                     if c in display_df.columns]
+        display_df = display_df.drop(columns=drop_cols)
+
+    # Sort options — interaction only reruns this fragment
+    sort_options = ['MOs (most used first)', 'BOM Type', 'Unconfigured first']
+    if has_bom_lt:
+        sort_options.append('Source')
+    sort_choice = st.radio(
+        "Sort by:", sort_options, key="blt_overview_sort",
+        horizontal=True, label_visibility="collapsed",
+    )
+
+    if sort_choice == 'BOM Type' and 'Type' in display_df.columns:
+        display_df = display_df.sort_values(
+            ['Type', 'BOM Code'], ascending=True,
+        ).reset_index(drop=True)
+    elif sort_choice == 'Unconfigured first':
+        display_df['_sort'] = df['_blt_id'].apply(
+            lambda x: 0 if pd.isna(x) or x is None else 1
+        )
+        display_df = display_df.sort_values(
+            ['_sort', 'Type', 'BOM Code'], ascending=True,
+        ).drop(columns=['_sort']).reset_index(drop=True)
+    elif sort_choice == 'Source' and 'Source' in display_df.columns:
+        display_df = display_df.sort_values(
+            ['Source', 'Type', 'BOM Code'], ascending=True,
+        ).reset_index(drop=True)
+    else:
+        if 'MOs' in display_df.columns:
+            display_df = display_df.sort_values('MOs', ascending=False).reset_index(drop=True)
+
+    st.dataframe(display_df, hide_index=True, use_container_width=True,
+                 height=min(35 * len(display_df) + 38, 400))
+
+    # Summary
+    configured = sum(1 for r in rows if r.get('_blt_id') is not None)
+    total = len(rows)
+    if configured == total and total > 0:
+        st.success(f"✅ {configured}/{total} BOMs have lead time configured")
+    elif configured > 0:
+        st.info(
+            f"📊 {configured}/{total} BOMs configured · "
+            f"**{total - configured}** using fallback defaults"
+        )
+    else:
+        st.warning(
+            f"⚠️ No BOM-level lead times configured yet — "
+            f"all {total} BOMs using fallback defaults below. "
+            f"Set per-BOM lead times for more accurate scheduling."
+        )
+
+    # Delete button → opens dialog
+    configured_rows = [r for r in rows if r.get('_blt_id') is not None]
+    if configured_rows:
+        if st.button("🗑️ Remove BOM Lead Time", key="blt_show_delete"):
+            _delete_bom_lt_dialog(configured_rows)
+
+
+# =============================================================================
+# BOM LEAD TIME — DELETE DIALOG
+# =============================================================================
+
+@st.dialog("Remove BOM Lead Time")
+def _delete_bom_lt_dialog(configured_rows: list):
+    """Dialog to select and delete a BOM lead time, or undo bulk fill."""
+    st.caption(
+        "Remove a configured BOM lead time. "
+        "The BOM will fall back to the default lead time setting below."
+    )
+
+    options = {}
+    for r in configured_rows:
+        blt_id = r.get('_blt_id')
+        if blt_id is None:
+            continue
+        label = (
+            f"{r.get('BOM Code', '')} — {r.get('Product', '')} "
+            f"({r.get('Type', '')}, {r.get('Std LT', '')}, "
+            f"Plant: {r.get('Plant', 'Global')})"
+        )
+        options[label] = blt_id
+
+    if not options:
+        st.info("No configured BOM lead times to remove.")
+        return
+
+    selected_label = st.selectbox(
+        "Select BOM lead time to remove",
+        options=list(options.keys()),
+        key="dlg_del_select",
+    )
+    selected_blt_id = options.get(selected_label)
+
+    del_cols = st.columns([1, 1, 2])
+    with del_cols[0]:
+        if st.button("🗑️ Delete", key="dlg_del_confirm", type="primary"):
+            if selected_blt_id is not None:
+                try:
+                    from .production_data_loader import get_production_data_loader
+                    loader = get_production_data_loader()
+                    ok = loader.delete_bom_lead_time(selected_blt_id)
+                    if ok:
+                        st.session_state['_blt_toast'] = f"Removed BOM lead time (id={selected_blt_id})"
+                        st.rerun()
+                    else:
+                        st.error("Delete failed — row not found or already deleted.")
+                except Exception as e:
+                    st.error(f"Delete failed: {e}")
+    with del_cols[1]:
+        if st.button("Cancel", key="dlg_del_cancel"):
+            st.rerun()
+
+    # Undo Bulk Fill section
+    bulk_filled = [r for r in configured_rows if r.get('Source') == 'HISTORICAL_AVG']
+    if bulk_filled:
+        st.divider()
         st.caption(
-            "Remove a configured BOM lead time. "
-            "The BOM will fall back to the default lead time setting below."
+            f"**Undo Bulk Fill:** {len(bulk_filled)} BOM lead time(s) were auto-filled. "
+            f"Clearing them reverts all to fallback defaults."
         )
+        if st.button(
+            f"🗑️ Clear All Bulk-Filled ({len(bulk_filled)})",
+            key="dlg_undo_bulk",
+        ):
+            try:
+                from .production_data_loader import get_production_data_loader
+                loader = get_production_data_loader()
+                count, err = loader.bulk_delete_bom_lead_times_by_source('HISTORICAL_AVG')
+                if err:
+                    st.error(f"Failed: {err}")
+                elif count > 0:
+                    st.session_state['_blt_toast'] = f"Cleared {count} bulk-filled BOM lead times"
+                    st.rerun()
+                else:
+                    st.info("No bulk-filled rows found to clear.")
+            except Exception as e:
+                st.error(f"Clear failed: {e}")
 
-        # Build options from configured rows
-        options = {}
-        for r in configured_rows:
-            blt_id = r.get('_blt_id')
-            if blt_id is None:
-                continue
-            label = (
-                f"{r.get('BOM Code', '')} — {r.get('Product', '')} "
-                f"({r.get('Type', '')}, {r.get('Std LT', '')}, "
-                f"Plant: {r.get('Plant', 'Global')})"
-            )
-            options[label] = blt_id
-
-        if not options:
-            st.info("No configured BOM lead times to remove.")
-            return
-
-        selected_label = st.selectbox(
-            "Select BOM lead time to remove",
-            options=list(options.keys()),
-            key="blt_delete_select",
-        )
-        selected_blt_id = options.get(selected_label)
-
-        del_cols = st.columns([1, 1, 3])
-        with del_cols[0]:
-            if st.button("🗑️ Delete", key="blt_delete_confirm", type="primary"):
-                if selected_blt_id is not None:
-                    try:
-                        from .production_data_loader import get_production_data_loader
-                        loader = get_production_data_loader()
-                        ok = loader.delete_bom_lead_time(selected_blt_id)
-                        if ok:
-                            st.success(f"✅ Removed BOM lead time (id={selected_blt_id})")
-                            st.rerun()
-                        else:
-                            st.error("Delete failed — row not found or already deleted.")
-                    except Exception as e:
-                        st.error(f"Delete failed: {e}")
-
-        # ── Undo Bulk Fill (Fix #8) ──
-        bulk_filled = [r for r in configured_rows if r.get('Source') == 'HISTORICAL_AVG']
-        if bulk_filled:
-            st.divider()
-            st.caption(
-                f"**Undo Bulk Fill:** {len(bulk_filled)} BOM lead time(s) were auto-filled from historical data. "
-                f"Clearing them will revert all to fallback defaults."
-            )
-            undo_cols = st.columns([1, 3])
-            with undo_cols[0]:
-                if st.button(
-                    f"🗑️ Clear All Bulk-Filled ({len(bulk_filled)})",
-                    key="blt_undo_bulk",
-                ):
-                    try:
-                        from .production_data_loader import get_production_data_loader
-                        loader = get_production_data_loader()
-                        count, err = loader.bulk_delete_bom_lead_times_by_source('HISTORICAL_AVG')
-                        if err:
-                            st.error(f"Failed: {err}")
-                        elif count > 0:
-                            st.success(f"✅ Cleared {count} bulk-filled BOM lead times.")
-                            st.rerun()
-                        else:
-                            st.info("No bulk-filled rows found to clear.")
-                    except Exception as e:
-                        st.error(f"Clear failed: {e}")
 
 
 # =============================================================================
-# BULK FILL FROM HISTORICAL
+# BULK FILL DIALOG
 # =============================================================================
 
-def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
+@st.dialog("Bulk Fill from Historical", width="large")
+def _bulk_fill_dialog(lead_time_stats_df, bom_lt_df, all_boms_df):
     """
-    Auto-fill BOM lead times from historical averages.
-
-    Logic per BOM:
-    - standard_lead_time_days = ceil(avg_lead_time_days), minimum 1d
-    - minimum_lead_time_days = max(1, min_lead_time_days from history)
-    - maximum_lead_time_days = max_lead_time_days from history
-    - Only fills BOMs that don't already have a configured lead time
-    - source = 'HISTORICAL_AVG'
+    Dialog: auto-fill BOM lead times from historical averages.
+    Only fills BOMs without existing config. Preview → Confirm.
     """
     import math
 
@@ -1220,11 +1207,9 @@ def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
         std_lt = max(1, math.ceil(float(avg)))
         min_lt = max(1, int(h_min)) if h_min is not None and not pd.isna(h_min) else None
         max_lt = int(h_max) if h_max is not None and not pd.isna(h_max) else None
-        # Ensure std >= min
         if min_lt and std_lt < min_lt:
             std_lt = min_lt
 
-        bom_code = row.get('bom_code', '')
         rows_to_save.append({
             'bom_header_id': bom_id,
             'standard_lead_time_days': std_lt,
@@ -1240,8 +1225,7 @@ def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
         elif skipped_already > 0 and skipped_no_data > 0:
             st.info(
                 f"All BOMs with usable data already configured ({skipped_already} BOMs). "
-                f"{skipped_no_data} BOM(s) skipped — have MOs but none COMPLETED yet "
-                f"(need at least 1 completed MO for historical average)."
+                f"{skipped_no_data} BOM(s) skipped — have MOs but none COMPLETED yet."
             )
         elif skipped_no_data > 0:
             st.warning(
@@ -1254,13 +1238,12 @@ def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
             st.warning("No historical production data found. Run production MOs first or set lead times manually.")
         return
 
-    # Confirm + execute
+    # Preview
     st.markdown(
-        f"**Bulk Fill Preview:** {len(rows_to_save)} BOMs to fill "
+        f"**{len(rows_to_save)} BOMs to fill** "
         f"(skipped {skipped_already} already configured, {skipped_no_data} no data)"
     )
 
-    # Show preview
     preview = pd.DataFrame([
         {
             'BOM ID': r['bom_header_id'],
@@ -1275,9 +1258,10 @@ def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
     if len(rows_to_save) > 20:
         st.caption(f"Showing 20 of {len(rows_to_save)} rows")
 
-    confirm_cols = st.columns([1, 3])
-    with confirm_cols[0]:
-        if st.button("✅ Confirm Bulk Fill", key="blt_bulk_confirm", type="primary"):
+    # Confirm / Cancel
+    cols = st.columns([1, 1, 2])
+    with cols[0]:
+        if st.button("✅ Confirm Bulk Fill", key="dlg_bulk_confirm", type="primary"):
             try:
                 from .production_data_loader import get_production_data_loader
                 loader = get_production_data_loader()
@@ -1285,43 +1269,29 @@ def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
                     rows_to_save, user_id=_get_current_user_id(),
                 )
                 if success > 0:
-                    st.success(f"✅ Saved {success}/{len(rows_to_save)} BOM lead times.")
+                    msg = f"Saved {success}/{len(rows_to_save)} BOM lead times"
                     if errors:
-                        st.warning(f"⚠️ {len(errors)} errors: {'; '.join(errors[:3])}")
+                        msg += f" ({len(errors)} errors)"
+                    st.session_state['_blt_toast'] = msg
                     st.rerun()
                 else:
                     st.error(f"Failed to save. Errors: {'; '.join(errors[:5])}")
             except Exception as e:
                 st.error(f"Bulk fill failed: {e}")
+    with cols[1]:
+        if st.button("Cancel", key="dlg_bulk_cancel"):
+            st.rerun()
 
 
 # =============================================================================
-# SINGLE BOM LEAD TIME EDITOR
+# BOM LEAD TIME EDITOR DIALOG
 # =============================================================================
 
-# Widget keys used by the editor — cleared on close to prevent stale state (Fix #7)
-_BLT_EDITOR_KEYS = [
-    'blt_editor_bom_select', 'blt_editor_plant_select',
-    'blt_ed_std', 'blt_ed_min', 'blt_ed_max', 'blt_ed_notes',
-]
-
-
-def _close_bom_lt_editor():
-    """Close editor and clear widget keys to prevent stale state (Fix #7)."""
-    st.session_state['_blt_editor_open'] = False
-    for key in _BLT_EDITOR_KEYS:
-        st.session_state.pop(key, None)
-    st.rerun()
-
-
-def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df):
-    """Inline form to add/edit a single BOM lead time."""
-    st.markdown("##### ✏️ Edit BOM Lead Time")
-
+@st.dialog("Edit BOM Lead Time", width="large")
+def _bom_lt_editor_dialog(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df):
+    """Dialog to add or edit a single BOM lead time."""
     if all_boms_df.empty:
         st.warning("No active BOMs found.")
-        if st.button("Close", key="blt_editor_close"):
-            _close_bom_lt_editor()
         return
 
     # BOM selector
@@ -1332,11 +1302,11 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
     selected_label = st.selectbox(
         "Select BOM",
         options=list(bom_options.keys()),
-        key="blt_editor_bom_select",
+        key="dlg_ed_bom_select",
     )
     selected_bom_id = bom_options.get(selected_label) if selected_label else None
 
-    # Plant selector (optional)
+    # Plant selector
     plant_options = {'Global (all plants)': None}
     if not plants_df.empty:
         for _, row in plants_df.iterrows():
@@ -1344,7 +1314,7 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
     selected_plant_label = st.selectbox(
         "Plant",
         options=list(plant_options.keys()),
-        key="blt_editor_plant_select",
+        key="dlg_ed_plant_select",
     )
     selected_plant_id = plant_options.get(selected_plant_label)
 
@@ -1383,41 +1353,37 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
     with ed_cols[0]:
         std_lt = st.number_input(
             "Standard LT (days)", min_value=1, max_value=365,
-            value=max(1, prefill_std), key="blt_ed_std",
+            value=max(1, prefill_std), key="dlg_ed_std",
             help="Safest estimate. Used for backward scheduling.",
         )
     with ed_cols[1]:
         min_lt = st.number_input(
             "Min LT (days)", min_value=0, max_value=365,
-            value=prefill_min, key="blt_ed_min",
+            value=prefill_min, key="dlg_ed_min",
             help="Best-case lead time. 0 = not set.",
         )
     with ed_cols[2]:
         max_lt = st.number_input(
             "Max LT (days)", min_value=0, max_value=365,
-            value=prefill_max, key="blt_ed_max",
+            value=prefill_max, key="dlg_ed_max",
             help="Worst-case lead time. 0 = not set.",
         )
 
-    notes = st.text_input("Notes", value="", key="blt_ed_notes",
-                          placeholder="Reason: new machine, process change, etc.")
-
     # Validation warnings (Fix #9)
-    _validation_ok = True
     if min_lt > 0 and std_lt < min_lt:
         st.warning(f"⚠️ Standard LT ({std_lt}d) is less than Min LT ({min_lt}d) — standard should be ≥ min.")
-        _validation_ok = False
     if max_lt > 0 and std_lt > max_lt:
         st.warning(f"⚠️ Standard LT ({std_lt}d) is greater than Max LT ({max_lt}d) — standard should be ≤ max.")
-        _validation_ok = False
     if min_lt > 0 and max_lt > 0 and min_lt > max_lt:
         st.warning(f"⚠️ Min LT ({min_lt}d) is greater than Max LT ({max_lt}d).")
-        _validation_ok = False
 
-    # Save + Close buttons
-    btn_cols = st.columns([1, 1, 3])
-    with btn_cols[0]:
-        if st.button("💾 Save", key="blt_ed_save", type="primary"):
+    notes = st.text_input("Notes", value="", key="dlg_ed_notes",
+                          placeholder="Reason: new machine, process change, etc.")
+
+    # Save + Cancel
+    cols = st.columns([1, 1, 2])
+    with cols[0]:
+        if st.button("💾 Save", key="dlg_ed_save", type="primary"):
             if selected_bom_id is None:
                 st.error("Select a BOM first.")
             else:
@@ -1435,33 +1401,27 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
                         user_id=_get_current_user_id(),
                     )
                     if ok:
-                        st.success(f"✅ Saved lead time for {selected_label}")
-                        _close_bom_lt_editor()
+                        st.session_state['_blt_toast'] = f"Saved lead time for {selected_label}"
+                        st.rerun()
                     else:
                         st.error("Save failed — check logs.")
                 except Exception as e:
                     st.error(f"Save failed: {e}")
-
-    with btn_cols[1]:
-        if st.button("Cancel", key="blt_ed_cancel"):
-            _close_bom_lt_editor()
-
-    st.divider()
+    with cols[1]:
+        if st.button("Cancel", key="dlg_ed_cancel"):
+            st.rerun()
 
 
 # =============================================================================
-# PLANT FORM
+# PLANT MANAGEMENT DIALOG
 # =============================================================================
 
-def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
+@st.dialog("Manage Plants", width="large")
+def _manage_plants_dialog(plants_df: Optional[pd.DataFrame] = None):
     """
-    Plant management panel — list existing + add new + edit existing.
-
-    Fix #4: Add edit capability for existing plants.
-    Fix #6: Load companies dynamically instead of hardcoding entity_id=23.
+    Dialog for plant management — list existing + add new + edit existing.
+    Dynamic company dropdown (Fix #6). Edit support (Fix #4).
     """
-    st.markdown("##### 🏭 Manage Production Plants")
-
     # ── Load companies for entity dropdown (Fix #6) ──
     entity_options = {}
     try:
@@ -1479,11 +1439,10 @@ def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
     except Exception:
         pass
 
-    # Fallback if companies query fails
     if not entity_options:
         entity_options = {'Vietape VN (entity_id=23)': 23}
 
-    # ── Existing plants table (Fix #4) ──
+    # ── Existing plants table ──
     if plants_df is not None and not plants_df.empty:
         st.markdown("**Existing plants:**")
         display_cols = ['plant_code', 'plant_name', 'plant_type', 'entity_name', 'address']
@@ -1496,7 +1455,7 @@ def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
 
     # ── Mode: Add new vs Edit existing (Fix #4) ──
     mode_options = ['➕ Add New Plant']
-    edit_plant_map = {}  # label → plant row dict
+    edit_plant_map = {}
     if plants_df is not None and not plants_df.empty:
         for _, row in plants_df.iterrows():
             label = f"✏️ Edit: {row['plant_code']} — {row['plant_name']}"
@@ -1504,7 +1463,7 @@ def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
             edit_plant_map[label] = row.to_dict()
 
     selected_mode = st.radio(
-        "Action", mode_options, key="pf_mode", horizontal=True,
+        "Action", mode_options, key="dlg_pf_mode", horizontal=True,
     )
 
     is_edit = selected_mode.startswith('✏️')
@@ -1514,15 +1473,15 @@ def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
     pf_cols = st.columns(2)
     with pf_cols[0]:
         plant_code = st.text_input(
-            "Plant Code", key="pf_code",
+            "Plant Code", key="dlg_pf_code",
             value=edit_row.get('plant_code', ''),
             placeholder="PLT-VN-01",
             help="Unique code. Format: PLT-[COUNTRY]-[NUM]",
-            disabled=is_edit,  # code is identity — don't allow change on edit
+            disabled=is_edit,
         )
     with pf_cols[1]:
         plant_name = st.text_input(
-            "Plant Name", key="pf_name",
+            "Plant Name", key="dlg_pf_name",
             value=edit_row.get('plant_name', ''),
             placeholder="Xưởng Cắt Yên Mỹ",
         )
@@ -1533,13 +1492,11 @@ def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
         current_type = edit_row.get('plant_type', 'MIXED')
         type_idx = type_options.index(current_type) if current_type in type_options else 0
         plant_type = st.selectbox(
-            "Type", type_options, index=type_idx, key="pf_type",
+            "Type", type_options, index=type_idx, key="dlg_pf_type",
         )
     with pf_cols2[1]:
-        # Dynamic entity dropdown (Fix #6)
         entity_labels = list(entity_options.keys())
         current_entity_id = edit_row.get('entity_id', 23)
-        # Find matching label for current entity_id
         default_idx = 0
         for i, (lbl, eid) in enumerate(entity_options.items()):
             if eid == current_entity_id:
@@ -1547,29 +1504,28 @@ def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
                 break
         selected_entity_label = st.selectbox(
             "Company (Entity)",
-            entity_labels, index=default_idx, key="pf_entity",
+            entity_labels, index=default_idx, key="dlg_pf_entity",
             help="Pháp nhân sở hữu nhà máy",
         )
         entity_id = entity_options.get(selected_entity_label, 23)
-
     with pf_cols2[2]:
         address = st.text_input(
-            "Address", key="pf_address",
+            "Address", key="dlg_pf_address",
             value=edit_row.get('address', '') or '',
             placeholder="KCN Yên Mỹ, Hưng Yên",
         )
 
     notes = st.text_input(
-        "Notes", key="pf_notes",
+        "Notes", key="dlg_pf_notes",
         value=edit_row.get('notes', '') or '',
         placeholder="Năng lực, ca làm việc, thiết bị đặc biệt",
     )
 
-    # ── Save + Close buttons ──
-    btn_cols = st.columns([1, 1, 3])
-    with btn_cols[0]:
+    # ── Save + Cancel ──
+    cols = st.columns([1, 1, 2])
+    with cols[0]:
         save_label = "💾 Update Plant" if is_edit else "💾 Save Plant"
-        if st.button(save_label, key="pf_save", type="primary"):
+        if st.button(save_label, key="dlg_pf_save", type="primary"):
             if not plant_code or not plant_name:
                 st.error("Plant code and name are required.")
             else:
@@ -1588,8 +1544,7 @@ def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
                     )
                     if result_id:
                         action = "Updated" if is_edit else "Created"
-                        st.success(f"✅ {action} plant: {plant_code} (ID: {result_id})")
-                        st.session_state['_plant_form_open'] = False
+                        st.session_state['_blt_toast'] = f"{action} plant: {plant_code} (ID: {result_id})"
                         st.rerun()
                     else:
                         st.error("Failed to save plant — check logs.")
@@ -1599,14 +1554,9 @@ def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
                         st.error(f"Plant code '{plant_code}' already exists. Choose a different code.")
                     else:
                         st.error(f"Failed: {e}")
-
-    with btn_cols[1]:
-        if st.button("Cancel", key="pf_cancel"):
-            st.session_state['_plant_form_open'] = False
+    with cols[1]:
+        if st.button("Cancel", key="dlg_pf_cancel"):
             st.rerun()
-
-    st.divider()
-
 
 # =============================================================================
 # KPI CARDS
