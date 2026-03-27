@@ -88,6 +88,77 @@ def _styled_dataframe(
 
 
 # =============================================================================
+# BOM / PRODUCT DISPLAY HELPERS — consistent across all dialogs
+# =============================================================================
+
+def _format_bom_label(row, style: str = 'full') -> str:
+    """
+    Format BOM label for selectbox/dropdown display.
+
+    Styles:
+      'full'    → "BOM-202511-001 · VTI006000156 · Băng keo OPP 48mm (Vietape) · CUTTING · batch 1000"
+      'compact' → "BOM-202511-001 — VTI006000156 · Băng keo OPP 48mm (Vietape)"
+      'short'   → "VTI006000156 · Băng keo OPP 48mm"
+    """
+    bom_code = row.get('bom_code', '') or ''
+    pt_code = row.get('pt_code', '') or ''
+    product_name = (row.get('product_name', '') or '')[:40]
+    package_size = row.get('package_size', '') or ''
+    brand = row.get('brand', '') or ''
+    bom_type = row.get('bom_type', '') or ''
+    output_qty = row.get('output_qty', 0) or 0
+
+    # Build product description: "Tên SP 48mm x 50m (Brand)"
+    product_desc = product_name
+    if package_size:
+        product_desc = f"{product_name} {package_size}"
+    brand_suffix = f" ({brand})" if brand else ""
+
+    if style == 'full':
+        parts = [bom_code, pt_code]
+        if product_desc:
+            parts.append(f"{product_desc}{brand_suffix}")
+        parts.append(bom_type)
+        if output_qty and float(output_qty) > 0:
+            parts.append(f"batch {int(float(output_qty)):,}")
+        return ' · '.join(parts)
+
+    elif style == 'compact':
+        parts = [bom_code, pt_code]
+        if product_desc:
+            parts.append(f"{product_desc}{brand_suffix}")
+        return ' — '.join(parts[:2]) + (f' · {parts[2]}' if len(parts) > 2 else '')
+
+    else:  # 'short'
+        if product_desc:
+            return f"{pt_code} · {product_desc}{brand_suffix}"
+        return pt_code
+
+
+def _format_product_display(row) -> str:
+    """
+    Format product column for overview table.
+
+    Returns: "VTI006000156 · Băng keo OPP 48mm (Vietape)"
+    Falls back to pt_code only if no extra info available.
+    """
+    pt_code = row.get('pt_code', row.get('Product', '')) or ''
+    product_name = (row.get('product_name', '') or '')[:35]
+    package_size = row.get('package_size', '') or ''
+    brand = row.get('brand', '') or ''
+
+    if not product_name:
+        return pt_code
+
+    desc = product_name
+    if package_size:
+        desc = f"{product_name} {package_size}"
+    if brand:
+        desc = f"{desc} ({brand})"
+    return f"{pt_code} · {desc}"
+
+
+# =============================================================================
 # PIPELINE STATUS BAR (Phase B)
 # =============================================================================
 
@@ -895,13 +966,49 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
                 _manage_plants_dialog(plants_df)
 
         # ── OVERVIEW TABLE (as @st.fragment — sort doesn't rerun page) ──
-        rows = _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historical)
+        rows = _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historical,
+                                    all_boms_df=all_boms_df)
         _bom_lt_overview_table(rows, has_bom_lt)
 
 
-def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historical):
-    """Build rows for the BOM LT overview table."""
+def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historical,
+                         all_boms_df=None):
+    """Build rows for the BOM LT overview table.
+
+    Uses all_boms_df as enrichment source for product_name, package_size, brand.
+    """
     rows = []
+
+    # Build product info lookup from all_boms_df: bom_header_id → {product_name, package_size, brand, ...}
+    product_lookup = {}
+    if all_boms_df is not None and not all_boms_df.empty:
+        for _, row in all_boms_df.iterrows():
+            bom_id = row.get('bom_header_id')
+            if bom_id is not None and not pd.isna(bom_id):
+                product_lookup[int(bom_id)] = {
+                    'product_name': row.get('product_name', '') or '',
+                    'package_size': row.get('package_size', '') or '',
+                    'brand': row.get('brand', '') or '',
+                    'standard_uom': row.get('standard_uom', '') or '',
+                    'output_qty': row.get('output_qty', 0) or 0,
+                }
+
+    def _product_display(bom_id, pt_code, fallback_name=''):
+        """Build enriched product display from lookup."""
+        info = product_lookup.get(int(bom_id) if bom_id is not None and not pd.isna(bom_id) else -1, {})
+        name = info.get('product_name', fallback_name) or fallback_name
+        pkg = info.get('package_size', '')
+        brand = info.get('brand', '')
+
+        if not name:
+            return str(pt_code or '')
+
+        desc = f"{pt_code} · {name[:30]}"
+        if pkg:
+            desc += f" {pkg}"
+        if brand:
+            desc += f" ({brand})"
+        return desc
 
     # Track which bom_header_ids have configured LT
     configured_bom_ids = set()
@@ -915,7 +1022,7 @@ def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historic
                 '_blt_id': int(row['bom_lead_time_id']) if pd.notna(row.get('bom_lead_time_id')) else None,
                 'BOM Code': row.get('bom_code', ''),
                 'Type': row.get('bom_type', ''),
-                'Product': row.get('pt_code', ''),
+                'Product': _product_display(bom_id, row.get('pt_code', ''), row.get('product_name', '')),
                 'Std LT': f"{int(row['standard_lead_time_days'])}d",
                 'Min': f"{int(row['minimum_lead_time_days'])}d" if pd.notna(row.get('minimum_lead_time_days')) else '—',
                 'Max': f"{int(row['maximum_lead_time_days'])}d" if pd.notna(row.get('maximum_lead_time_days')) else '—',
@@ -947,7 +1054,7 @@ def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historic
                 '_blt_id': None,
                 'BOM Code': row.get('bom_code', ''),
                 'Type': row.get('bom_type', ''),
-                'Product': row.get('pt_code', ''),
+                'Product': _product_display(bom_id, row.get('pt_code', '')),
             }
             if has_bom_lt:
                 # Mixed mode: some configured, some not
@@ -1175,6 +1282,21 @@ def _bulk_fill_dialog(lead_time_stats_df, bom_lt_df, all_boms_df):
         st.warning("Historical data missing bom_header_id — recreate production_lead_time_stats_view.")
         return
 
+    # Build product lookup from all_boms_df for enriched display
+    product_lookup = {}
+    if all_boms_df is not None and not all_boms_df.empty:
+        for _, r in all_boms_df.iterrows():
+            bid = r.get('bom_header_id')
+            if bid is not None and not pd.isna(bid):
+                product_lookup[int(bid)] = {
+                    'bom_code': r.get('bom_code', ''),
+                    'pt_code': r.get('pt_code', ''),
+                    'product_name': (r.get('product_name', '') or '')[:35],
+                    'package_size': r.get('package_size', '') or '',
+                    'brand': r.get('brand', '') or '',
+                    'bom_type': r.get('bom_type', ''),
+                }
+
     # Find BOMs already configured
     already_configured = set()
     if not bom_lt_df.empty:
@@ -1217,6 +1339,14 @@ def _bulk_fill_dialog(lead_time_stats_df, bom_lt_df, all_boms_df):
             'maximum_lead_time_days': max_lt,
             'source': 'HISTORICAL_AVG',
             'notes': f"Bulk filled from {int(mos)} completed MOs (avg {float(avg):.1f}d)",
+            # Display-only fields (not sent to DB)
+            '_bom_code': row.get('bom_code', '') or product_lookup.get(bom_id, {}).get('bom_code', ''),
+            '_pt_code': row.get('pt_code', '') or product_lookup.get(bom_id, {}).get('pt_code', ''),
+            '_product_name': product_lookup.get(bom_id, {}).get('product_name', ''),
+            '_package_size': product_lookup.get(bom_id, {}).get('package_size', ''),
+            '_brand': product_lookup.get(bom_id, {}).get('brand', ''),
+            '_bom_type': row.get('bom_type', '') or product_lookup.get(bom_id, {}).get('bom_type', ''),
+            '_mos': int(mos) if not pd.isna(mos) else 0,
         })
 
     if not rows_to_save:
@@ -1246,10 +1376,17 @@ def _bulk_fill_dialog(lead_time_stats_df, bom_lt_df, all_boms_df):
 
     preview = pd.DataFrame([
         {
-            'BOM ID': r['bom_header_id'],
+            'BOM Code': r.get('_bom_code', ''),
+            'Type': r.get('_bom_type', ''),
+            'Product': (
+                f"{r.get('_pt_code', '')} · {r.get('_product_name', '')}"
+                + (f" {r.get('_package_size', '')}" if r.get('_package_size') else '')
+                + (f" ({r.get('_brand', '')})" if r.get('_brand') else '')
+            ).strip() if r.get('_product_name') else r.get('_pt_code', ''),
             'Std LT': f"{r['standard_lead_time_days']}d",
             'Min': f"{r['minimum_lead_time_days']}d" if r.get('minimum_lead_time_days') else '—',
             'Max': f"{r['maximum_lead_time_days']}d" if r.get('maximum_lead_time_days') else '—',
+            'MOs': r.get('_mos', 0),
         }
         for r in rows_to_save[:20]
     ])
@@ -1294,17 +1431,37 @@ def _bom_lt_editor_dialog(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
         st.warning("No active BOMs found.")
         return
 
-    # BOM selector
-    bom_options = {
-        f"{row['bom_code']} — {row['pt_code']} ({row['bom_type']})": int(row['bom_header_id'])
-        for _, row in all_boms_df.iterrows()
-    }
+    # BOM selector — full product info for user-friendly selection
+    bom_options = {}
+    bom_details = {}  # store extra info for display after selection
+    for _, row in all_boms_df.iterrows():
+        label = _format_bom_label(row, style='full')
+        bom_id = int(row['bom_header_id'])
+        bom_options[label] = bom_id
+        bom_details[bom_id] = row.to_dict()
+
     selected_label = st.selectbox(
         "Select BOM",
         options=list(bom_options.keys()),
         key="dlg_ed_bom_select",
     )
     selected_bom_id = bom_options.get(selected_label) if selected_label else None
+
+    # Show selected BOM details as context
+    if selected_bom_id and selected_bom_id in bom_details:
+        detail = bom_details[selected_bom_id]
+        info_parts = []
+        if detail.get('product_name'):
+            info_parts.append(f"**{detail['product_name']}**")
+        if detail.get('package_size'):
+            info_parts.append(detail['package_size'])
+        if detail.get('brand'):
+            info_parts.append(f"Brand: {detail['brand']}")
+        if detail.get('output_qty') and float(detail['output_qty']) > 0:
+            uom = detail.get('standard_uom', '')
+            info_parts.append(f"Batch: {int(float(detail['output_qty'])):,} {uom}")
+        if info_parts:
+            st.caption(' · '.join(info_parts))
 
     # Plant selector
     plant_options = {'Global (all plants)': None}

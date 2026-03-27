@@ -671,7 +671,11 @@ class ProductionDataLoader:
             return 0, str(e)
 
     def load_all_active_boms(self) -> pd.DataFrame:
-        """Load all ACTIVE BOMs for the BOM lead time editor dropdown."""
+        """Load all ACTIVE BOMs for the BOM lead time editor dropdown.
+
+        Returns enriched product info: pt_code, product_name, package_size,
+        standard_uom, brand — for user-friendly display in dialogs and tables.
+        """
         self._ensure_connection()
 
         query = """
@@ -682,6 +686,41 @@ class ProductionDataLoader:
             bh.product_id,
             p.pt_code,
             p.name AS product_name,
+            COALESCE(p.package_size, '') AS package_size,
+            COALESCE(p.standard_uom, '') AS standard_uom,
+            COALESCE(b.name, '') AS brand,
+            bh.output_qty,
+            bh.status
+        FROM bom_headers bh
+        JOIN products p ON bh.product_id = p.id
+        LEFT JOIN brands b ON p.brand_id = b.id
+        WHERE bh.delete_flag = 0
+          AND bh.status = 'ACTIVE'
+        ORDER BY bh.bom_type, bh.bom_code
+        """
+        try:
+            return pd.read_sql(query, self._engine)
+        except Exception as e:
+            # Fallback: brands table or brand_id column may not exist
+            if 'brand_id' in str(e) or 'brands' in str(e).lower():
+                logger.warning("brands table/column not found — loading BOMs without brand")
+                return self._load_all_active_boms_fallback()
+            logger.error(f"Failed to load active BOMs: {e}")
+            return pd.DataFrame()
+
+    def _load_all_active_boms_fallback(self) -> pd.DataFrame:
+        """Fallback query without brand JOIN."""
+        query = """
+        SELECT
+            bh.id AS bom_header_id,
+            bh.bom_code,
+            bh.bom_type,
+            bh.product_id,
+            p.pt_code,
+            p.name AS product_name,
+            COALESCE(p.package_size, '') AS package_size,
+            COALESCE(p.standard_uom, '') AS standard_uom,
+            '' AS brand,
             bh.output_qty,
             bh.status
         FROM bom_headers bh
@@ -693,7 +732,7 @@ class ProductionDataLoader:
         try:
             return pd.read_sql(query, self._engine)
         except Exception as e:
-            logger.error(f"Failed to load active BOMs: {e}")
+            logger.error(f"Fallback load active BOMs also failed: {e}")
             return pd.DataFrame()
 
     # =========================================================================
