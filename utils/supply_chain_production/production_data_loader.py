@@ -202,7 +202,18 @@ class ProductionDataLoader:
         bom_types: Optional[List[str]] = None,
         product_ids: Optional[Tuple[int, ...]] = None,
     ) -> pd.DataFrame:
-        """Fallback query for old view without bom_header_id columns."""
+        """Fallback query for old view without bom_header_id columns.
+
+        DEPRECATED: This exists only for backward compat if migration
+        20260327_01_bom_lead_times.sql has not been applied. The migration
+        recreates production_lead_time_stats_view with bom_header_id.
+        Once migration is confirmed on all environments, this method
+        and the fallback logic in load_lead_time_stats() can be removed.
+        """
+        logger.warning(
+            "Using LEGACY lead time stats query — migration 20260327_01 "
+            "may not be deployed. BOM-level lead time features will be limited."
+        )
         query = """
         SELECT
             bom_type, product_id, pt_code,
@@ -632,6 +643,32 @@ class ProductionDataLoader:
         except Exception as e:
             logger.error(f"Failed to delete BOM lead time {bom_lead_time_id}: {e}")
             return False
+
+    def bulk_delete_bom_lead_times_by_source(
+        self,
+        source: str = 'HISTORICAL_AVG',
+    ) -> Tuple[int, Optional[str]]:
+        """
+        Soft-delete all BOM lead time rows with a given source (Fix #8: undo Bulk Fill).
+
+        Returns: (count_deleted, error_message_or_None)
+        """
+        self._ensure_connection()
+        from sqlalchemy import text
+
+        query = text("""
+            UPDATE bom_lead_times SET is_active = 0
+            WHERE source = :source AND is_active = 1
+        """)
+        try:
+            with self._engine.begin() as conn:
+                result = conn.execute(query, {'source': source})
+                count = result.rowcount
+            logger.info(f"Bulk deleted {count} BOM lead time rows with source={source}")
+            return count, None
+        except Exception as e:
+            logger.error(f"Failed to bulk delete BOM lead times (source={source}): {e}")
+            return 0, str(e)
 
     def load_all_active_boms(self) -> pd.DataFrame:
         """Load all ACTIVE BOMs for the BOM lead time editor dropdown."""

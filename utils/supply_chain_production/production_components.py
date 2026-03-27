@@ -923,9 +923,35 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
                              if c in display_df.columns]
                 display_df = display_df.drop(columns=drop_cols)
 
-            # Sort by MOs descending
-            if 'MOs' in display_df.columns:
-                display_df = display_df.sort_values('MOs', ascending=False).reset_index(drop=True)
+            # Sort options (Fix #15)
+            sort_options = ['MOs (most used first)', 'BOM Type', 'Unconfigured first']
+            if has_bom_lt:
+                sort_options.append('Source')
+            sort_choice = st.radio(
+                "Sort by:", sort_options, key="blt_overview_sort",
+                horizontal=True, label_visibility="collapsed",
+            )
+
+            if sort_choice == 'BOM Type' and 'Type' in display_df.columns:
+                display_df = display_df.sort_values(
+                    ['Type', 'BOM Code'], ascending=True,
+                ).reset_index(drop=True)
+            elif sort_choice == 'Unconfigured first':
+                # _blt_id is in original df, use it for sort then drop
+                display_df['_sort'] = df['_blt_id'].apply(
+                    lambda x: 0 if pd.isna(x) or x is None else 1
+                )
+                display_df = display_df.sort_values(
+                    ['_sort', 'Type', 'BOM Code'], ascending=True,
+                ).drop(columns=['_sort']).reset_index(drop=True)
+            elif sort_choice == 'Source' and 'Source' in display_df.columns:
+                display_df = display_df.sort_values(
+                    ['Source', 'Type', 'BOM Code'], ascending=True,
+                ).reset_index(drop=True)
+            else:
+                # Default: MOs descending
+                if 'MOs' in display_df.columns:
+                    display_df = display_df.sort_values('MOs', ascending=False).reset_index(drop=True)
 
             st.dataframe(display_df, hide_index=True, use_container_width=True,
                          height=min(35 * len(display_df) + 38, 400))
@@ -1108,6 +1134,34 @@ def _render_bom_lt_delete_action(configured_rows: list):
                     except Exception as e:
                         st.error(f"Delete failed: {e}")
 
+        # ── Undo Bulk Fill (Fix #8) ──
+        bulk_filled = [r for r in configured_rows if r.get('Source') == 'HISTORICAL_AVG']
+        if bulk_filled:
+            st.divider()
+            st.caption(
+                f"**Undo Bulk Fill:** {len(bulk_filled)} BOM lead time(s) were auto-filled from historical data. "
+                f"Clearing them will revert all to fallback defaults."
+            )
+            undo_cols = st.columns([1, 3])
+            with undo_cols[0]:
+                if st.button(
+                    f"🗑️ Clear All Bulk-Filled ({len(bulk_filled)})",
+                    key="blt_undo_bulk",
+                ):
+                    try:
+                        from .production_data_loader import get_production_data_loader
+                        loader = get_production_data_loader()
+                        count, err = loader.bulk_delete_bom_lead_times_by_source('HISTORICAL_AVG')
+                        if err:
+                            st.error(f"Failed: {err}")
+                        elif count > 0:
+                            st.success(f"✅ Cleared {count} bulk-filled BOM lead times.")
+                            st.rerun()
+                        else:
+                            st.info("No bulk-filled rows found to clear.")
+                    except Exception as e:
+                        st.error(f"Clear failed: {e}")
+
 
 # =============================================================================
 # BULK FILL FROM HISTORICAL
@@ -1181,10 +1235,23 @@ def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
         })
 
     if not rows_to_save:
-        if skipped_already > 0:
-            st.info(f"All BOMs with historical data already have lead times configured ({skipped_already} BOMs).")
+        if skipped_already > 0 and skipped_no_data == 0:
+            st.info(f"All {skipped_already} BOMs with historical data already have lead times configured.")
+        elif skipped_already > 0 and skipped_no_data > 0:
+            st.info(
+                f"All BOMs with usable data already configured ({skipped_already} BOMs). "
+                f"{skipped_no_data} BOM(s) skipped — have MOs but none COMPLETED yet "
+                f"(need at least 1 completed MO for historical average)."
+            )
+        elif skipped_no_data > 0:
+            st.warning(
+                f"No BOMs with sufficient historical data. "
+                f"{skipped_no_data} BOM(s) have MOs but none COMPLETED yet — "
+                f"complete at least 1 MO per BOM to enable historical fill. "
+                f"Use **✏️ Edit BOM Lead Time** to set values manually."
+            )
         else:
-            st.warning("No BOMs with sufficient historical data to fill.")
+            st.warning("No historical production data found. Run production MOs first or set lead times manually.")
         return
 
     # Confirm + execute
@@ -1232,6 +1299,21 @@ def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
 # SINGLE BOM LEAD TIME EDITOR
 # =============================================================================
 
+# Widget keys used by the editor — cleared on close to prevent stale state (Fix #7)
+_BLT_EDITOR_KEYS = [
+    'blt_editor_bom_select', 'blt_editor_plant_select',
+    'blt_ed_std', 'blt_ed_min', 'blt_ed_max', 'blt_ed_notes',
+]
+
+
+def _close_bom_lt_editor():
+    """Close editor and clear widget keys to prevent stale state (Fix #7)."""
+    st.session_state['_blt_editor_open'] = False
+    for key in _BLT_EDITOR_KEYS:
+        st.session_state.pop(key, None)
+    st.rerun()
+
+
 def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df):
     """Inline form to add/edit a single BOM lead time."""
     st.markdown("##### ✏️ Edit BOM Lead Time")
@@ -1239,8 +1321,7 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
     if all_boms_df.empty:
         st.warning("No active BOMs found.")
         if st.button("Close", key="blt_editor_close"):
-            st.session_state['_blt_editor_open'] = False
-            st.rerun()
+            _close_bom_lt_editor()
         return
 
     # BOM selector
@@ -1321,6 +1402,18 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
     notes = st.text_input("Notes", value="", key="blt_ed_notes",
                           placeholder="Reason: new machine, process change, etc.")
 
+    # Validation warnings (Fix #9)
+    _validation_ok = True
+    if min_lt > 0 and std_lt < min_lt:
+        st.warning(f"⚠️ Standard LT ({std_lt}d) is less than Min LT ({min_lt}d) — standard should be ≥ min.")
+        _validation_ok = False
+    if max_lt > 0 and std_lt > max_lt:
+        st.warning(f"⚠️ Standard LT ({std_lt}d) is greater than Max LT ({max_lt}d) — standard should be ≤ max.")
+        _validation_ok = False
+    if min_lt > 0 and max_lt > 0 and min_lt > max_lt:
+        st.warning(f"⚠️ Min LT ({min_lt}d) is greater than Max LT ({max_lt}d).")
+        _validation_ok = False
+
     # Save + Close buttons
     btn_cols = st.columns([1, 1, 3])
     with btn_cols[0]:
@@ -1343,8 +1436,7 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
                     )
                     if ok:
                         st.success(f"✅ Saved lead time for {selected_label}")
-                        st.session_state['_blt_editor_open'] = False
-                        st.rerun()
+                        _close_bom_lt_editor()
                     else:
                         st.error("Save failed — check logs.")
                 except Exception as e:
@@ -1352,8 +1444,7 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
 
     with btn_cols[1]:
         if st.button("Cancel", key="blt_ed_cancel"):
-            st.session_state['_blt_editor_open'] = False
-            st.rerun()
+            _close_bom_lt_editor()
 
     st.divider()
 
