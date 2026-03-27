@@ -2283,273 +2283,6 @@ def render_filter_warning_banner(result: MOSuggestionResult):
 
 
 # =============================================================================
-# DYNAMIC PIVOT TABLE — User-configurable Rows × Columns × Values
-# =============================================================================
-
-# Field definitions for pivot: (display_label, df_column, category)
-_PIVOT_ROW_OPTIONS = {
-    'Brand': 'brand',
-    'BOM Type': 'bom_type',
-    'Product': '_product_label',
-    'Urgency': 'urgency_level',
-    'Readiness': 'readiness_status',
-    'Start Week': '_start_week',
-    'Demand Week': '_demand_week',
-    'UOM': 'uom',
-    'LT Source': 'lead_time_source',
-    'Action': 'action_type',
-    'Delayed': '_delayed_label',
-}
-
-_PIVOT_COL_OPTIONS = {
-    '(none)': None,
-    'Start Week': '_start_week',
-    'BOM Type': 'bom_type',
-    'Brand': 'brand',
-    'Urgency': 'urgency_level',
-    'Readiness': 'readiness_status',
-    'Demand Week': '_demand_week',
-    'UOM': 'uom',
-    'Delayed': '_delayed_label',
-}
-
-_PIVOT_VALUE_OPTIONS = {
-    'Count': '_count',
-    'Suggested Qty': 'suggested_qty',
-    'Shortage Qty': 'shortage_qty',
-    'Batches': 'batches_needed',
-    'At Risk Value ($)': 'at_risk_value',
-    'Priority Score': 'priority_score',
-    'Lead Time (days)': 'lead_time_days',
-    'Max Producible Now': 'max_producible_now',
-}
-
-_PIVOT_AGG_OPTIONS = {
-    'sum': 'sum',
-    'count': 'count',
-    'mean': 'mean',
-    'min': 'min',
-    'max': 'max',
-}
-
-
-def _lines_to_pivot_df(lines: List[MOLineItem]) -> pd.DataFrame:
-    """Convert MOLineItem list to a flat DataFrame with derived columns for pivoting."""
-    rows = []
-    for l in lines:
-        # Start week
-        start_d = l.actual_start or l.must_start_by
-        if start_d:
-            iso = start_d.isocalendar()
-            start_week = f"W{iso[1]:02d}-{iso[0]}"
-        else:
-            start_week = "Unscheduled"
-
-        # Demand week
-        if l.demand_date:
-            iso_d = l.demand_date.isocalendar()
-            demand_week = f"W{iso_d[1]:02d}-{iso_d[0]}"
-        else:
-            demand_week = "N/A"
-
-        # Urgency display
-        urg_cfg = URGENCY_LEVELS.get(l.urgency_level, {})
-        rdy_cfg = READINESS_STATUS.get(l.readiness_status, {})
-
-        rows.append({
-            'pt_code': l.pt_code,
-            'product_name': (l.product_name or '')[:35],
-            '_product_label': f"{l.pt_code} · {(l.product_name or '')[:25]}",
-            'brand': l.brand or '(No Brand)',
-            'bom_type': l.bom_type,
-            'urgency_level': f"{urg_cfg.get('icon', '')} {urg_cfg.get('label', l.urgency_level)}",
-            'readiness_status': f"{rdy_cfg.get('icon', '')} {rdy_cfg.get('label', l.readiness_status)}",
-            '_start_week': start_week,
-            '_demand_week': demand_week,
-            'uom': l.uom,
-            'lead_time_source': l.lead_time_source,
-            'action_type': l.action_type,
-            '_delayed_label': 'Delayed' if l.is_delayed else 'On Time',
-            # Numeric values
-            'suggested_qty': l.suggested_qty,
-            'shortage_qty': l.shortage_qty,
-            'batches_needed': l.batches_needed,
-            'at_risk_value': l.at_risk_value,
-            'priority_score': l.priority_score,
-            'lead_time_days': l.lead_time_days,
-            'max_producible_now': l.max_producible_now,
-            '_count': 1,
-        })
-
-    return pd.DataFrame(rows)
-
-
-def _render_dynamic_pivot(lines: List[MOLineItem], key_prefix: str = "pv"):
-    """
-    Render a dynamic pivot table with user-selectable Rows, Columns, Values, Aggregation.
-
-    Similar to Sales Detail / Inventory pivot views in other ERP modules.
-    """
-    if not lines:
-        st.info("No data for pivot.")
-        return
-
-    # ── Build base DataFrame ──
-    df = _lines_to_pivot_df(lines)
-
-    # ── Controls: Rows / Columns / Value / Aggregation ──
-    ctrl_cols = st.columns([2, 2, 2, 1])
-
-    with ctrl_cols[0]:
-        row_label = st.selectbox(
-            "Rows",
-            options=list(_PIVOT_ROW_OPTIONS.keys()),
-            index=1,  # default: BOM Type
-            key=f"{key_prefix}_rows",
-        )
-        row_col = _PIVOT_ROW_OPTIONS[row_label]
-
-    with ctrl_cols[1]:
-        col_label = st.selectbox(
-            "Columns",
-            options=list(_PIVOT_COL_OPTIONS.keys()),
-            index=2,  # default: Start Week
-            key=f"{key_prefix}_cols",
-        )
-        col_col = _PIVOT_COL_OPTIONS[col_label]
-
-    with ctrl_cols[2]:
-        val_label = st.selectbox(
-            "Values",
-            options=list(_PIVOT_VALUE_OPTIONS.keys()),
-            index=4,  # default: At Risk Value ($)
-            key=f"{key_prefix}_vals",
-        )
-        val_col = _PIVOT_VALUE_OPTIONS[val_label]
-
-    with ctrl_cols[3]:
-        agg_label = st.selectbox(
-            "Aggregation",
-            options=list(_PIVOT_AGG_OPTIONS.keys()),
-            index=0,  # default: sum
-            key=f"{key_prefix}_agg",
-        )
-        agg_func = _PIVOT_AGG_OPTIONS[agg_label]
-
-    # ── Validate: Row and Column must differ ──
-    if col_col and row_col == col_col:
-        st.warning("Rows and Columns must be different fields.")
-        return
-
-    # ── Build pivot ──
-    try:
-        if col_col is None:
-            # No column pivot — simple groupby
-            if val_col == '_count':
-                pivot = df.groupby(row_col).size().reset_index(name='Count')
-                pivot = pivot.sort_values('Count', ascending=False)
-            else:
-                pivot = df.groupby(row_col)[val_col].agg(agg_func).reset_index()
-                pivot.columns = [row_label, val_label]
-                pivot = pivot.sort_values(val_label, ascending=False)
-
-                # Add Total row
-                if agg_func in ('sum', 'count'):
-                    total_val = pivot[val_label].sum()
-                    total_row = pd.DataFrame([{row_label: '**TOTAL**', val_label: total_val}])
-                    pivot = pd.concat([pivot, total_row], ignore_index=True)
-        else:
-            # Full pivot: rows × columns
-            if val_col == '_count':
-                pivot = pd.pivot_table(
-                    df, values='_count', index=row_col, columns=col_col,
-                    aggfunc='sum', fill_value=0, margins=True, margins_name='Total',
-                )
-            else:
-                pivot = pd.pivot_table(
-                    df, values=val_col, index=row_col, columns=col_col,
-                    aggfunc=agg_func, fill_value=0, margins=True, margins_name='Total',
-                )
-
-            # Flatten MultiIndex columns if needed
-            if isinstance(pivot.columns, pd.MultiIndex):
-                pivot.columns = [str(c[-1]) for c in pivot.columns]
-
-            pivot = pivot.reset_index()
-            pivot.columns.name = None
-
-            # Rename first column
-            pivot = pivot.rename(columns={row_col: row_label})
-
-    except Exception as e:
-        st.error(f"Pivot error: {e}")
-        return
-
-    # ── Format & Display ──
-    is_currency = 'value' in val_label.lower() or '$' in val_label
-    is_qty = 'qty' in val_label.lower() or 'batch' in val_label.lower() or val_label == 'Count'
-
-    # Apply styling
-    if col_col is not None and len(pivot.columns) > 2:
-        # Color-code the numeric cells (skip first column = row labels, last = Total)
-        numeric_cols = [c for c in pivot.columns if c != row_label]
-
-        def _color_cell(val):
-            """Gradient: higher value = darker blue."""
-            try:
-                v = float(val)
-                if v <= 0:
-                    return ''
-                return f'background-color: rgba(59, 130, 246, {min(0.5, v / pivot[numeric_cols].max().max() * 0.5):.2f})'
-            except (ValueError, TypeError):
-                return ''
-
-        # Format numbers
-        fmt = {}
-        for c in numeric_cols:
-            if is_currency:
-                fmt[c] = '${:,.0f}'
-            elif is_qty:
-                fmt[c] = '{:,.0f}'
-            else:
-                fmt[c] = '{:,.1f}'
-
-        try:
-            styled = pivot.style.map(
-                _color_cell, subset=numeric_cols,
-            ).format(fmt, na_rep='0')
-        except (AttributeError, TypeError):
-            try:
-                styled = pivot.style.applymap(
-                    _color_cell, subset=numeric_cols,
-                ).format(fmt, na_rep='0')
-            except Exception:
-                styled = pivot
-
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            hide_index=True,
-            height=min(35 * len(pivot) + 38, 600),
-        )
-    else:
-        # Simple table — no color coding
-        st.dataframe(
-            pivot,
-            use_container_width=True,
-            hide_index=True,
-            height=min(35 * len(pivot) + 38, 600),
-        )
-
-    # ── Summary caption ──
-    st.caption(
-        f"{len(df)} items · Rows: **{row_label}** "
-        + (f"· Columns: **{col_label}** " if col_col else "")
-        + f"· Values: **{val_label}** ({agg_label})"
-    )
-
-
-# =============================================================================
 # SMART PIVOT VIEWS — Summary views for Production Planners
 # =============================================================================
 
@@ -2966,6 +2699,225 @@ def _pivot_urgency_readiness_matrix(result: MOSuggestionResult):
 
 
 # =============================================================================
+# PRODUCTION SCHEDULE GRID — Product × Date → Qty/Batches
+# =============================================================================
+
+def _render_production_schedule(lines: List[MOLineItem], key_prefix: str = "sched"):
+    """
+    Production Schedule Grid — the key planner view.
+
+    Rows: Products (sorted by start date)
+    Columns: Dates (daily or weekly)
+    Cells: Suggested Qty or Batches
+    Color-coded: cells with values highlighted
+
+    This answers: "Which product needs to be produced on which date?"
+    """
+    if not lines:
+        st.info("No scheduled items.")
+        return
+
+    # ── Controls ──
+    ctrl_cols = st.columns([2, 2, 3])
+
+    with ctrl_cols[0]:
+        value_field = st.selectbox(
+            "Cell values",
+            ['Suggested Qty', 'Batches', 'Shortage Qty', 'At Risk Value ($)'],
+            index=0,
+            key=f"{key_prefix}_val",
+        )
+        val_map = {
+            'Suggested Qty': ('suggested_qty', '{:,.0f}'),
+            'Batches': ('batches_needed', '{:,.0f}'),
+            'Shortage Qty': ('shortage_qty', '{:,.0f}'),
+            'At Risk Value ($)': ('at_risk_value', '${:,.0f}'),
+        }
+        val_col, val_fmt = val_map[value_field]
+
+    with ctrl_cols[1]:
+        date_type = st.selectbox(
+            "Date column",
+            ['Start Date', 'Completion Date', 'Demand Date'],
+            index=0,
+            key=f"{key_prefix}_date",
+        )
+
+    with ctrl_cols[2]:
+        period_mode = st.radio(
+            "Period",
+            ['Daily', 'Weekly'],
+            horizontal=True,
+            key=f"{key_prefix}_period",
+        )
+
+    # ── Build schedule data ──
+    schedule_rows = []
+    for l in lines:
+        # Get the relevant date
+        if date_type == 'Start Date':
+            d = l.actual_start or l.must_start_by
+        elif date_type == 'Completion Date':
+            d = l.expected_completion
+        else:
+            d = l.demand_date
+
+        if d is None:
+            period_key = 'Unscheduled'
+        elif period_mode == 'Weekly':
+            iso = d.isocalendar()
+            mon = d - timedelta(days=d.weekday())
+            period_key = f"W{iso[1]:02d} ({mon.strftime('%d/%m')})"
+        else:
+            period_key = d.strftime('%Y-%m-%d')
+
+        # Product label: compact for readability
+        urgency_cfg = URGENCY_LEVELS.get(l.urgency_level, {})
+        urgency_icon = urgency_cfg.get('icon', '')
+        product_label = f"{urgency_icon} {l.pt_code} · {(l.product_name or '')[:25]}"
+        if l.brand:
+            product_label += f" ({l.brand})"
+
+        schedule_rows.append({
+            '_product': product_label,
+            '_period': period_key,
+            '_value': getattr(l, val_col, 0),
+            '_bom_type': l.bom_type,
+            '_urgency_priority': l.urgency_priority,
+            '_start_sort': str(l.actual_start or l.must_start_by or '9999-99-99'),
+        })
+
+    if not schedule_rows:
+        st.info("No items with dates for schedule grid.")
+        return
+
+    df = pd.DataFrame(schedule_rows)
+
+    # ── Pivot: Product × Period ──
+    try:
+        pivot = pd.pivot_table(
+            df,
+            values='_value',
+            index='_product',
+            columns='_period',
+            aggfunc='sum',
+            fill_value=0,
+        )
+
+        # Sort columns chronologically
+        col_order = sorted(
+            pivot.columns,
+            key=lambda c: c if c != 'Unscheduled' else 'zzzz',
+        )
+        pivot = pivot[col_order]
+
+        # Add Total column
+        pivot['Total'] = pivot.sum(axis=1)
+
+        # Sort rows by earliest start date
+        sort_keys = df.groupby('_product')['_start_sort'].min()
+        row_order = sort_keys.sort_values().index.tolist()
+        pivot = pivot.reindex([r for r in row_order if r in pivot.index])
+
+        # Add Total row
+        total_row = pivot.sum(axis=0)
+        total_row.name = '📊 TOTAL'
+        pivot = pd.concat([pivot, total_row.to_frame().T])
+
+    except Exception as e:
+        st.error(f"Schedule grid error: {e}")
+        return
+
+    # ── Style & Display ──
+    numeric_cols = [c for c in pivot.columns if c != 'Total']
+    max_val = pivot.drop(index='📊 TOTAL', errors='ignore')[numeric_cols].max().max()
+    if max_val is None or max_val == 0:
+        max_val = 1
+
+    def _schedule_cell_color(val):
+        """Color gradient: 0 = transparent, higher = deeper blue. Total row = gold."""
+        try:
+            v = float(val)
+            if v <= 0:
+                return ''
+            intensity = min(0.45, v / max_val * 0.45)
+            return f'background-color: rgba(59, 130, 246, {intensity:.2f})'
+        except (ValueError, TypeError):
+            return ''
+
+    def _total_col_color(val):
+        """Total column: amber tint."""
+        try:
+            v = float(val)
+            if v <= 0:
+                return ''
+            return 'background-color: rgba(245, 158, 11, 0.15); font-weight: 600'
+        except (ValueError, TypeError):
+            return ''
+
+    def _total_row_color(val):
+        """Total row: light gray bg + bold."""
+        return 'background-color: rgba(0, 0, 0, 0.06); font-weight: 700'
+
+    # Build format dict
+    fmt = {}
+    is_currency = '$' in value_field
+    for c in pivot.columns:
+        fmt[c] = '${:,.0f}' if is_currency else '{:,.0f}'
+
+    try:
+        styled = pivot.style
+
+        # Color numeric cells (not Total column, not Total row)
+        data_cols = [c for c in pivot.columns if c != 'Total']
+        data_rows = [r for r in pivot.index if r != '📊 TOTAL']
+
+        if data_cols and data_rows:
+            styled = styled.map(
+                _schedule_cell_color,
+                subset=(data_rows, data_cols),
+            )
+
+        # Color Total column
+        if 'Total' in pivot.columns:
+            styled = styled.map(
+                _total_col_color,
+                subset=(data_rows, ['Total']),
+            )
+
+        # Color Total row
+        if '📊 TOTAL' in pivot.index:
+            styled = styled.map(
+                _total_row_color,
+                subset=(['📊 TOTAL'], pivot.columns.tolist()),
+            )
+
+        styled = styled.format(fmt, na_rep='0')
+    except (AttributeError, TypeError):
+        # Fallback for older pandas
+        try:
+            styled = pivot.style.applymap(
+                _schedule_cell_color,
+            ).format(fmt, na_rep='0')
+        except Exception:
+            styled = pivot
+
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        height=min(35 * len(pivot) + 38, 700),
+    )
+
+    # ── Summary ──
+    n_products = len(pivot) - 1  # exclude Total row
+    n_dates = len([c for c in pivot.columns if c != 'Total'])
+    st.caption(
+        f"{n_products} products × {n_dates} {period_mode.lower()} periods · "
+        f"Values: **{value_field}** · Date: **{date_type}**"
+    )
+
+
+# =============================================================================
 # TAB FRAGMENTS
 #
 # Architecture:
@@ -3014,7 +2966,7 @@ def _ready_tab_content(lines: list, total_value: float):
     """Fragment: Ready tab view toggle + content. Reruns only this on interaction."""
     view_mode = st.radio(
         "View mode",
-        ['📊 Summary', '📋 Detail', '🔄 Pivot'],
+        ['📊 Summary', '📅 Schedule', '📋 Detail'],
         horizontal=True,
         key="ready_view_mode",
         label_visibility="collapsed",
@@ -3026,9 +2978,9 @@ def _ready_tab_content(lines: list, total_value: float):
         with st.expander("🏷️ By Brand", expanded=False):
             _pivot_ready_by_brand(lines)
 
-    elif view_mode == '🔄 Pivot':
-        st.markdown("##### 🔄 Pivot Table")
-        _render_dynamic_pivot(lines, key_prefix="pv_ready")
+    elif view_mode == '📅 Schedule':
+        st.markdown("##### 📅 Production Schedule — Product × Date")
+        _render_production_schedule(lines, key_prefix="sched_ready")
 
     else:
         st.markdown(
@@ -3076,7 +3028,7 @@ def _waiting_tab_content(lines: list, total_value: float):
     """Fragment: Waiting tab view toggle + content. Reruns only this on interaction."""
     view_mode = st.radio(
         "View mode",
-        ['📊 Summary', '📋 Detail', '🔄 Pivot'],
+        ['📊 Summary', '📅 Schedule', '📋 Detail'],
         horizontal=True,
         key="waiting_view_mode",
         label_visibility="collapsed",
@@ -3086,9 +3038,9 @@ def _waiting_tab_content(lines: list, total_value: float):
         _pivot_waiting_bottleneck_materials(lines)
         _pivot_waiting_eta_timeline(lines)
 
-    elif view_mode == '🔄 Pivot':
-        st.markdown("##### 🔄 Pivot Table")
-        _render_dynamic_pivot(lines, key_prefix="pv_waiting")
+    elif view_mode == '📅 Schedule':
+        st.markdown("##### 📅 Material Wait Schedule — Product × ETA Date")
+        _render_production_schedule(lines, key_prefix="sched_waiting")
 
     else:
         st.markdown(
@@ -3125,15 +3077,15 @@ def _blocked_tab_content(lines: list):
 
     view_mode = st.radio(
         "View mode",
-        ['📋 Detail', '🔄 Pivot'],
+        ['📋 Detail', '📅 Schedule'],
         horizontal=True,
         key="blocked_view_mode",
         label_visibility="collapsed",
     )
 
-    if view_mode == '🔄 Pivot':
-        st.markdown("##### 🔄 Pivot Table — Blocked Items")
-        _render_dynamic_pivot(lines, key_prefix="pv_blocked")
+    if view_mode == '📅 Schedule':
+        st.markdown("##### 📅 Blocked Items — By Demand Date")
+        _render_production_schedule(lines, key_prefix="sched_blocked")
     else:
         st.markdown(
             f"**{len(lines)} items** blocked — materials unavailable, no ETA. "
@@ -3246,18 +3198,8 @@ def overview_tab_fragment(result: MOSuggestionResult):
     # BOM breakdown
     _render_bom_distribution(result)
 
-    # Dynamic Pivot — all lines (fragment — isolated rerun)
-    _overview_pivot_content(result.all_lines)
-
     # Reconciliation
     render_reconciliation_panel(result)
-
-
-@st.fragment
-def _overview_pivot_content(all_lines: list):
-    """Fragment: Overview pivot table. Changing controls only reruns this."""
-    with st.expander("🔄 **Pivot Table** — All MO Lines", expanded=False):
-        _render_dynamic_pivot(all_lines, key_prefix="pv_overview")
 
 
 # =============================================================================
