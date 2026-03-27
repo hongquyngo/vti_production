@@ -313,6 +313,7 @@ class ProductionDataLoader:
         query = """
         SELECT
             bom_header_id,
+            bom_lead_time_id,
             plant_id,
             plant_code,
             plant_name,
@@ -472,7 +473,10 @@ class ProductionDataLoader:
         """
         Insert or update a BOM lead time row.
 
-        Uses INSERT ... ON DUPLICATE KEY UPDATE on (bom_header_id, plant_id, effective_date).
+        Uses explicit SELECT→UPDATE/INSERT instead of ON DUPLICATE KEY UPDATE
+        because MySQL unique constraint treats NULL != NULL — meaning
+        (bom_header_id, NULL, effective_date) never triggers duplicate detection.
+        Global lead times (plant_id IS NULL) would create duplicates silently.
         """
         self._ensure_connection()
         from sqlalchemy import text
@@ -481,44 +485,94 @@ class ProductionDataLoader:
             from datetime import date as _date
             effective_date = _date.today().isoformat()
 
-        query = text("""
-            INSERT INTO bom_lead_times
-                (bom_header_id, plant_id, standard_lead_time_days,
-                 minimum_lead_time_days, maximum_lead_time_days,
-                 effective_date, notes, source, is_active,
-                 created_by, updated_by)
-            VALUES
-                (:bom_header_id, :plant_id, :standard_lt,
-                 :min_lt, :max_lt,
-                 :effective_date, :notes, :source, 1,
-                 :user_id, :user_id)
-            ON DUPLICATE KEY UPDATE
-                standard_lead_time_days = VALUES(standard_lead_time_days),
-                minimum_lead_time_days = VALUES(minimum_lead_time_days),
-                maximum_lead_time_days = VALUES(maximum_lead_time_days),
-                notes = VALUES(notes),
-                source = VALUES(source),
-                updated_by = VALUES(updated_by),
-                is_active = 1
-        """)
-
         try:
             with self._engine.begin() as conn:
-                conn.execute(query, {
-                    'bom_header_id': bom_header_id,
-                    'plant_id': plant_id,
-                    'standard_lt': standard_lead_time_days,
-                    'min_lt': minimum_lead_time_days,
-                    'max_lt': maximum_lead_time_days,
-                    'effective_date': effective_date,
-                    'notes': notes,
-                    'source': source,
-                    'user_id': user_id,
-                })
-            logger.info(
-                f"Saved BOM lead time: bom={bom_header_id}, plant={plant_id}, "
-                f"std={standard_lead_time_days}d"
-            )
+                # Step 1: Find existing row (NULL-safe comparison for plant_id)
+                if plant_id is None:
+                    find_query = text("""
+                        SELECT id FROM bom_lead_times
+                        WHERE bom_header_id = :bom_header_id
+                          AND plant_id IS NULL
+                          AND effective_date = :effective_date
+                        LIMIT 1
+                    """)
+                    find_params = {
+                        'bom_header_id': bom_header_id,
+                        'effective_date': effective_date,
+                    }
+                else:
+                    find_query = text("""
+                        SELECT id FROM bom_lead_times
+                        WHERE bom_header_id = :bom_header_id
+                          AND plant_id = :plant_id
+                          AND effective_date = :effective_date
+                        LIMIT 1
+                    """)
+                    find_params = {
+                        'bom_header_id': bom_header_id,
+                        'plant_id': plant_id,
+                        'effective_date': effective_date,
+                    }
+
+                row = conn.execute(find_query, find_params).fetchone()
+
+                if row is not None:
+                    # Step 2a: UPDATE existing row
+                    update_query = text("""
+                        UPDATE bom_lead_times SET
+                            standard_lead_time_days = :standard_lt,
+                            minimum_lead_time_days = :min_lt,
+                            maximum_lead_time_days = :max_lt,
+                            notes = :notes,
+                            source = :source,
+                            updated_by = :user_id,
+                            is_active = 1
+                        WHERE id = :existing_id
+                    """)
+                    conn.execute(update_query, {
+                        'existing_id': row[0],
+                        'standard_lt': standard_lead_time_days,
+                        'min_lt': minimum_lead_time_days,
+                        'max_lt': maximum_lead_time_days,
+                        'notes': notes,
+                        'source': source,
+                        'user_id': user_id,
+                    })
+                    logger.info(
+                        f"Updated BOM lead time id={row[0]}: "
+                        f"bom={bom_header_id}, plant={plant_id}, "
+                        f"std={standard_lead_time_days}d"
+                    )
+                else:
+                    # Step 2b: INSERT new row
+                    insert_query = text("""
+                        INSERT INTO bom_lead_times
+                            (bom_header_id, plant_id, standard_lead_time_days,
+                             minimum_lead_time_days, maximum_lead_time_days,
+                             effective_date, notes, source, is_active,
+                             created_by, updated_by)
+                        VALUES
+                            (:bom_header_id, :plant_id, :standard_lt,
+                             :min_lt, :max_lt,
+                             :effective_date, :notes, :source, 1,
+                             :user_id, :user_id)
+                    """)
+                    conn.execute(insert_query, {
+                        'bom_header_id': bom_header_id,
+                        'plant_id': plant_id,
+                        'standard_lt': standard_lead_time_days,
+                        'min_lt': minimum_lead_time_days,
+                        'max_lt': maximum_lead_time_days,
+                        'effective_date': effective_date,
+                        'notes': notes,
+                        'source': source,
+                        'user_id': user_id,
+                    })
+                    logger.info(
+                        f"Inserted BOM lead time: bom={bom_header_id}, "
+                        f"plant={plant_id}, std={standard_lead_time_days}d"
+                    )
+
             return True
         except Exception as e:
             logger.error(f"Failed to save BOM lead time: {e}")
@@ -704,6 +758,39 @@ class ProductionDataLoader:
             except Exception as e:
                 logger.error(f"Failed to create plant: {e}")
                 return None
+
+    # =========================================================================
+    # ENTITIES — for dropdowns
+    # =========================================================================
+
+    def load_entities(self, active_only: bool = True) -> pd.DataFrame:
+        """
+        Load companies for entity dropdown in plant form.
+
+        Returns: id, english_name, company_code, local_name.
+        """
+        self._ensure_connection()
+
+        query = """
+        SELECT
+            id,
+            english_name,
+            company_code,
+            local_name
+        FROM companies
+        WHERE delete_flag = 0
+        """
+        if active_only:
+            # companies table doesn't have is_active, filter by non-deleted only
+            pass
+
+        query += " ORDER BY english_name"
+
+        try:
+            return pd.read_sql(query, self._engine)
+        except Exception as e:
+            logger.warning(f"Could not load entities: {e}")
+            return pd.DataFrame()
 
 
 # =============================================================================

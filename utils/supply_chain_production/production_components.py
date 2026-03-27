@@ -37,6 +37,30 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# AUTH HELPER — get current user_id for audit trail
+# =============================================================================
+
+def _get_current_user_id() -> Optional[int]:
+    """
+    Get current user_id from session state for audit trail (created_by / updated_by).
+
+    Reads from st.session_state where AuthManager stores user info after login.
+    Returns None if not available (graceful — CRUD still works, just no audit).
+    """
+    try:
+        # AuthManager stores user dict in session_state on login
+        user = st.session_state.get('user')
+        if user and isinstance(user, dict):
+            uid = user.get('id') or user.get('user_id')
+            return int(uid) if uid is not None else None
+        # Fallback: some auth patterns store user_id directly
+        uid = st.session_state.get('user_id')
+        return int(uid) if uid is not None else None
+    except Exception:
+        return None
+
+
+# =============================================================================
 # STYLED DATAFRAME HELPER
 # =============================================================================
 
@@ -865,7 +889,7 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
 
         with act_cols[2]:
             show_plant_form = st.button(
-                "🏭 Add Plant",
+                "🏭 Manage Plants",
                 key="blt_show_plant",
             )
 
@@ -881,7 +905,7 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
         # ── PLANT FORM ──
         if show_plant_form or st.session_state.get('_plant_form_open'):
             st.session_state['_plant_form_open'] = True
-            _render_plant_form()
+            _render_plant_form(plants_df)
 
         # ── OVERVIEW TABLE ──
         st.markdown("")
@@ -890,21 +914,24 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
         if rows:
             df = pd.DataFrame(rows)
 
+            # Keep _blt_id for delete action but don't display it
+            display_df = df.drop(columns=['_blt_id'], errors='ignore')
+
             # Drop noise columns when no BOM LT configured
             if not has_bom_lt:
-                drop_cols = [c for c in ['Std LT', 'Min', 'Max', 'Plant', 'Source']
-                             if c in df.columns]
-                df = df.drop(columns=drop_cols)
+                drop_cols = [c for c in ['Std LT', 'Min', 'Max', 'Plant', 'Source', 'Effective']
+                             if c in display_df.columns]
+                display_df = display_df.drop(columns=drop_cols)
 
             # Sort by MOs descending
-            if 'MOs' in df.columns:
-                df = df.sort_values('MOs', ascending=False).reset_index(drop=True)
+            if 'MOs' in display_df.columns:
+                display_df = display_df.sort_values('MOs', ascending=False).reset_index(drop=True)
 
-            st.dataframe(df, hide_index=True, use_container_width=True,
-                         height=min(35 * len(df) + 38, 400))
+            st.dataframe(display_df, hide_index=True, use_container_width=True,
+                         height=min(35 * len(display_df) + 38, 400))
 
             # Summary
-            configured = sum(1 for r in rows if '(not set)' not in str(r.get('Std LT', '')))
+            configured = sum(1 for r in rows if r.get('_blt_id') is not None)
             total = len(rows)
             if configured == total and total > 0:
                 st.success(f"✅ {configured}/{total} BOMs have lead time configured")
@@ -919,6 +946,11 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
                     f"all {total} BOMs using fallback defaults below. "
                     f"Set per-BOM lead times for more accurate scheduling."
                 )
+
+            # ── DELETE ACTION (Fix #3) ──
+            configured_rows = [r for r in rows if r.get('_blt_id') is not None]
+            if configured_rows:
+                _render_bom_lt_delete_action(configured_rows)
         else:
             st.info(
                 "No BOM lead time data available yet. "
@@ -937,7 +969,9 @@ def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historic
         for _, row in bom_lt_df.iterrows():
             bom_id = row.get('bom_header_id')
             configured_bom_ids.add(bom_id)
+            eff = row.get('effective_date')
             r = {
+                '_blt_id': int(row['bom_lead_time_id']) if pd.notna(row.get('bom_lead_time_id')) else None,
                 'BOM Code': row.get('bom_code', ''),
                 'Type': row.get('bom_type', ''),
                 'Product': row.get('pt_code', ''),
@@ -946,6 +980,7 @@ def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historic
                 'Max': f"{int(row['maximum_lead_time_days'])}d" if pd.notna(row.get('maximum_lead_time_days')) else '—',
                 'Plant': row.get('plant_name', 'Global') if pd.notna(row.get('plant_name')) else 'Global',
                 'Source': row.get('source', ''),
+                'Effective': str(eff) if pd.notna(eff) else '—',
             }
 
             if has_historical:
@@ -968,6 +1003,7 @@ def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historic
             h_std = row.get('stddev_lead_time_days')
 
             r = {
+                '_blt_id': None,
                 'BOM Code': row.get('bom_code', ''),
                 'Type': row.get('bom_type', ''),
                 'Product': row.get('pt_code', ''),
@@ -979,6 +1015,7 @@ def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historic
                 r['Max'] = '—'
                 r['Plant'] = '—'
                 r['Source'] = '—'
+                r['Effective'] = '—'
 
             r['Hist Avg'] = f"{float(avg):.1f}d" if pd.notna(avg) else '—'
             r['Hist Min'] = f"{int(h_min)}d" if pd.notna(h_min) else '—'
@@ -1012,6 +1049,64 @@ def _enrich_with_historical(r: dict, bom_id, lead_time_stats_df):
     r['Hist Max'] = '—'
     r['Hist σ'] = '—'
     r['MOs'] = 0
+
+
+# =============================================================================
+# BOM LEAD TIME — DELETE ACTION (Fix #3)
+# =============================================================================
+
+def _render_bom_lt_delete_action(configured_rows: list):
+    """
+    Render delete action for configured BOM lead times.
+
+    Shows a selectbox of configured BOMs + Delete button inside a collapsed expander.
+    Uses soft-delete (is_active=0) via data_loader.delete_bom_lead_time().
+    """
+    with st.expander("🗑️ **Remove BOM Lead Time**", expanded=False):
+        st.caption(
+            "Remove a configured BOM lead time. "
+            "The BOM will fall back to the default lead time setting below."
+        )
+
+        # Build options from configured rows
+        options = {}
+        for r in configured_rows:
+            blt_id = r.get('_blt_id')
+            if blt_id is None:
+                continue
+            label = (
+                f"{r.get('BOM Code', '')} — {r.get('Product', '')} "
+                f"({r.get('Type', '')}, {r.get('Std LT', '')}, "
+                f"Plant: {r.get('Plant', 'Global')})"
+            )
+            options[label] = blt_id
+
+        if not options:
+            st.info("No configured BOM lead times to remove.")
+            return
+
+        selected_label = st.selectbox(
+            "Select BOM lead time to remove",
+            options=list(options.keys()),
+            key="blt_delete_select",
+        )
+        selected_blt_id = options.get(selected_label)
+
+        del_cols = st.columns([1, 1, 3])
+        with del_cols[0]:
+            if st.button("🗑️ Delete", key="blt_delete_confirm", type="primary"):
+                if selected_blt_id is not None:
+                    try:
+                        from .production_data_loader import get_production_data_loader
+                        loader = get_production_data_loader()
+                        ok = loader.delete_bom_lead_time(selected_blt_id)
+                        if ok:
+                            st.success(f"✅ Removed BOM lead time (id={selected_blt_id})")
+                            st.rerun()
+                        else:
+                            st.error("Delete failed — row not found or already deleted.")
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
 
 
 # =============================================================================
@@ -1119,7 +1214,9 @@ def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
             try:
                 from .production_data_loader import get_production_data_loader
                 loader = get_production_data_loader()
-                success, errors = loader.bulk_save_bom_lead_times(rows_to_save)
+                success, errors = loader.bulk_save_bom_lead_times(
+                    rows_to_save, user_id=_get_current_user_id(),
+                )
                 if success > 0:
                     st.success(f"✅ Saved {success}/{len(rows_to_save)} BOM lead times.")
                     if errors:
@@ -1242,6 +1339,7 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
                         maximum_lead_time_days=max_lt if max_lt > 0 else None,
                         notes=notes,
                         source='MANUAL',
+                        user_id=_get_current_user_id(),
                     )
                     if ok:
                         st.success(f"✅ Saved lead time for {selected_label}")
@@ -1264,66 +1362,152 @@ def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
 # PLANT FORM
 # =============================================================================
 
-def _render_plant_form():
-    """Inline form to add a production plant."""
-    st.markdown("##### 🏭 Add Production Plant")
+def _render_plant_form(plants_df: Optional[pd.DataFrame] = None):
+    """
+    Plant management panel — list existing + add new + edit existing.
 
+    Fix #4: Add edit capability for existing plants.
+    Fix #6: Load companies dynamically instead of hardcoding entity_id=23.
+    """
+    st.markdown("##### 🏭 Manage Production Plants")
+
+    # ── Load companies for entity dropdown (Fix #6) ──
+    entity_options = {}
+    try:
+        from .production_data_loader import get_production_data_loader
+        _loader = get_production_data_loader()
+        _loader._ensure_connection()
+        _companies_df = pd.read_sql(
+            "SELECT id, english_name, company_code FROM companies "
+            "WHERE delete_flag = 0 ORDER BY english_name",
+            _loader._engine,
+        )
+        for _, row in _companies_df.iterrows():
+            label = f"{row['english_name']} ({row.get('company_code', '')})" if row.get('company_code') else row['english_name']
+            entity_options[label] = int(row['id'])
+    except Exception:
+        pass
+
+    # Fallback if companies query fails
+    if not entity_options:
+        entity_options = {'Vietape VN (entity_id=23)': 23}
+
+    # ── Existing plants table (Fix #4) ──
+    if plants_df is not None and not plants_df.empty:
+        st.markdown("**Existing plants:**")
+        display_cols = ['plant_code', 'plant_name', 'plant_type', 'entity_name', 'address']
+        avail_cols = [c for c in display_cols if c in plants_df.columns]
+        st.dataframe(
+            plants_df[avail_cols],
+            hide_index=True, use_container_width=True,
+            height=min(35 * len(plants_df) + 38, 180),
+        )
+
+    # ── Mode: Add new vs Edit existing (Fix #4) ──
+    mode_options = ['➕ Add New Plant']
+    edit_plant_map = {}  # label → plant row dict
+    if plants_df is not None and not plants_df.empty:
+        for _, row in plants_df.iterrows():
+            label = f"✏️ Edit: {row['plant_code']} — {row['plant_name']}"
+            mode_options.append(label)
+            edit_plant_map[label] = row.to_dict()
+
+    selected_mode = st.radio(
+        "Action", mode_options, key="pf_mode", horizontal=True,
+    )
+
+    is_edit = selected_mode.startswith('✏️')
+    edit_row = edit_plant_map.get(selected_mode, {})
+
+    # ── Form fields ──
     pf_cols = st.columns(2)
     with pf_cols[0]:
         plant_code = st.text_input(
             "Plant Code", key="pf_code",
+            value=edit_row.get('plant_code', ''),
             placeholder="PLT-VN-01",
             help="Unique code. Format: PLT-[COUNTRY]-[NUM]",
+            disabled=is_edit,  # code is identity — don't allow change on edit
         )
     with pf_cols[1]:
         plant_name = st.text_input(
             "Plant Name", key="pf_name",
+            value=edit_row.get('plant_name', ''),
             placeholder="Xưởng Cắt Yên Mỹ",
         )
 
     pf_cols2 = st.columns(3)
     with pf_cols2[0]:
+        type_options = ['MIXED', 'CUTTING', 'REPACKING', 'KITTING']
+        current_type = edit_row.get('plant_type', 'MIXED')
+        type_idx = type_options.index(current_type) if current_type in type_options else 0
         plant_type = st.selectbox(
-            "Type", ['MIXED', 'CUTTING', 'REPACKING', 'KITTING'],
-            key="pf_type",
+            "Type", type_options, index=type_idx, key="pf_type",
         )
     with pf_cols2[1]:
-        # Entity — for now hardcode entity lookup
-        entity_id = st.number_input(
-            "Entity ID (company)", min_value=1,
-            value=23, key="pf_entity",
-            help="Company ID from companies table. Vietape VN = 23",
+        # Dynamic entity dropdown (Fix #6)
+        entity_labels = list(entity_options.keys())
+        current_entity_id = edit_row.get('entity_id', 23)
+        # Find matching label for current entity_id
+        default_idx = 0
+        for i, (lbl, eid) in enumerate(entity_options.items()):
+            if eid == current_entity_id:
+                default_idx = i
+                break
+        selected_entity_label = st.selectbox(
+            "Company (Entity)",
+            entity_labels, index=default_idx, key="pf_entity",
+            help="Pháp nhân sở hữu nhà máy",
         )
+        entity_id = entity_options.get(selected_entity_label, 23)
+
     with pf_cols2[2]:
-        address = st.text_input("Address", key="pf_address", placeholder="KCN Yên Mỹ, Hưng Yên")
+        address = st.text_input(
+            "Address", key="pf_address",
+            value=edit_row.get('address', '') or '',
+            placeholder="KCN Yên Mỹ, Hưng Yên",
+        )
 
-    notes = st.text_input("Notes", key="pf_notes", placeholder="Năng lực, ca làm việc, thiết bị đặc biệt")
+    notes = st.text_input(
+        "Notes", key="pf_notes",
+        value=edit_row.get('notes', '') or '',
+        placeholder="Năng lực, ca làm việc, thiết bị đặc biệt",
+    )
 
+    # ── Save + Close buttons ──
     btn_cols = st.columns([1, 1, 3])
     with btn_cols[0]:
-        if st.button("💾 Save Plant", key="pf_save", type="primary"):
+        save_label = "💾 Update Plant" if is_edit else "💾 Save Plant"
+        if st.button(save_label, key="pf_save", type="primary"):
             if not plant_code or not plant_name:
                 st.error("Plant code and name are required.")
             else:
                 try:
                     from .production_data_loader import get_production_data_loader
                     loader = get_production_data_loader()
-                    new_id = loader.save_plant(
+                    result_id = loader.save_plant(
                         plant_code=plant_code,
                         plant_name=plant_name,
                         entity_id=entity_id,
                         plant_type=plant_type,
                         address=address,
                         notes=notes,
+                        user_id=_get_current_user_id(),
+                        plant_id=int(edit_row['plant_id']) if is_edit else None,
                     )
-                    if new_id:
-                        st.success(f"✅ Created plant: {plant_code} (ID: {new_id})")
+                    if result_id:
+                        action = "Updated" if is_edit else "Created"
+                        st.success(f"✅ {action} plant: {plant_code} (ID: {result_id})")
                         st.session_state['_plant_form_open'] = False
                         st.rerun()
                     else:
-                        st.error("Failed to create plant — check logs.")
+                        st.error("Failed to save plant — check logs.")
                 except Exception as e:
-                    st.error(f"Failed: {e}")
+                    error_msg = str(e)
+                    if 'Duplicate entry' in error_msg or 'uq_plant_code' in error_msg:
+                        st.error(f"Plant code '{plant_code}' already exists. Choose a different code.")
+                    else:
+                        st.error(f"Failed: {e}")
 
     with btn_cols[1]:
         if st.button("Cancel", key="pf_cancel"):
