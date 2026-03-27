@@ -2283,6 +2283,689 @@ def render_filter_warning_banner(result: MOSuggestionResult):
 
 
 # =============================================================================
+# DYNAMIC PIVOT TABLE — User-configurable Rows × Columns × Values
+# =============================================================================
+
+# Field definitions for pivot: (display_label, df_column, category)
+_PIVOT_ROW_OPTIONS = {
+    'Brand': 'brand',
+    'BOM Type': 'bom_type',
+    'Product': '_product_label',
+    'Urgency': 'urgency_level',
+    'Readiness': 'readiness_status',
+    'Start Week': '_start_week',
+    'Demand Week': '_demand_week',
+    'UOM': 'uom',
+    'LT Source': 'lead_time_source',
+    'Action': 'action_type',
+    'Delayed': '_delayed_label',
+}
+
+_PIVOT_COL_OPTIONS = {
+    '(none)': None,
+    'Start Week': '_start_week',
+    'BOM Type': 'bom_type',
+    'Brand': 'brand',
+    'Urgency': 'urgency_level',
+    'Readiness': 'readiness_status',
+    'Demand Week': '_demand_week',
+    'UOM': 'uom',
+    'Delayed': '_delayed_label',
+}
+
+_PIVOT_VALUE_OPTIONS = {
+    'Count': '_count',
+    'Suggested Qty': 'suggested_qty',
+    'Shortage Qty': 'shortage_qty',
+    'Batches': 'batches_needed',
+    'At Risk Value ($)': 'at_risk_value',
+    'Priority Score': 'priority_score',
+    'Lead Time (days)': 'lead_time_days',
+    'Max Producible Now': 'max_producible_now',
+}
+
+_PIVOT_AGG_OPTIONS = {
+    'sum': 'sum',
+    'count': 'count',
+    'mean': 'mean',
+    'min': 'min',
+    'max': 'max',
+}
+
+
+def _lines_to_pivot_df(lines: List[MOLineItem]) -> pd.DataFrame:
+    """Convert MOLineItem list to a flat DataFrame with derived columns for pivoting."""
+    rows = []
+    for l in lines:
+        # Start week
+        start_d = l.actual_start or l.must_start_by
+        if start_d:
+            iso = start_d.isocalendar()
+            start_week = f"W{iso[1]:02d}-{iso[0]}"
+        else:
+            start_week = "Unscheduled"
+
+        # Demand week
+        if l.demand_date:
+            iso_d = l.demand_date.isocalendar()
+            demand_week = f"W{iso_d[1]:02d}-{iso_d[0]}"
+        else:
+            demand_week = "N/A"
+
+        # Urgency display
+        urg_cfg = URGENCY_LEVELS.get(l.urgency_level, {})
+        rdy_cfg = READINESS_STATUS.get(l.readiness_status, {})
+
+        rows.append({
+            'pt_code': l.pt_code,
+            'product_name': (l.product_name or '')[:35],
+            '_product_label': f"{l.pt_code} · {(l.product_name or '')[:25]}",
+            'brand': l.brand or '(No Brand)',
+            'bom_type': l.bom_type,
+            'urgency_level': f"{urg_cfg.get('icon', '')} {urg_cfg.get('label', l.urgency_level)}",
+            'readiness_status': f"{rdy_cfg.get('icon', '')} {rdy_cfg.get('label', l.readiness_status)}",
+            '_start_week': start_week,
+            '_demand_week': demand_week,
+            'uom': l.uom,
+            'lead_time_source': l.lead_time_source,
+            'action_type': l.action_type,
+            '_delayed_label': 'Delayed' if l.is_delayed else 'On Time',
+            # Numeric values
+            'suggested_qty': l.suggested_qty,
+            'shortage_qty': l.shortage_qty,
+            'batches_needed': l.batches_needed,
+            'at_risk_value': l.at_risk_value,
+            'priority_score': l.priority_score,
+            'lead_time_days': l.lead_time_days,
+            'max_producible_now': l.max_producible_now,
+            '_count': 1,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _render_dynamic_pivot(lines: List[MOLineItem], key_prefix: str = "pv"):
+    """
+    Render a dynamic pivot table with user-selectable Rows, Columns, Values, Aggregation.
+
+    Similar to Sales Detail / Inventory pivot views in other ERP modules.
+    """
+    if not lines:
+        st.info("No data for pivot.")
+        return
+
+    # ── Build base DataFrame ──
+    df = _lines_to_pivot_df(lines)
+
+    # ── Controls: Rows / Columns / Value / Aggregation ──
+    ctrl_cols = st.columns([2, 2, 2, 1])
+
+    with ctrl_cols[0]:
+        row_label = st.selectbox(
+            "Rows",
+            options=list(_PIVOT_ROW_OPTIONS.keys()),
+            index=1,  # default: BOM Type
+            key=f"{key_prefix}_rows",
+        )
+        row_col = _PIVOT_ROW_OPTIONS[row_label]
+
+    with ctrl_cols[1]:
+        col_label = st.selectbox(
+            "Columns",
+            options=list(_PIVOT_COL_OPTIONS.keys()),
+            index=2,  # default: Start Week
+            key=f"{key_prefix}_cols",
+        )
+        col_col = _PIVOT_COL_OPTIONS[col_label]
+
+    with ctrl_cols[2]:
+        val_label = st.selectbox(
+            "Values",
+            options=list(_PIVOT_VALUE_OPTIONS.keys()),
+            index=4,  # default: At Risk Value ($)
+            key=f"{key_prefix}_vals",
+        )
+        val_col = _PIVOT_VALUE_OPTIONS[val_label]
+
+    with ctrl_cols[3]:
+        agg_label = st.selectbox(
+            "Aggregation",
+            options=list(_PIVOT_AGG_OPTIONS.keys()),
+            index=0,  # default: sum
+            key=f"{key_prefix}_agg",
+        )
+        agg_func = _PIVOT_AGG_OPTIONS[agg_label]
+
+    # ── Validate: Row and Column must differ ──
+    if col_col and row_col == col_col:
+        st.warning("Rows and Columns must be different fields.")
+        return
+
+    # ── Build pivot ──
+    try:
+        if col_col is None:
+            # No column pivot — simple groupby
+            if val_col == '_count':
+                pivot = df.groupby(row_col).size().reset_index(name='Count')
+                pivot = pivot.sort_values('Count', ascending=False)
+            else:
+                pivot = df.groupby(row_col)[val_col].agg(agg_func).reset_index()
+                pivot.columns = [row_label, val_label]
+                pivot = pivot.sort_values(val_label, ascending=False)
+
+                # Add Total row
+                if agg_func in ('sum', 'count'):
+                    total_val = pivot[val_label].sum()
+                    total_row = pd.DataFrame([{row_label: '**TOTAL**', val_label: total_val}])
+                    pivot = pd.concat([pivot, total_row], ignore_index=True)
+        else:
+            # Full pivot: rows × columns
+            if val_col == '_count':
+                pivot = pd.pivot_table(
+                    df, values='_count', index=row_col, columns=col_col,
+                    aggfunc='sum', fill_value=0, margins=True, margins_name='Total',
+                )
+            else:
+                pivot = pd.pivot_table(
+                    df, values=val_col, index=row_col, columns=col_col,
+                    aggfunc=agg_func, fill_value=0, margins=True, margins_name='Total',
+                )
+
+            # Flatten MultiIndex columns if needed
+            if isinstance(pivot.columns, pd.MultiIndex):
+                pivot.columns = [str(c[-1]) for c in pivot.columns]
+
+            pivot = pivot.reset_index()
+            pivot.columns.name = None
+
+            # Rename first column
+            pivot = pivot.rename(columns={row_col: row_label})
+
+    except Exception as e:
+        st.error(f"Pivot error: {e}")
+        return
+
+    # ── Format & Display ──
+    is_currency = 'value' in val_label.lower() or '$' in val_label
+    is_qty = 'qty' in val_label.lower() or 'batch' in val_label.lower() or val_label == 'Count'
+
+    # Apply styling
+    if col_col is not None and len(pivot.columns) > 2:
+        # Color-code the numeric cells (skip first column = row labels, last = Total)
+        numeric_cols = [c for c in pivot.columns if c != row_label]
+
+        def _color_cell(val):
+            """Gradient: higher value = darker blue."""
+            try:
+                v = float(val)
+                if v <= 0:
+                    return ''
+                return f'background-color: rgba(59, 130, 246, {min(0.5, v / pivot[numeric_cols].max().max() * 0.5):.2f})'
+            except (ValueError, TypeError):
+                return ''
+
+        # Format numbers
+        fmt = {}
+        for c in numeric_cols:
+            if is_currency:
+                fmt[c] = '${:,.0f}'
+            elif is_qty:
+                fmt[c] = '{:,.0f}'
+            else:
+                fmt[c] = '{:,.1f}'
+
+        try:
+            styled = pivot.style.map(
+                _color_cell, subset=numeric_cols,
+            ).format(fmt, na_rep='0')
+        except (AttributeError, TypeError):
+            try:
+                styled = pivot.style.applymap(
+                    _color_cell, subset=numeric_cols,
+                ).format(fmt, na_rep='0')
+            except Exception:
+                styled = pivot
+
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            hide_index=True,
+            height=min(35 * len(pivot) + 38, 600),
+        )
+    else:
+        # Simple table — no color coding
+        st.dataframe(
+            pivot,
+            use_container_width=True,
+            hide_index=True,
+            height=min(35 * len(pivot) + 38, 600),
+        )
+
+    # ── Summary caption ──
+    st.caption(
+        f"{len(df)} items · Rows: **{row_label}** "
+        + (f"· Columns: **{col_label}** " if col_col else "")
+        + f"· Values: **{val_label}** ({agg_label})"
+    )
+
+
+# =============================================================================
+# SMART PIVOT VIEWS — Summary views for Production Planners
+# =============================================================================
+
+def _get_line_week_key(line: MOLineItem) -> str:
+    """Extract week key (W13-2026) from a line's start date."""
+    d = line.actual_start or line.must_start_by
+    if d is None:
+        return "Unscheduled"
+    iso = d.isocalendar()
+    return f"W{iso[1]:02d}-{iso[0]}"
+
+
+def _get_line_week_start(line: MOLineItem) -> Optional[date]:
+    """Extract Monday of start week."""
+    d = line.actual_start or line.must_start_by
+    if d is None:
+        return None
+    return d - timedelta(days=d.weekday())
+
+
+# ── R2: Ready — Group by BOM Type ──────────────────────────────────────
+
+def _pivot_ready_by_bom_type(lines: List[MOLineItem]):
+    """Pivot Ready items by BOM Type — for workshop assignment."""
+    if not lines:
+        return
+
+    st.markdown("##### 🏭 By Workshop (BOM Type)")
+
+    groups = {}
+    for l in lines:
+        groups.setdefault(l.bom_type, []).append(l)
+
+    rows = []
+    for bom_type in sorted(groups.keys()):
+        items = groups[bom_type]
+        bom_cfg = BOM_TYPES.get(bom_type, {})
+        total_batches = sum(l.batches_needed for l in items)
+        total_qty = sum(l.suggested_qty for l in items)
+        total_value = sum(l.at_risk_value for l in items)
+        overdue = sum(1 for l in items if l.urgency_level == 'OVERDUE')
+        critical = sum(1 for l in items if l.urgency_level == 'CRITICAL')
+
+        urgency_tag = ""
+        if overdue > 0:
+            urgency_tag = f"🚨 {overdue} overdue"
+        elif critical > 0:
+            urgency_tag = f"🔴 {critical} critical"
+
+        rows.append({
+            'Workshop': f"{bom_cfg.get('icon', '')} {bom_type}",
+            'MO Lines': len(items),
+            'Total Batches': total_batches,
+            'Total Qty': round(total_qty),
+            'Value ($)': round(total_value),
+            'Urgent': urgency_tag,
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df,
+        column_config={
+            'Workshop': st.column_config.TextColumn(width='medium'),
+            'MO Lines': st.column_config.NumberColumn(format="%d", width='small'),
+            'Total Batches': st.column_config.NumberColumn(format="%d", width='small'),
+            'Total Qty': st.column_config.NumberColumn(format="%,d"),
+            'Value ($)': st.column_config.NumberColumn(format="$%,d"),
+            'Urgent': st.column_config.TextColumn(width='medium'),
+        },
+        hide_index=True, use_container_width=True,
+        height=35 * len(df) + 38,
+    )
+
+
+# ── R3: Ready — Group by Brand ─────────────────────────────────────────
+
+def _pivot_ready_by_brand(lines: List[MOLineItem]):
+    """Pivot Ready items by Brand — for management reporting."""
+    if not lines:
+        return
+
+    st.markdown("##### 🏷️ By Brand")
+
+    groups = {}
+    for l in lines:
+        brand = l.brand or '(No Brand)'
+        groups.setdefault(brand, []).append(l)
+
+    rows = []
+    for brand in sorted(groups.keys(), key=lambda b: -sum(i.at_risk_value for i in groups[b])):
+        items = groups[brand]
+        avg_priority = sum(l.priority_score for l in items) / len(items)
+        rows.append({
+            'Brand': brand,
+            'MO Lines': len(items),
+            'Total Batches': sum(l.batches_needed for l in items),
+            'Value ($)': round(sum(l.at_risk_value for l in items)),
+            'Avg Priority': round(avg_priority, 1),
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df,
+        column_config={
+            'Brand': st.column_config.TextColumn(width='medium'),
+            'MO Lines': st.column_config.NumberColumn(format="%d", width='small'),
+            'Total Batches': st.column_config.NumberColumn(format="%d", width='small'),
+            'Value ($)': st.column_config.NumberColumn(format="$%,d"),
+            'Avg Priority': st.column_config.NumberColumn(format="%.1f", width='small',
+                                                          help="Lower = more urgent"),
+        },
+        hide_index=True, use_container_width=True,
+        height=min(35 * len(df) + 38, 300),
+    )
+
+
+# ── R4: Ready — Group by Start Week ────────────────────────────────────
+
+def _pivot_ready_by_week(lines: List[MOLineItem]):
+    """Pivot Ready items by start week — for workload planning."""
+    if not lines:
+        return
+
+    st.markdown("##### 📅 By Start Week")
+
+    groups = {}
+    for l in lines:
+        week = _get_line_week_key(l)
+        groups.setdefault(week, []).append(l)
+
+    rows = []
+    # Sort by week key (W13-2026 format sorts naturally)
+    for week in sorted(groups.keys()):
+        items = groups[week]
+        week_start = _get_line_week_start(items[0])
+        date_range = ""
+        if week_start:
+            week_end = week_start + timedelta(days=4)
+            date_range = f"{week_start.strftime('%d/%m')} – {week_end.strftime('%d/%m')}"
+
+        # BOM type breakdown inline
+        bom_counts = {}
+        for l in items:
+            bom_counts[l.bom_type] = bom_counts.get(l.bom_type, 0) + 1
+        bom_summary = ", ".join(
+            f"{BOM_TYPES.get(bt, {}).get('icon', '')} {c}"
+            for bt, c in sorted(bom_counts.items())
+        )
+
+        rows.append({
+            'Week': week,
+            'Dates': date_range,
+            'MO Lines': len(items),
+            'Batches': sum(l.batches_needed for l in items),
+            'Value ($)': round(sum(l.at_risk_value for l in items)),
+            'Workshops': bom_summary,
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df,
+        column_config={
+            'Week': st.column_config.TextColumn(width='small'),
+            'Dates': st.column_config.TextColumn(width='medium'),
+            'MO Lines': st.column_config.NumberColumn(format="%d", width='small'),
+            'Batches': st.column_config.NumberColumn(format="%d", width='small'),
+            'Value ($)': st.column_config.NumberColumn(format="$%,d"),
+            'Workshops': st.column_config.TextColumn(width='large'),
+        },
+        hide_index=True, use_container_width=True,
+        height=min(35 * len(df) + 38, 250),
+    )
+
+
+# ── W1: Waiting — Bottleneck Material Pivot ─────────────────────────────
+
+def _pivot_waiting_bottleneck_materials(lines: List[MOLineItem]):
+    """Pivot Waiting items by bottleneck material — the most actionable view."""
+    if not lines:
+        return
+
+    # Collect bottleneck info
+    bottleneck_map: Dict[str, Dict] = {}
+    for l in lines:
+        mat = l.bottleneck_material
+        if not mat:
+            continue
+        if mat not in bottleneck_map:
+            bottleneck_map[mat] = {
+                'products': [],
+                'total_value': 0.0,
+                'earliest_eta': None,
+                'latest_eta': None,
+                'contention_count': 0,
+            }
+        info = bottleneck_map[mat]
+        info['products'].append(l.pt_code)
+        info['total_value'] += l.at_risk_value
+        if l.has_contention:
+            info['contention_count'] += 1
+        if l.bottleneck_eta:
+            if info['earliest_eta'] is None or l.bottleneck_eta < info['earliest_eta']:
+                info['earliest_eta'] = l.bottleneck_eta
+            if info['latest_eta'] is None or l.bottleneck_eta > info['latest_eta']:
+                info['latest_eta'] = l.bottleneck_eta
+
+    if not bottleneck_map:
+        return
+
+    st.markdown("##### 🧱 Bottleneck Materials — Push these to unlock MOs")
+
+    rows = []
+    # Sort by number of blocked products (highest impact first)
+    for mat_code, info in sorted(bottleneck_map.items(), key=lambda x: -len(x[1]['products'])):
+        eta_str = ""
+        if info['earliest_eta']:
+            eta_str = str(info['earliest_eta'])
+            if info['latest_eta'] and info['latest_eta'] != info['earliest_eta']:
+                eta_str += f" → {info['latest_eta']}"
+
+        rows.append({
+            'Material': mat_code,
+            'Blocks': f"{len(info['products'])} products",
+            'Value Blocked ($)': round(info['total_value']),
+            'ETA': eta_str or '❌ No ETA',
+            'Contention': '⚡ Yes' if info['contention_count'] > 0 else '',
+            'Affected': ', '.join(info['products'][:5]) + (
+                f" +{len(info['products'])-5}" if len(info['products']) > 5 else ""
+            ),
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df,
+        column_config={
+            'Material': st.column_config.TextColumn(width='medium'),
+            'Blocks': st.column_config.TextColumn(width='small'),
+            'Value Blocked ($)': st.column_config.NumberColumn(format="$%,d"),
+            'ETA': st.column_config.TextColumn(width='medium'),
+            'Contention': st.column_config.TextColumn(width='small'),
+            'Affected': st.column_config.TextColumn('Affected Products', width='large'),
+        },
+        hide_index=True, use_container_width=True,
+        height=min(35 * len(df) + 38, 400),
+    )
+
+    # Highlight: total value blocked by top 3 materials
+    if len(rows) >= 2:
+        top3_value = sum(r['Value Blocked ($)'] for r in rows[:3])
+        total_value = sum(r['Value Blocked ($)'] for r in rows)
+        if total_value > 0:
+            pct = round(top3_value / total_value * 100)
+            st.caption(
+                f"💡 Top 3 bottleneck materials account for **${top3_value:,}** "
+                f"({pct}% of total blocked value). Prioritize PO follow-up on these."
+            )
+
+
+# ── W2: Waiting — ETA Timeline (when will items unlock?) ────────────────
+
+def _pivot_waiting_eta_timeline(lines: List[MOLineItem]):
+    """Group Waiting items by ETA week — forecast when items become Ready."""
+    if not lines:
+        return
+
+    st.markdown("##### 📅 ETA Forecast — When will items unlock?")
+
+    groups = {'No ETA': []}
+    for l in lines:
+        if l.bottleneck_eta:
+            iso = l.bottleneck_eta.isocalendar()
+            week_key = f"W{iso[1]:02d}-{iso[0]}"
+        else:
+            week_key = 'No ETA'
+        groups.setdefault(week_key, []).append(l)
+
+    rows = []
+    cumulative_count = 0
+    cumulative_value = 0.0
+
+    # Sorted weeks first, "No ETA" last
+    sorted_keys = sorted(k for k in groups.keys() if k != 'No ETA')
+    if 'No ETA' in groups and groups['No ETA']:
+        sorted_keys.append('No ETA')
+
+    for week in sorted_keys:
+        items = groups[week]
+        week_value = sum(l.at_risk_value for l in items)
+
+        if week != 'No ETA':
+            cumulative_count += len(items)
+            cumulative_value += week_value
+
+        date_hint = ""
+        if week != 'No ETA' and items:
+            eta = items[0].bottleneck_eta
+            if eta:
+                week_start = eta - timedelta(days=eta.weekday())
+                date_hint = f"{week_start.strftime('%d/%m')} – {(week_start + timedelta(days=4)).strftime('%d/%m')}"
+
+        rows.append({
+            'ETA Week': week,
+            'Dates': date_hint,
+            'Items Unlock': len(items),
+            'Value Unlocks ($)': round(week_value),
+            'Cumulative': cumulative_count if week != 'No ETA' else '—',
+            'Cum. Value ($)': round(cumulative_value) if week != 'No ETA' else '—',
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df,
+        column_config={
+            'ETA Week': st.column_config.TextColumn(width='small'),
+            'Dates': st.column_config.TextColumn(width='medium'),
+            'Items Unlock': st.column_config.NumberColumn(format="%d", width='small'),
+            'Value Unlocks ($)': st.column_config.NumberColumn(format="$%,d"),
+            'Cumulative': st.column_config.TextColumn(width='small'),
+            'Cum. Value ($)': st.column_config.TextColumn(width='small'),
+        },
+        hide_index=True, use_container_width=True,
+        height=min(35 * len(df) + 38, 300),
+    )
+
+    # Almost-ready highlight (W3)
+    almost_ready = [l for l in lines if l.materials_ready_pct >= 80]
+    if almost_ready:
+        ar_value = sum(l.at_risk_value for l in almost_ready)
+        st.success(
+            f"🟢 **{len(almost_ready)} items are ≥80% material ready** "
+            f"(${ar_value:,.0f} value) — consider partial production or prioritize remaining PO."
+        )
+
+
+# ── O1: Overview — Urgency × Readiness Matrix ──────────────────────────
+
+def _pivot_urgency_readiness_matrix(result: MOSuggestionResult):
+    """2D matrix: Urgency rows × Readiness cols → count + value."""
+    lines = result.all_lines
+    if not lines:
+        return
+
+    st.markdown("##### 🎯 Urgency × Readiness Matrix")
+    st.caption("Rows = urgency, Columns = readiness. Cell = count (value). "
+               "**Top-left corner = act immediately.**")
+
+    # Build matrix data
+    matrix: Dict[str, Dict[str, Dict]] = {}
+    urgency_order = ['OVERDUE', 'CRITICAL', 'URGENT', 'THIS_WEEK', 'PLANNED']
+    readiness_order = ['READY', 'USE_ALTERNATIVE', 'PARTIAL_READY', 'BLOCKED']
+
+    readiness_labels = {
+        'READY': '✅ Ready',
+        'USE_ALTERNATIVE': '🔄 Alt',
+        'PARTIAL_READY': '🟡 Partial',
+        'BLOCKED': '🔴 Blocked',
+    }
+
+    for l in lines:
+        urg = l.urgency_level
+        rdy = l.readiness_status
+        if urg not in matrix:
+            matrix[urg] = {}
+        if rdy not in matrix[urg]:
+            matrix[urg][rdy] = {'count': 0, 'value': 0.0}
+        matrix[urg][rdy]['count'] += 1
+        matrix[urg][rdy]['value'] += l.at_risk_value
+
+    # Build display rows
+    rows = []
+    for urg in urgency_order:
+        if urg not in matrix:
+            continue
+        urg_cfg = URGENCY_LEVELS.get(urg, {})
+        row = {'Urgency': f"{urg_cfg.get('icon', '')} {urg_cfg.get('label', urg)}"}
+        row_total = 0
+        for rdy in readiness_order:
+            col_label = readiness_labels.get(rdy, rdy)
+            cell = matrix.get(urg, {}).get(rdy)
+            if cell and cell['count'] > 0:
+                row[col_label] = f"{cell['count']} (${cell['value']:,.0f})"
+                row_total += cell['count']
+            else:
+                row[col_label] = ''
+        row['Total'] = row_total
+        rows.append(row)
+
+    if not rows:
+        return
+
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df,
+        column_config={
+            'Urgency': st.column_config.TextColumn(width='medium'),
+            'Total': st.column_config.NumberColumn(format="%d", width='small'),
+        },
+        hide_index=True, use_container_width=True,
+        height=35 * len(df) + 38,
+    )
+
+    # Action callout: Critical + Ready items
+    critical_ready = [
+        l for l in lines
+        if l.urgency_level in ('OVERDUE', 'CRITICAL')
+        and l.readiness_status in ('READY', 'USE_ALTERNATIVE')
+    ]
+    if critical_ready:
+        cr_value = sum(l.at_risk_value for l in critical_ready)
+        st.error(
+            f"🚨 **{len(critical_ready)} items are both URGENT and READY** — "
+            f"${cr_value:,.0f} at risk. Create MOs for these immediately."
+        )
+
+
+# =============================================================================
 # TAB FRAGMENTS
 # =============================================================================
 
@@ -2294,15 +2977,56 @@ def ready_tab_fragment(result: MOSuggestionResult):
         return
 
     total_value = sum(l.at_risk_value for l in lines)
-    st.markdown(
-        f"**{len(lines)} MO suggestions** ready to start production — "
-        f"total at-risk value: **${total_value:,.0f}**"
+    total_batches = sum(l.batches_needed for l in lines)
+    total_qty = sum(l.suggested_qty for l in lines)
+    brands = set(l.brand for l in lines if l.brand)
+
+    # ── Summary Cards ──
+    kc = st.columns(5)
+    with kc[0]:
+        st.metric("MO Lines", f"{len(lines)}")
+    with kc[1]:
+        st.metric("Total Batches", f"{total_batches:,}")
+    with kc[2]:
+        st.metric("Total Qty", f"{total_qty:,.0f}")
+    with kc[3]:
+        st.metric("Value ($)", f"${total_value:,.0f}")
+    with kc[4]:
+        st.metric("Brands", f"{len(brands)}")
+
+    # ── View Toggle ──
+    view_mode = st.radio(
+        "View mode",
+        ['📊 Summary', '📋 Detail', '🔄 Pivot'],
+        horizontal=True,
+        key="ready_view_mode",
+        label_visibility="collapsed",
     )
 
-    render_mo_lines_table(
-        lines, title="Ready to Produce",
-        show_readiness=False, show_action=True,
-    )
+    if view_mode == '📊 Summary':
+        # R2: Group by BOM Type
+        _pivot_ready_by_bom_type(lines)
+
+        # R4: Group by Start Week
+        _pivot_ready_by_week(lines)
+
+        # R3: Group by Brand (collapsible — less important)
+        with st.expander("🏷️ By Brand", expanded=False):
+            _pivot_ready_by_brand(lines)
+
+    elif view_mode == '🔄 Pivot':
+        st.markdown("##### 🔄 Pivot Table")
+        _render_dynamic_pivot(lines, key_prefix="pv_ready")
+
+    else:
+        st.markdown(
+            f"**{len(lines)} MO suggestions** ready to start production — "
+            f"total at-risk value: **${total_value:,.0f}**"
+        )
+        render_mo_lines_table(
+            lines, title="Ready to Produce",
+            show_readiness=False, show_action=True,
+        )
 
 
 def waiting_tab_fragment(result: MOSuggestionResult):
@@ -2313,27 +3037,53 @@ def waiting_tab_fragment(result: MOSuggestionResult):
         return
 
     total_value = sum(l.at_risk_value for l in lines)
-    st.markdown(
-        f"**{len(lines)} items** waiting for materials — "
-        f"total at-risk value: **${total_value:,.0f}**"
+    has_eta = sum(1 for l in lines if l.bottleneck_eta is not None)
+    no_eta = len(lines) - has_eta
+    almost_ready = sum(1 for l in lines if l.materials_ready_pct >= 80)
+
+    # ── Summary Cards ──
+    kc = st.columns(5)
+    with kc[0]:
+        st.metric("Waiting Items", f"{len(lines)}")
+    with kc[1]:
+        st.metric("Value ($)", f"${total_value:,.0f}")
+    with kc[2]:
+        st.metric("Has ETA", f"{has_eta}", delta=f"{no_eta} no ETA" if no_eta else None, delta_color="off")
+    with kc[3]:
+        st.metric("Almost Ready", f"{almost_ready}", help="≥80% materials available")
+    with kc[4]:
+        bottleneck_count = len(set(l.bottleneck_material for l in lines if l.bottleneck_material))
+        st.metric("Bottleneck NVL", f"{bottleneck_count}")
+
+    # ── View Toggle ──
+    view_mode = st.radio(
+        "View mode",
+        ['📊 Summary', '📋 Detail', '🔄 Pivot'],
+        horizontal=True,
+        key="waiting_view_mode",
+        label_visibility="collapsed",
     )
 
-    # Bottleneck summary
-    bottlenecks = {}
-    for l in lines:
-        if l.bottleneck_material:
-            bottlenecks.setdefault(l.bottleneck_material, []).append(l.pt_code)
+    if view_mode == '📊 Summary':
+        # W1: Bottleneck Material Pivot (most important view)
+        _pivot_waiting_bottleneck_materials(lines)
 
-    if bottlenecks:
-        top_bn = sorted(bottlenecks.items(), key=lambda x: -len(x[1]))[:5]
-        st.markdown("**Top bottleneck materials:**")
-        for mat_code, products in top_bn:
-            st.markdown(f"- `{mat_code}` — blocks {len(products)} product(s)")
+        # W2: ETA Timeline + W3: Almost-ready highlight (inline)
+        _pivot_waiting_eta_timeline(lines)
 
-    render_mo_lines_table(
-        lines, title="Waiting for Materials",
-        show_readiness=True, show_action=True,
-    )
+    elif view_mode == '🔄 Pivot':
+        st.markdown("##### 🔄 Pivot Table")
+        _render_dynamic_pivot(lines, key_prefix="pv_waiting")
+
+    else:
+        st.markdown(
+            f"**{len(lines)} items** waiting for materials — "
+            f"total at-risk value: **${total_value:,.0f}**"
+        )
+        render_mo_lines_table(
+            lines, title="Waiting for Materials",
+            show_readiness=True, show_action=True,
+        )
 
 
 def blocked_tab_fragment(result: MOSuggestionResult):
@@ -2342,15 +3092,28 @@ def blocked_tab_fragment(result: MOSuggestionResult):
 
     if lines:
         total_value = sum(l.at_risk_value for l in lines)
-        st.markdown(
-            f"**{len(lines)} items** blocked — materials unavailable, no ETA. "
-            f"At-risk value: **${total_value:,.0f}**"
+
+        # View toggle for blocked items
+        view_mode = st.radio(
+            "View mode",
+            ['📋 Detail', '🔄 Pivot'],
+            horizontal=True,
+            key="blocked_view_mode",
+            label_visibility="collapsed",
         )
 
-        render_mo_lines_table(
-            lines, title="Blocked",
-            show_readiness=True, show_action=True,
-        )
+        if view_mode == '🔄 Pivot':
+            st.markdown("##### 🔄 Pivot Table — Blocked Items")
+            _render_dynamic_pivot(lines, key_prefix="pv_blocked")
+        else:
+            st.markdown(
+                f"**{len(lines)} items** blocked — materials unavailable, no ETA. "
+                f"At-risk value: **${total_value:,.0f}**"
+            )
+            render_mo_lines_table(
+                lines, title="Blocked",
+                show_readiness=True, show_action=True,
+            )
 
     # Unschedulable sub-section
     if result.has_unschedulable():
@@ -2421,7 +3184,7 @@ def _render_weekly_summary(result: MOSuggestionResult):
 
 
 def overview_tab_fragment(result: MOSuggestionResult):
-    """Tab 5: Overview — KPIs + urgency + top urgent + BOM breakdown + reconciliation."""
+    """Tab 5: Overview — KPIs + urgency + matrix + top urgent + BOM breakdown + reconciliation."""
 
     # Data flow summary
     inp = result.input_summary or {}
@@ -2453,11 +3216,18 @@ def overview_tab_fragment(result: MOSuggestionResult):
             f"Total at-risk value: **${overdue_value:,.0f}**."
         )
 
+    # O1: Urgency × Readiness Matrix (new — the key strategic view)
+    _pivot_urgency_readiness_matrix(result)
+
     # Top urgent
     _render_top_urgent_items(result, top_n=5)
 
     # BOM breakdown
     _render_bom_distribution(result)
+
+    # Dynamic Pivot — all lines
+    with st.expander("🔄 **Pivot Table** — All MO Lines", expanded=False):
+        _render_dynamic_pivot(result.all_lines, key_prefix="pv_overview")
 
     # Reconciliation
     render_reconciliation_panel(result)
