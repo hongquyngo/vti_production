@@ -14,7 +14,7 @@ Does NOT load BOM/supply/demand — that comes from GAP result.
 
 import pandas as pd
 import logging
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +452,258 @@ class ProductionDataLoader:
         except Exception as e:
             logger.warning(f"Could not load SO linkage: {e}")
             return pd.DataFrame()
+
+    # =========================================================================
+    # BOM LEAD TIME — WRITE OPERATIONS (Phase 2)
+    # =========================================================================
+
+    def save_bom_lead_time(
+        self,
+        bom_header_id: int,
+        standard_lead_time_days: int,
+        plant_id: Optional[int] = None,
+        minimum_lead_time_days: Optional[int] = None,
+        maximum_lead_time_days: Optional[int] = None,
+        effective_date: Optional[str] = None,
+        notes: str = '',
+        source: str = 'MANUAL',
+        user_id: Optional[int] = None,
+    ) -> bool:
+        """
+        Insert or update a BOM lead time row.
+
+        Uses INSERT ... ON DUPLICATE KEY UPDATE on (bom_header_id, plant_id, effective_date).
+        """
+        self._ensure_connection()
+        from sqlalchemy import text
+
+        if effective_date is None:
+            from datetime import date as _date
+            effective_date = _date.today().isoformat()
+
+        query = text("""
+            INSERT INTO bom_lead_times
+                (bom_header_id, plant_id, standard_lead_time_days,
+                 minimum_lead_time_days, maximum_lead_time_days,
+                 effective_date, notes, source, is_active,
+                 created_by, updated_by)
+            VALUES
+                (:bom_header_id, :plant_id, :standard_lt,
+                 :min_lt, :max_lt,
+                 :effective_date, :notes, :source, 1,
+                 :user_id, :user_id)
+            ON DUPLICATE KEY UPDATE
+                standard_lead_time_days = VALUES(standard_lead_time_days),
+                minimum_lead_time_days = VALUES(minimum_lead_time_days),
+                maximum_lead_time_days = VALUES(maximum_lead_time_days),
+                notes = VALUES(notes),
+                source = VALUES(source),
+                updated_by = VALUES(updated_by),
+                is_active = 1
+        """)
+
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(query, {
+                    'bom_header_id': bom_header_id,
+                    'plant_id': plant_id,
+                    'standard_lt': standard_lead_time_days,
+                    'min_lt': minimum_lead_time_days,
+                    'max_lt': maximum_lead_time_days,
+                    'effective_date': effective_date,
+                    'notes': notes,
+                    'source': source,
+                    'user_id': user_id,
+                })
+            logger.info(
+                f"Saved BOM lead time: bom={bom_header_id}, plant={plant_id}, "
+                f"std={standard_lead_time_days}d"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save BOM lead time: {e}")
+            return False
+
+    def bulk_save_bom_lead_times(
+        self,
+        rows: List[Dict],
+        user_id: Optional[int] = None,
+    ) -> Tuple[int, List[str]]:
+        """
+        Bulk save BOM lead times. Each row dict needs:
+        - bom_header_id, standard_lead_time_days
+        - Optional: plant_id, minimum_lead_time_days, maximum_lead_time_days,
+                    effective_date, notes, source
+
+        Returns: (success_count, error_messages)
+        """
+        success = 0
+        errors = []
+        for row in rows:
+            try:
+                ok = self.save_bom_lead_time(
+                    bom_header_id=row['bom_header_id'],
+                    standard_lead_time_days=row['standard_lead_time_days'],
+                    plant_id=row.get('plant_id'),
+                    minimum_lead_time_days=row.get('minimum_lead_time_days'),
+                    maximum_lead_time_days=row.get('maximum_lead_time_days'),
+                    effective_date=row.get('effective_date'),
+                    notes=row.get('notes', ''),
+                    source=row.get('source', 'MANUAL'),
+                    user_id=user_id,
+                )
+                if ok:
+                    success += 1
+                else:
+                    errors.append(f"BOM {row['bom_header_id']}: save returned False")
+            except Exception as e:
+                errors.append(f"BOM {row.get('bom_header_id', '?')}: {e}")
+
+        logger.info(f"Bulk BOM lead time save: {success}/{len(rows)} succeeded")
+        return success, errors
+
+    def delete_bom_lead_time(self, bom_lead_time_id: int) -> bool:
+        """Soft-delete a BOM lead time row (set is_active=0)."""
+        self._ensure_connection()
+        from sqlalchemy import text
+
+        query = text("""
+            UPDATE bom_lead_times SET is_active = 0
+            WHERE id = :id
+        """)
+        try:
+            with self._engine.begin() as conn:
+                result = conn.execute(query, {'id': bom_lead_time_id})
+                return result.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to delete BOM lead time {bom_lead_time_id}: {e}")
+            return False
+
+    def load_all_active_boms(self) -> pd.DataFrame:
+        """Load all ACTIVE BOMs for the BOM lead time editor dropdown."""
+        self._ensure_connection()
+
+        query = """
+        SELECT
+            bh.id AS bom_header_id,
+            bh.bom_code,
+            bh.bom_type,
+            bh.product_id,
+            p.pt_code,
+            p.name AS product_name,
+            bh.output_qty,
+            bh.status
+        FROM bom_headers bh
+        JOIN products p ON bh.product_id = p.id
+        WHERE bh.delete_flag = 0
+          AND bh.status = 'ACTIVE'
+        ORDER BY bh.bom_type, bh.bom_code
+        """
+        try:
+            return pd.read_sql(query, self._engine)
+        except Exception as e:
+            logger.error(f"Failed to load active BOMs: {e}")
+            return pd.DataFrame()
+
+    # =========================================================================
+    # PLANT — WRITE OPERATIONS (Phase 2)
+    # =========================================================================
+
+    def save_plant(
+        self,
+        plant_code: str,
+        plant_name: str,
+        entity_id: int,
+        plant_type: str = 'MIXED',
+        plant_manager_id: Optional[int] = None,
+        material_warehouse_id: Optional[int] = None,
+        finished_goods_warehouse_id: Optional[int] = None,
+        address: str = '',
+        notes: str = '',
+        user_id: Optional[int] = None,
+        plant_id: Optional[int] = None,
+    ) -> Optional[int]:
+        """
+        Insert or update a production plant.
+
+        Args:
+            plant_id: If provided, UPDATE existing. If None, INSERT new.
+
+        Returns: plant_id on success, None on failure.
+        """
+        self._ensure_connection()
+        from sqlalchemy import text
+
+        if plant_id:
+            # UPDATE
+            query = text("""
+                UPDATE production_plants SET
+                    plant_code = :plant_code,
+                    plant_name = :plant_name,
+                    entity_id = :entity_id,
+                    plant_type = :plant_type,
+                    plant_manager_id = :plant_manager_id,
+                    material_warehouse_id = :material_wh,
+                    finished_goods_warehouse_id = :fg_wh,
+                    address = :address,
+                    notes = :notes,
+                    updated_by = :user_id
+                WHERE id = :plant_id AND delete_flag = 0
+            """)
+            try:
+                with self._engine.begin() as conn:
+                    conn.execute(query, {
+                        'plant_code': plant_code,
+                        'plant_name': plant_name,
+                        'entity_id': entity_id,
+                        'plant_type': plant_type,
+                        'plant_manager_id': plant_manager_id,
+                        'material_wh': material_warehouse_id,
+                        'fg_wh': finished_goods_warehouse_id,
+                        'address': address,
+                        'notes': notes,
+                        'user_id': user_id,
+                        'plant_id': plant_id,
+                    })
+                logger.info(f"Updated plant {plant_id}: {plant_code}")
+                return plant_id
+            except Exception as e:
+                logger.error(f"Failed to update plant: {e}")
+                return None
+        else:
+            # INSERT
+            query = text("""
+                INSERT INTO production_plants
+                    (plant_code, plant_name, entity_id, plant_type,
+                     plant_manager_id, material_warehouse_id,
+                     finished_goods_warehouse_id, address, notes,
+                     is_active, created_by, updated_by)
+                VALUES
+                    (:plant_code, :plant_name, :entity_id, :plant_type,
+                     :plant_manager_id, :material_wh,
+                     :fg_wh, :address, :notes,
+                     1, :user_id, :user_id)
+            """)
+            try:
+                with self._engine.begin() as conn:
+                    result = conn.execute(query, {
+                        'plant_code': plant_code,
+                        'plant_name': plant_name,
+                        'entity_id': entity_id,
+                        'plant_type': plant_type,
+                        'plant_manager_id': plant_manager_id,
+                        'material_wh': material_warehouse_id,
+                        'fg_wh': finished_goods_warehouse_id,
+                        'address': address,
+                        'notes': notes,
+                        'user_id': user_id,
+                    })
+                    new_id = result.lastrowid
+                logger.info(f"Created plant {new_id}: {plant_code}")
+                return new_id
+            except Exception as e:
+                logger.error(f"Failed to create plant: {e}")
+                return None
 
 
 # =============================================================================

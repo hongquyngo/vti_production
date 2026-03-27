@@ -801,139 +801,102 @@ def _render_lead_time_reference(lt_stats_df: pd.DataFrame):
 
 def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = None):
     """
-    Show BOM-level lead time overview (from bom_lead_times table + historical).
+    BOM Lead Time management panel (Phase 2).
 
-    Read-only panel showing:
-    - Which BOMs have standard_lead_time_days configured
-    - Historical avg from completed MOs
-    - How many BOMs are using fallback defaults
-
-    Gracefully handles missing bom_lead_times table (backward compat).
+    Features:
+    - Read-only overview table with historical stats
+    - Bulk Fill from Historical button
+    - Single BOM lead time editor (add/edit)
+    - Plant management (add)
     """
-    # Try loading BOM lead times from DB
+    # Try loading data
     bom_lt_df = pd.DataFrame()
     plants_df = pd.DataFrame()
+    all_boms_df = pd.DataFrame()
     try:
         from .production_data_loader import get_production_data_loader
         loader = get_production_data_loader()
         bom_lt_df = loader.load_bom_lead_times()
         plants_df = loader.load_plants()
+        all_boms_df = loader.load_all_active_boms()
     except Exception:
         pass
 
-    # Build combined view: all active BOMs × their LT status
-    # Use historical stats to show BOMs even without configured LT
     has_bom_lt = not bom_lt_df.empty
     has_historical = (
         lead_time_stats_df is not None
         and not lead_time_stats_df.empty
         and 'bom_header_id' in lead_time_stats_df.columns
     )
+    has_boms = not all_boms_df.empty
 
-    if not has_bom_lt and not has_historical:
-        # Nothing to show — table not deployed or no data yet
+    if not has_bom_lt and not has_historical and not has_boms:
         return
 
-    with st.expander("🏭 **BOM Lead Times** — per-BOM overview", expanded=False):
+    with st.expander("🏭 **BOM Lead Times** — per-BOM management", expanded=False):
         st.caption(
             "Lead time per BOM, managed by Production team. "
             "BOMs without a configured lead time use the fallback defaults below."
         )
 
-        # Plants info
+        # ── Plants info ──
         if not plants_df.empty:
-            plant_names = plants_df['plant_name'].tolist()
-            st.caption(f"Plants: {', '.join(plant_names)}")
+            plant_names = [
+                f"{r['plant_code']} ({r['plant_name']})"
+                for _, r in plants_df.iterrows()
+            ]
+            st.caption(f"🏭 Plants: {' · '.join(plant_names)}")
 
-        rows = []
+        # ── ACTION BUTTONS ROW ──
+        act_cols = st.columns([1, 1, 1, 2])
 
-        if has_bom_lt:
-            # Show configured BOM lead times
-            for _, row in bom_lt_df.iterrows():
-                r = {
-                    'BOM Code': row.get('bom_code', ''),
-                    'Type': row.get('bom_type', ''),
-                    'Product': row.get('pt_code', ''),
-                    'Std LT': f"{int(row['standard_lead_time_days'])}d",
-                    'Min': f"{int(row['minimum_lead_time_days'])}d" if pd.notna(row.get('minimum_lead_time_days')) else '—',
-                    'Max': f"{int(row['maximum_lead_time_days'])}d" if pd.notna(row.get('maximum_lead_time_days')) else '—',
-                    'Plant': row.get('plant_name', 'Global') if pd.notna(row.get('plant_name')) else 'Global',
-                    'Source': row.get('source', ''),
-                }
+        with act_cols[0]:
+            bulk_fill_clicked = st.button(
+                "📥 Bulk Fill from Historical",
+                key="blt_bulk_fill",
+                help="Auto-fill standard lead time for all BOMs using historical avg (rounded up). Only fills BOMs without existing config.",
+            )
 
-                # Merge historical if available
-                if has_historical:
-                    bom_id = row.get('bom_header_id')
-                    hist_row = lead_time_stats_df[
-                        lead_time_stats_df['bom_header_id'] == bom_id
-                    ]
-                    if not hist_row.empty:
-                        h = hist_row.iloc[0]
-                        avg = h.get('avg_lead_time_days')
-                        mos = h.get('completed_mo_count', 0)
-                        h_min = h.get('min_lead_time_days')
-                        h_max = h.get('max_lead_time_days')
-                        h_std = h.get('stddev_lead_time_days')
-                        if pd.notna(avg):
-                            r['Hist Avg'] = f"{float(avg):.1f}d"
-                            r['Hist Min'] = f"{int(h_min)}d" if pd.notna(h_min) else '—'
-                            r['Hist Max'] = f"{int(h_max)}d" if pd.notna(h_max) else '—'
-                            r['Hist σ'] = f"{float(h_std):.1f}" if pd.notna(h_std) else '—'
-                            r['MOs'] = int(mos) if pd.notna(mos) else 0
-                        else:
-                            r['Hist Avg'] = '—'
-                            r['Hist Min'] = '—'
-                            r['Hist Max'] = '—'
-                            r['Hist σ'] = '—'
-                            r['MOs'] = 0
-                    else:
-                        r['Hist Avg'] = '—'
-                        r['Hist Min'] = '—'
-                        r['Hist Max'] = '—'
-                        r['Hist σ'] = '—'
-                        r['MOs'] = 0
+        with act_cols[1]:
+            show_editor = st.button(
+                "✏️ Edit BOM Lead Time",
+                key="blt_show_editor",
+            )
 
-                rows.append(r)
+        with act_cols[2]:
+            show_plant_form = st.button(
+                "🏭 Add Plant",
+                key="blt_show_plant",
+            )
 
-        if has_historical and not has_bom_lt:
-            # No BOM LT configured yet — show historical data to guide setup
-            seen_boms = set()
-            for _, row in lead_time_stats_df.iterrows():
-                bom_id = row.get('bom_header_id')
-                if bom_id is None or pd.isna(bom_id) or bom_id in seen_boms:
-                    continue
-                seen_boms.add(bom_id)
-                avg = row.get('avg_lead_time_days')
-                mos = row.get('completed_mo_count', 0)
-                h_min = row.get('min_lead_time_days')
-                h_max = row.get('max_lead_time_days')
-                h_std = row.get('stddev_lead_time_days')
-                rows.append({
-                    'BOM Code': row.get('bom_code', ''),
-                    'Type': row.get('bom_type', ''),
-                    'Product': row.get('pt_code', ''),
-                    'Std LT': '— (not set)',
-                    'Min': '—',
-                    'Max': '—',
-                    'Plant': '—',
-                    'Source': '—',
-                    'Hist Avg': f"{float(avg):.1f}d" if pd.notna(avg) else '—',
-                    'Hist Min': f"{int(h_min)}d" if pd.notna(h_min) else '—',
-                    'Hist Max': f"{int(h_max)}d" if pd.notna(h_max) else '—',
-                    'Hist σ': f"{float(h_std):.1f}" if pd.notna(h_std) else '—',
-                    'MOs': int(mos) if pd.notna(mos) else 0,
-                })
+        # ── BULK FILL EXECUTION ──
+        if bulk_fill_clicked:
+            _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df)
+
+        # ── SINGLE BOM EDITOR ──
+        if show_editor or st.session_state.get('_blt_editor_open'):
+            st.session_state['_blt_editor_open'] = True
+            _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df)
+
+        # ── PLANT FORM ──
+        if show_plant_form or st.session_state.get('_plant_form_open'):
+            st.session_state['_plant_form_open'] = True
+            _render_plant_form()
+
+        # ── OVERVIEW TABLE ──
+        st.markdown("")
+        rows = _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historical)
 
         if rows:
             df = pd.DataFrame(rows)
 
-            # Drop all-dash columns when no BOM LT configured (noise)
+            # Drop noise columns when no BOM LT configured
             if not has_bom_lt:
                 drop_cols = [c for c in ['Std LT', 'Min', 'Max', 'Plant', 'Source']
                              if c in df.columns]
                 df = df.drop(columns=drop_cols)
 
-            # Sort by MOs descending (most data = most reliable)
+            # Sort by MOs descending
             if 'MOs' in df.columns:
                 df = df.sort_values('MOs', ascending=False).reset_index(drop=True)
 
@@ -961,6 +924,413 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
                 "No BOM lead time data available yet. "
                 "Configure per-BOM lead times or use fallback defaults below."
             )
+
+
+def _build_overview_rows(bom_lt_df, lead_time_stats_df, has_bom_lt, has_historical):
+    """Build rows for the BOM LT overview table."""
+    rows = []
+
+    # Track which bom_header_ids have configured LT
+    configured_bom_ids = set()
+
+    if has_bom_lt:
+        for _, row in bom_lt_df.iterrows():
+            bom_id = row.get('bom_header_id')
+            configured_bom_ids.add(bom_id)
+            r = {
+                'BOM Code': row.get('bom_code', ''),
+                'Type': row.get('bom_type', ''),
+                'Product': row.get('pt_code', ''),
+                'Std LT': f"{int(row['standard_lead_time_days'])}d",
+                'Min': f"{int(row['minimum_lead_time_days'])}d" if pd.notna(row.get('minimum_lead_time_days')) else '—',
+                'Max': f"{int(row['maximum_lead_time_days'])}d" if pd.notna(row.get('maximum_lead_time_days')) else '—',
+                'Plant': row.get('plant_name', 'Global') if pd.notna(row.get('plant_name')) else 'Global',
+                'Source': row.get('source', ''),
+            }
+
+            if has_historical:
+                _enrich_with_historical(r, bom_id, lead_time_stats_df)
+
+            rows.append(r)
+
+    # Add BOMs from historical that don't have configured LT
+    if has_historical:
+        seen_boms = set(configured_bom_ids)
+        for _, row in lead_time_stats_df.iterrows():
+            bom_id = row.get('bom_header_id')
+            if bom_id is None or pd.isna(bom_id) or bom_id in seen_boms:
+                continue
+            seen_boms.add(bom_id)
+            avg = row.get('avg_lead_time_days')
+            mos = row.get('completed_mo_count', 0)
+            h_min = row.get('min_lead_time_days')
+            h_max = row.get('max_lead_time_days')
+            h_std = row.get('stddev_lead_time_days')
+
+            r = {
+                'BOM Code': row.get('bom_code', ''),
+                'Type': row.get('bom_type', ''),
+                'Product': row.get('pt_code', ''),
+            }
+            if has_bom_lt:
+                # Mixed mode: some configured, some not
+                r['Std LT'] = '— (not set)'
+                r['Min'] = '—'
+                r['Max'] = '—'
+                r['Plant'] = '—'
+                r['Source'] = '—'
+
+            r['Hist Avg'] = f"{float(avg):.1f}d" if pd.notna(avg) else '—'
+            r['Hist Min'] = f"{int(h_min)}d" if pd.notna(h_min) else '—'
+            r['Hist Max'] = f"{int(h_max)}d" if pd.notna(h_max) else '—'
+            r['Hist σ'] = f"{float(h_std):.1f}" if pd.notna(h_std) else '—'
+            r['MOs'] = int(mos) if pd.notna(mos) else 0
+            rows.append(r)
+
+    return rows
+
+
+def _enrich_with_historical(r: dict, bom_id, lead_time_stats_df):
+    """Add Hist Avg/Min/Max/σ/MOs to a row dict from lead_time_stats_df."""
+    hist_row = lead_time_stats_df[lead_time_stats_df['bom_header_id'] == bom_id]
+    if not hist_row.empty:
+        h = hist_row.iloc[0]
+        avg = h.get('avg_lead_time_days')
+        mos = h.get('completed_mo_count', 0)
+        h_min = h.get('min_lead_time_days')
+        h_max = h.get('max_lead_time_days')
+        h_std = h.get('stddev_lead_time_days')
+        if pd.notna(avg):
+            r['Hist Avg'] = f"{float(avg):.1f}d"
+            r['Hist Min'] = f"{int(h_min)}d" if pd.notna(h_min) else '—'
+            r['Hist Max'] = f"{int(h_max)}d" if pd.notna(h_max) else '—'
+            r['Hist σ'] = f"{float(h_std):.1f}" if pd.notna(h_std) else '—'
+            r['MOs'] = int(mos) if pd.notna(mos) else 0
+            return
+    r['Hist Avg'] = '—'
+    r['Hist Min'] = '—'
+    r['Hist Max'] = '—'
+    r['Hist σ'] = '—'
+    r['MOs'] = 0
+
+
+# =============================================================================
+# BULK FILL FROM HISTORICAL
+# =============================================================================
+
+def _execute_bulk_fill(lead_time_stats_df, bom_lt_df, all_boms_df):
+    """
+    Auto-fill BOM lead times from historical averages.
+
+    Logic per BOM:
+    - standard_lead_time_days = ceil(avg_lead_time_days), minimum 1d
+    - minimum_lead_time_days = max(1, min_lead_time_days from history)
+    - maximum_lead_time_days = max_lead_time_days from history
+    - Only fills BOMs that don't already have a configured lead time
+    - source = 'HISTORICAL_AVG'
+    """
+    import math
+
+    if lead_time_stats_df is None or lead_time_stats_df.empty:
+        st.warning("No historical data available for bulk fill.")
+        return
+
+    if 'bom_header_id' not in lead_time_stats_df.columns:
+        st.warning("Historical data missing bom_header_id — recreate production_lead_time_stats_view.")
+        return
+
+    # Find BOMs already configured
+    already_configured = set()
+    if not bom_lt_df.empty:
+        already_configured = set(bom_lt_df['bom_header_id'].dropna().astype(int).tolist())
+
+    # Build rows to insert
+    rows_to_save = []
+    skipped_already = 0
+    skipped_no_data = 0
+
+    for _, row in lead_time_stats_df.iterrows():
+        bom_id = row.get('bom_header_id')
+        if bom_id is None or pd.isna(bom_id):
+            continue
+        bom_id = int(bom_id)
+
+        if bom_id in already_configured:
+            skipped_already += 1
+            continue
+
+        avg = row.get('avg_lead_time_days')
+        mos = row.get('completed_mo_count', 0)
+        h_min = row.get('min_lead_time_days')
+        h_max = row.get('max_lead_time_days')
+
+        if avg is None or pd.isna(avg) or (mos is not None and not pd.isna(mos) and int(mos) < 1):
+            skipped_no_data += 1
+            continue
+
+        std_lt = max(1, math.ceil(float(avg)))
+        min_lt = max(1, int(h_min)) if h_min is not None and not pd.isna(h_min) else None
+        max_lt = int(h_max) if h_max is not None and not pd.isna(h_max) else None
+        # Ensure std >= min
+        if min_lt and std_lt < min_lt:
+            std_lt = min_lt
+
+        bom_code = row.get('bom_code', '')
+        rows_to_save.append({
+            'bom_header_id': bom_id,
+            'standard_lead_time_days': std_lt,
+            'minimum_lead_time_days': min_lt,
+            'maximum_lead_time_days': max_lt,
+            'source': 'HISTORICAL_AVG',
+            'notes': f"Bulk filled from {int(mos)} completed MOs (avg {float(avg):.1f}d)",
+        })
+
+    if not rows_to_save:
+        if skipped_already > 0:
+            st.info(f"All BOMs with historical data already have lead times configured ({skipped_already} BOMs).")
+        else:
+            st.warning("No BOMs with sufficient historical data to fill.")
+        return
+
+    # Confirm + execute
+    st.markdown(
+        f"**Bulk Fill Preview:** {len(rows_to_save)} BOMs to fill "
+        f"(skipped {skipped_already} already configured, {skipped_no_data} no data)"
+    )
+
+    # Show preview
+    preview = pd.DataFrame([
+        {
+            'BOM ID': r['bom_header_id'],
+            'Std LT': f"{r['standard_lead_time_days']}d",
+            'Min': f"{r['minimum_lead_time_days']}d" if r.get('minimum_lead_time_days') else '—',
+            'Max': f"{r['maximum_lead_time_days']}d" if r.get('maximum_lead_time_days') else '—',
+        }
+        for r in rows_to_save[:20]
+    ])
+    st.dataframe(preview, hide_index=True, use_container_width=True,
+                 height=min(35 * len(preview) + 38, 250))
+    if len(rows_to_save) > 20:
+        st.caption(f"Showing 20 of {len(rows_to_save)} rows")
+
+    confirm_cols = st.columns([1, 3])
+    with confirm_cols[0]:
+        if st.button("✅ Confirm Bulk Fill", key="blt_bulk_confirm", type="primary"):
+            try:
+                from .production_data_loader import get_production_data_loader
+                loader = get_production_data_loader()
+                success, errors = loader.bulk_save_bom_lead_times(rows_to_save)
+                if success > 0:
+                    st.success(f"✅ Saved {success}/{len(rows_to_save)} BOM lead times.")
+                    if errors:
+                        st.warning(f"⚠️ {len(errors)} errors: {'; '.join(errors[:3])}")
+                    st.rerun()
+                else:
+                    st.error(f"Failed to save. Errors: {'; '.join(errors[:5])}")
+            except Exception as e:
+                st.error(f"Bulk fill failed: {e}")
+
+
+# =============================================================================
+# SINGLE BOM LEAD TIME EDITOR
+# =============================================================================
+
+def _render_bom_lt_editor(all_boms_df, plants_df, bom_lt_df, lead_time_stats_df):
+    """Inline form to add/edit a single BOM lead time."""
+    st.markdown("##### ✏️ Edit BOM Lead Time")
+
+    if all_boms_df.empty:
+        st.warning("No active BOMs found.")
+        if st.button("Close", key="blt_editor_close"):
+            st.session_state['_blt_editor_open'] = False
+            st.rerun()
+        return
+
+    # BOM selector
+    bom_options = {
+        f"{row['bom_code']} — {row['pt_code']} ({row['bom_type']})": int(row['bom_header_id'])
+        for _, row in all_boms_df.iterrows()
+    }
+    selected_label = st.selectbox(
+        "Select BOM",
+        options=list(bom_options.keys()),
+        key="blt_editor_bom_select",
+    )
+    selected_bom_id = bom_options.get(selected_label) if selected_label else None
+
+    # Plant selector (optional)
+    plant_options = {'Global (all plants)': None}
+    if not plants_df.empty:
+        for _, row in plants_df.iterrows():
+            plant_options[f"{row['plant_code']} — {row['plant_name']}"] = int(row['plant_id'])
+    selected_plant_label = st.selectbox(
+        "Plant",
+        options=list(plant_options.keys()),
+        key="blt_editor_plant_select",
+    )
+    selected_plant_id = plant_options.get(selected_plant_label)
+
+    # Pre-fill from existing config or historical
+    prefill_std, prefill_min, prefill_max = 1, 0, 0
+    hint_text = ""
+
+    if selected_bom_id and not bom_lt_df.empty:
+        existing = bom_lt_df[bom_lt_df['bom_header_id'] == selected_bom_id]
+        if not existing.empty:
+            row = existing.iloc[0]
+            prefill_std = int(row['standard_lead_time_days']) if pd.notna(row.get('standard_lead_time_days')) else 1
+            prefill_min = int(row['minimum_lead_time_days']) if pd.notna(row.get('minimum_lead_time_days')) else 0
+            prefill_max = int(row['maximum_lead_time_days']) if pd.notna(row.get('maximum_lead_time_days')) else 0
+            hint_text = "📋 Pre-filled from existing config"
+
+    if hint_text == "" and selected_bom_id and lead_time_stats_df is not None and not lead_time_stats_df.empty:
+        hist = lead_time_stats_df[lead_time_stats_df['bom_header_id'] == selected_bom_id] \
+            if 'bom_header_id' in lead_time_stats_df.columns else pd.DataFrame()
+        if not hist.empty:
+            h = hist.iloc[0]
+            avg = h.get('avg_lead_time_days')
+            if pd.notna(avg):
+                import math
+                prefill_std = max(1, math.ceil(float(avg)))
+                prefill_min = max(0, int(h['min_lead_time_days'])) if pd.notna(h.get('min_lead_time_days')) else 0
+                prefill_max = int(h['max_lead_time_days']) if pd.notna(h.get('max_lead_time_days')) else 0
+                mos = int(h['completed_mo_count']) if pd.notna(h.get('completed_mo_count')) else 0
+                hint_text = f"📊 Pre-filled from historical: avg {float(avg):.1f}d from {mos} MOs"
+
+    if hint_text:
+        st.caption(hint_text)
+
+    # Input fields
+    ed_cols = st.columns(3)
+    with ed_cols[0]:
+        std_lt = st.number_input(
+            "Standard LT (days)", min_value=1, max_value=365,
+            value=max(1, prefill_std), key="blt_ed_std",
+            help="Safest estimate. Used for backward scheduling.",
+        )
+    with ed_cols[1]:
+        min_lt = st.number_input(
+            "Min LT (days)", min_value=0, max_value=365,
+            value=prefill_min, key="blt_ed_min",
+            help="Best-case lead time. 0 = not set.",
+        )
+    with ed_cols[2]:
+        max_lt = st.number_input(
+            "Max LT (days)", min_value=0, max_value=365,
+            value=prefill_max, key="blt_ed_max",
+            help="Worst-case lead time. 0 = not set.",
+        )
+
+    notes = st.text_input("Notes", value="", key="blt_ed_notes",
+                          placeholder="Reason: new machine, process change, etc.")
+
+    # Save + Close buttons
+    btn_cols = st.columns([1, 1, 3])
+    with btn_cols[0]:
+        if st.button("💾 Save", key="blt_ed_save", type="primary"):
+            if selected_bom_id is None:
+                st.error("Select a BOM first.")
+            else:
+                try:
+                    from .production_data_loader import get_production_data_loader
+                    loader = get_production_data_loader()
+                    ok = loader.save_bom_lead_time(
+                        bom_header_id=selected_bom_id,
+                        standard_lead_time_days=std_lt,
+                        plant_id=selected_plant_id,
+                        minimum_lead_time_days=min_lt if min_lt > 0 else None,
+                        maximum_lead_time_days=max_lt if max_lt > 0 else None,
+                        notes=notes,
+                        source='MANUAL',
+                    )
+                    if ok:
+                        st.success(f"✅ Saved lead time for {selected_label}")
+                        st.session_state['_blt_editor_open'] = False
+                        st.rerun()
+                    else:
+                        st.error("Save failed — check logs.")
+                except Exception as e:
+                    st.error(f"Save failed: {e}")
+
+    with btn_cols[1]:
+        if st.button("Cancel", key="blt_ed_cancel"):
+            st.session_state['_blt_editor_open'] = False
+            st.rerun()
+
+    st.divider()
+
+
+# =============================================================================
+# PLANT FORM
+# =============================================================================
+
+def _render_plant_form():
+    """Inline form to add a production plant."""
+    st.markdown("##### 🏭 Add Production Plant")
+
+    pf_cols = st.columns(2)
+    with pf_cols[0]:
+        plant_code = st.text_input(
+            "Plant Code", key="pf_code",
+            placeholder="PLT-VN-01",
+            help="Unique code. Format: PLT-[COUNTRY]-[NUM]",
+        )
+    with pf_cols[1]:
+        plant_name = st.text_input(
+            "Plant Name", key="pf_name",
+            placeholder="Xưởng Cắt Yên Mỹ",
+        )
+
+    pf_cols2 = st.columns(3)
+    with pf_cols2[0]:
+        plant_type = st.selectbox(
+            "Type", ['MIXED', 'CUTTING', 'REPACKING', 'KITTING'],
+            key="pf_type",
+        )
+    with pf_cols2[1]:
+        # Entity — for now hardcode entity lookup
+        entity_id = st.number_input(
+            "Entity ID (company)", min_value=1,
+            value=23, key="pf_entity",
+            help="Company ID from companies table. Vietape VN = 23",
+        )
+    with pf_cols2[2]:
+        address = st.text_input("Address", key="pf_address", placeholder="KCN Yên Mỹ, Hưng Yên")
+
+    notes = st.text_input("Notes", key="pf_notes", placeholder="Năng lực, ca làm việc, thiết bị đặc biệt")
+
+    btn_cols = st.columns([1, 1, 3])
+    with btn_cols[0]:
+        if st.button("💾 Save Plant", key="pf_save", type="primary"):
+            if not plant_code or not plant_name:
+                st.error("Plant code and name are required.")
+            else:
+                try:
+                    from .production_data_loader import get_production_data_loader
+                    loader = get_production_data_loader()
+                    new_id = loader.save_plant(
+                        plant_code=plant_code,
+                        plant_name=plant_name,
+                        entity_id=entity_id,
+                        plant_type=plant_type,
+                        address=address,
+                        notes=notes,
+                    )
+                    if new_id:
+                        st.success(f"✅ Created plant: {plant_code} (ID: {new_id})")
+                        st.session_state['_plant_form_open'] = False
+                        st.rerun()
+                    else:
+                        st.error("Failed to create plant — check logs.")
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+
+    with btn_cols[1]:
+        if st.button("Cancel", key="pf_cancel"):
+            st.session_state['_plant_form_open'] = False
+            st.rerun()
+
+    st.divider()
 
 
 # =============================================================================
