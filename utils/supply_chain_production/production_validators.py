@@ -497,27 +497,142 @@ def extract_material_requirements(
 
 
 # =============================================================================
-# GAP FILTER VALIDATION (Informed Consent — same pattern as PO Planning)
+# GAP FILTER VALIDATION — Informed Consent (same pattern as PO Planning)
+#
+# All 16 GAP filters checked with MO-specific risk/consequence.
+# Data-driven: impact dicts define standard state + consequence.
+# NEVER blocks execution — returns structured review for UI.
 # =============================================================================
+
+# Supply sources: standard = all ON
+MO_SUPPLY_SOURCE_IMPACT = {
+    'PURCHASE_ORDER': {
+        'label': 'Purchase Order',
+        'icon': '📦',
+        'risk': 'HIGH',
+        'consequence': 'Pending POs not in FG supply → shortage overstated → MO suggestions inflated',
+    },
+    'INVENTORY': {
+        'label': 'Inventory',
+        'icon': '🏷️',
+        'risk': 'HIGH',
+        'consequence': 'Current stock not counted → shortage overstated → MO suggestions inflated',
+    },
+    'CAN_PENDING': {
+        'label': 'CAN Pending',
+        'icon': '📋',
+        'risk': 'MEDIUM',
+        'consequence': 'CAN pending stock not counted → minor overstatement of shortage',
+    },
+    'WAREHOUSE_TRANSFER': {
+        'label': 'Warehouse Transfer',
+        'icon': '🏬',
+        'risk': 'INFO',
+        'consequence': 'In-transit stock not counted → minor overstatement',
+    },
+    'MO_EXPECTED': {
+        'label': 'MO Expected Output',
+        'icon': '🏭',
+        'risk': 'MEDIUM',
+        'consequence': 'Expected MO output not in FG supply → FG shortage higher → more MO suggestions than needed',
+    },
+}
+
+# Demand sources: standard = all ON
+MO_DEMAND_SOURCE_IMPACT = {
+    'OC_PENDING': {
+        'label': 'Confirmed Orders',
+        'icon': '✔',
+        'risk': 'INFO',
+        'consequence': 'Only forecast demand considered → may understate shortage for confirmed commitments',
+    },
+    'FORECAST': {
+        'label': 'Forecast',
+        'icon': '📊',
+        'risk': 'INFO',
+        'consequence': 'Only confirmed demand considered → no proactive production for forecasted needs',
+    },
+}
+
+# Options: standard = ON, warn when OFF
+MO_OPTION_IMPACT = {
+    'include_fg_safety': {
+        'label': 'FG Safety Stock',
+        'standard': True,
+        'risk': 'INFO',
+        'consequence_when_off': 'No FG safety buffer → MO suggestions cover minimum only',
+    },
+    'include_raw_safety': {
+        'label': 'Raw Safety Stock',
+        'standard': True,
+        'risk': 'INFO',
+        'consequence_when_off': 'Raw material safety stock not considered → material readiness check less conservative',
+    },
+    'exclude_expired': {
+        'label': 'Exclude Expired',
+        'standard': True,
+        'risk': 'INFO',
+        'consequence_when_off': 'Expired stock in supply → material readiness may show false availability',
+    },
+    'include_alternatives': {
+        'label': 'Alternatives',
+        'standard': True,
+        'risk': 'MEDIUM',
+        'consequence_when_off': 'Alternative materials not in BOM data → material readiness check incomplete, USE_ALTERNATIVE status unavailable',
+    },
+    'include_existing_mo': {
+        'label': 'Existing MO Demand',
+        'standard': True,
+        'risk': 'MEDIUM',
+        'consequence_when_off': 'Raw demand from existing MOs not included → material readiness overstated (material may be reserved)',
+    },
+}
+
+# Reverse options: standard = OFF, warn when ON
+MO_OPTION_REVERSE_IMPACT = {
+    'include_draft_mo': {
+        'label': 'Include DRAFT MO',
+        'standard': False,
+        'risk': 'INFO',
+        'consequence_when_on': 'Draft (unconfirmed) MOs inflate raw material demand → material readiness understated',
+    },
+}
+
+# Period analysis
+MO_PERIOD_ANALYSIS_IMPACT = {
+    'track_backlog': {
+        'label': 'Track Backlog',
+        'standard': True,
+        'risk': 'MEDIUM',
+        'consequence_when_off': 'Backlog not carried forward → demand dates less accurate → scheduling impacted',
+    },
+    'period_type': {
+        'label': 'Period Type',
+        'standard': 'Weekly',
+        'risk': 'INFO',
+        'consequence_when_changed': 'Period type "{actual}" instead of "Weekly" — demand date granularity affected',
+    },
+}
+
 
 def validate_gap_filters_for_production(gap_result) -> Dict[str, Any]:
     """
-    Review GAP filters relevant to Production Planning.
+    Review ALL GAP filters for Production Planning — "Informed Consent" model.
 
-    Same "informed consent" model as PO Planning:
-    - Never blocks execution
-    - Classifies risk
-    - Returns structured review for UI
+    Checks all 16 filters with MO-specific risk/consequence:
+    - 5 supply sources (HIGH: INVENTORY, PO; MEDIUM: CAN, MO_EXPECTED; INFO: WT)
+    - 2 demand sources (INFO)
+    - 5 options ON→OFF (MEDIUM: alternatives, existing_mo; INFO: safety, expired)
+    - 1 option OFF→ON (INFO: draft_mo)
+    - 2 period analysis (MEDIUM: backlog; INFO: period_type)
+    - 1 consistency check (MO_EXPECTED + existing_mo)
 
-    Production Planning cares about:
-    - MO_EXPECTED in supply sources (affects FG shortage level → MO suggestion qty)
-    - Existing MO Demand (affects raw material GAP → material readiness accuracy)
-    - Include Alternatives (affects material readiness check)
-    - Track Backlog (affects demand date accuracy from period data)
+    NEVER blocks execution. Returns structured review for UI.
     """
     review = {
         'all_complete': True,
         'has_high_risk': False,
+        'has_filter_data': False,
         'items': [],
         'filters_used': {},
         'summary_text': '',
@@ -530,80 +645,213 @@ def validate_gap_filters_for_production(gap_result) -> Dict[str, Any]:
             'filter': 'GAP Result', 'label': 'GAP Result',
             'status': 'MISSING', 'risk': 'HIGH',
             'consequence': 'No GAP result — run Supply Chain GAP first',
+            'icon': '🚫',
         })
         review['summary_text'] = 'No GAP result'
         return review
 
     filters = getattr(gap_result, 'filters_used', None)
     if not filters:
+        review['items'].append({
+            'filter': 'filters_used', 'label': 'Filter Data',
+            'status': 'UNKNOWN', 'risk': 'INFO',
+            'consequence': 'GAP result has no filter metadata — cannot verify completeness',
+            'icon': 'ℹ️',
+        })
         review['summary_text'] = 'Filter metadata unavailable — proceed with caution'
         return review
 
+    review['has_filter_data'] = True
     review['filters_used'] = dict(filters)
 
-    # Key checks for Production Planning
+    # ── Supply sources ──
     supply_on = filters.get('supply_sources') or []
+    for source_key, impact in MO_SUPPLY_SOURCE_IMPACT.items():
+        if source_key not in supply_on:
+            review['all_complete'] = False
+            if impact['risk'] == 'HIGH':
+                review['has_high_risk'] = True
+            review['items'].append({
+                'filter': source_key,
+                'label': impact['label'],
+                'category': 'Supply Source',
+                'status': 'OFF',
+                'risk': impact['risk'],
+                'consequence': impact['consequence'],
+                'icon': impact['icon'],
+            })
 
-    # MO_EXPECTED — affects FG shortage qty
-    if 'MO_EXPECTED' not in supply_on:
-        review['all_complete'] = False
-        review['items'].append({
-            'filter': 'MO_EXPECTED', 'label': 'MO Expected Output',
-            'category': 'Supply Source', 'status': 'OFF', 'risk': 'MEDIUM',
-            'consequence': (
-                'MO output not in FG supply → FG shortage is higher → '
-                'MO suggestions will be larger than necessary'
-            ),
-        })
+    # ── Demand sources ──
+    demand_on = filters.get('demand_sources') or []
+    for source_key, impact in MO_DEMAND_SOURCE_IMPACT.items():
+        if source_key not in demand_on:
+            review['all_complete'] = False
+            review['items'].append({
+                'filter': source_key,
+                'label': impact['label'],
+                'category': 'Demand Source',
+                'status': 'OFF',
+                'risk': impact['risk'],
+                'consequence': impact['consequence'],
+                'icon': impact['icon'],
+            })
 
-    # INVENTORY — critical
-    if 'INVENTORY' not in supply_on:
-        review['all_complete'] = False
-        review['has_high_risk'] = True
-        review['items'].append({
-            'filter': 'INVENTORY', 'label': 'Inventory',
-            'category': 'Supply Source', 'status': 'OFF', 'risk': 'HIGH',
-            'consequence': 'Stock not counted → shortage overstated → MO suggestions inflated',
-        })
+    # ── Options ON→OFF ──
+    for opt_key, impact in MO_OPTION_IMPACT.items():
+        val = filters.get(opt_key)
+        if val is False or val == 0:
+            review['all_complete'] = False
+            review['items'].append({
+                'filter': opt_key,
+                'label': impact['label'],
+                'category': 'Option',
+                'status': 'OFF',
+                'risk': impact['risk'],
+                'consequence': impact['consequence_when_off'],
+                'icon': '⚙️',
+            })
 
-    # PURCHASE_ORDER — critical
-    if 'PURCHASE_ORDER' not in supply_on:
-        review['all_complete'] = False
-        review['has_high_risk'] = True
-        review['items'].append({
-            'filter': 'PURCHASE_ORDER', 'label': 'Purchase Order',
-            'category': 'Supply Source', 'status': 'OFF', 'risk': 'HIGH',
-            'consequence': 'Pending POs not counted → may suggest MO for products with PO arriving',
-        })
+    # ── Options OFF→ON (reverse) ──
+    for opt_key, impact in MO_OPTION_REVERSE_IMPACT.items():
+        val = filters.get(opt_key)
+        if val is True or val == 1:
+            review['all_complete'] = False
+            review['items'].append({
+                'filter': opt_key,
+                'label': impact['label'],
+                'category': 'Option',
+                'status': 'ON (non-standard)',
+                'risk': impact['risk'],
+                'consequence': impact['consequence_when_on'],
+                'icon': '⚙️',
+            })
 
-    # Alternatives — affects material readiness
-    if not filters.get('include_alternatives', True):
-        review['all_complete'] = False
-        review['items'].append({
-            'filter': 'include_alternatives', 'label': 'Alternatives',
-            'category': 'Option', 'status': 'OFF', 'risk': 'MEDIUM',
-            'consequence': 'Alternative materials not in BOM data → material readiness check incomplete',
-        })
-
-    # Track backlog — affects demand date accuracy
+    # ── Period analysis ──
     if filters.get('track_backlog') is False:
         review['all_complete'] = False
+        cfg = MO_PERIOD_ANALYSIS_IMPACT['track_backlog']
         review['items'].append({
-            'filter': 'track_backlog', 'label': 'Track Backlog',
-            'category': 'Period Analysis', 'status': 'OFF', 'risk': 'MEDIUM',
-            'consequence': 'Backlog not carried forward → demand dates less accurate',
+            'filter': 'track_backlog',
+            'label': cfg['label'],
+            'category': 'Period Analysis',
+            'status': 'OFF',
+            'risk': cfg['risk'],
+            'consequence': cfg['consequence_when_off'],
+            'icon': '📅',
         })
 
-    # Summary
+    pt_cfg = MO_PERIOD_ANALYSIS_IMPACT['period_type']
+    actual_period = filters.get('period_type', 'Weekly')
+    if actual_period and actual_period != pt_cfg['standard']:
+        review['all_complete'] = False
+        review['items'].append({
+            'filter': 'period_type',
+            'label': pt_cfg['label'],
+            'category': 'Period Analysis',
+            'status': f'{actual_period} (non-standard)',
+            'risk': pt_cfg['risk'],
+            'consequence': pt_cfg['consequence_when_changed'].format(actual=actual_period),
+            'icon': '📅',
+        })
+
+    # ── Consistency: MO_EXPECTED + existing_mo ──
+    if 'MO_EXPECTED' not in supply_on and filters.get('include_existing_mo', False):
+        review['all_complete'] = False
+        review['items'].append({
+            'filter': 'MO_EXPECTED+EXISTING_MO',
+            'label': 'MO Double-Count Risk',
+            'category': 'Consistency',
+            'status': 'WARN',
+            'risk': 'MEDIUM',
+            'consequence': 'MO Expected OFF + Existing MO ON → material demand may double-count production',
+            'icon': '⚠️',
+        })
+
+    # ── Summary ──
     if review['all_complete']:
-        review['summary_text'] = '✅ GAP config complete for Production Planning'
+        review['summary_text'] = '✅ All GAP filters complete for Production Planning'
     else:
         count = len(review['items'])
-        high = sum(1 for i in review['items'] if i.get('risk') == 'HIGH')
+        high = sum(1 for i in review['items'] if i['risk'] == 'HIGH')
+        med = sum(1 for i in review['items'] if i['risk'] == 'MEDIUM')
+        parts = []
+        if high:
+            parts.append(f'{high} high-risk')
+        if med:
+            parts.append(f'{med} medium')
+        info_count = count - high - med
+        if info_count:
+            parts.append(f'{info_count} info')
         review['summary_text'] = (
-            f"{count} filter deviation(s)"
-            + (f" ({high} high-risk)" if high else "")
-            + " — MO suggestions may not reflect full picture"
+            f"{count} filter deviation(s) ({', '.join(parts)}) — "
+            f"MO suggestions may not reflect full picture"
         )
 
     return review
+
+
+# =============================================================================
+# DISPLAY FILTER SCOPE — detect brand/product filter for MO scope selection
+# =============================================================================
+
+def extract_display_filter_scope_for_production(gap_result) -> Dict[str, Any]:
+    """
+    Detect if GAP was run with brand/product display filter.
+
+    When detected, MO Planning shows a scope selector:
+    - Filtered (Brand: 3M) — only MO suggestions for filtered FG products
+    - Full (all 388 FG + 118 raw) — MO suggestions for all products
+
+    Same pattern as PO Planning's display filter scope.
+
+    Returns:
+        Dict with:
+        - has_filter: bool
+        - scope_label: str — "Brand: 3M" or ""
+        - fg_total: int
+        - fg_filtered: int
+        - filtered_product_ids: Set[int] — FG product IDs matching filter
+    """
+    info = {
+        'has_filter': False,
+        'brands': [],
+        'scope_label': '',
+        'fg_total': 0,
+        'fg_filtered': 0,
+        'filtered_product_ids': set(),
+    }
+
+    if gap_result is None:
+        return info
+
+    display_filter = getattr(gap_result, 'applied_display_filter', None) or {}
+    if not display_filter.get('has_filter', False):
+        return info
+
+    info['has_filter'] = True
+    info['brands'] = display_filter.get('brands', [])
+    product_ids = display_filter.get('product_ids', [])
+
+    # Build scope label
+    parts = []
+    if info['brands']:
+        parts.append(f"Brand: {', '.join(info['brands'])}")
+    if product_ids:
+        parts.append(f"{len(product_ids)} product(s)")
+    info['scope_label'] = ' + '.join(parts) if parts else 'Custom filter'
+
+    # Extract filtered FG product IDs
+    fg_gap = getattr(gap_result, 'fg_gap_df', None)
+    if fg_gap is not None and not fg_gap.empty:
+        info['fg_total'] = len(fg_gap)
+        if 'in_filter' in fg_gap.columns:
+            filtered_fg = fg_gap[fg_gap['in_filter']]
+            info['fg_filtered'] = len(filtered_fg)
+            info['filtered_product_ids'] = set(filtered_fg['product_id'].tolist())
+
+    logger.info(
+        f"MO display filter scope: {info['scope_label']} — "
+        f"FG {info['fg_filtered']}/{info['fg_total']}"
+    )
+
+    return info

@@ -5,13 +5,12 @@ Production Planning Page — Layer 3 of SCM Planning Pipeline.
 
 GAP → MO Suggestions with material readiness, scheduling, and priority.
 
-6 Tabs:
-  Tab 0: ⚙️ Settings — config editor with gate logic (ZERO ASSUMPTION)
-  Tab 1: ✅ Ready — items that can start production immediately
-  Tab 2: ⏳ Waiting — partial materials, bottleneck info
-  Tab 3: 🔴 Blocked — no materials + unschedulable items
-  Tab 4: 📅 Timeline — Gantt chart + weekly schedule
-  Tab 5: 📊 Overview — KPIs, urgency, reconciliation
+5 Tabs:
+  Tab 0: 📊 Overview — KPIs, urgency matrix, top urgent, reconciliation
+  Tab 1: ✅ Ready — items that can start production (Summary / Schedule / Detail)
+  Tab 2: ⏳ Waiting — partial materials, bottleneck info (Summary / Schedule / Detail)
+  Tab 3: 🔴 Blocked — no materials + unschedulable items (Detail / Schedule)
+  Tab 4: ⚙️ Settings — config editor with gate logic (ZERO ASSUMPTION)
 """
 
 import streamlit as st
@@ -94,6 +93,56 @@ def main():
     gap_available = pipeline['gap']['available']
 
     # =========================================================================
+    # DISPLAY FILTER SCOPE (detect brand/product filter from GAP)
+    # =========================================================================
+    scope_info = {'has_filter': False}
+    use_filtered_scope = True  # default: use filtered if available
+
+    if gap_available:
+        from utils.supply_chain_production.production_validators import (
+            extract_display_filter_scope_for_production,
+        )
+        gap_result_for_scope = _get_gap_result()
+        scope_info = extract_display_filter_scope_for_production(gap_result_for_scope)
+
+        if scope_info['has_filter']:
+            st.divider()
+            st.markdown("### 🔍 GAP Display Filter Detected")
+            st.markdown(
+                f"SCM GAP was analyzed with filter: **{scope_info['scope_label']}**. "
+                f"Choose which products to include in MO suggestions:"
+            )
+
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                st.markdown(
+                    f"**🎯 Filtered** — {scope_info['scope_label']}\n\n"
+                    f"`{scope_info['fg_filtered']}` of `{scope_info['fg_total']}` FG products"
+                )
+            with sc2:
+                st.markdown(
+                    f"**🟠 Full** — all products\n\n"
+                    f"`{scope_info['fg_total']}` FG products"
+                )
+
+            scope_choice = st.radio(
+                "MO Planning scope",
+                [
+                    f"🎯 Filtered ({scope_info['scope_label']})",
+                    f"🟠 Full (all {scope_info['fg_total']} FG)",
+                ],
+                key="mo_scope_choice",
+                horizontal=True,
+                help="Filtered = only MO suggestions for products matching the GAP filter. Full = all products.",
+            )
+            use_filtered_scope = scope_choice.startswith("🎯")
+            st.divider()
+
+    # Store scope in session for _run_planning
+    st.session_state['_mo_scope_info'] = scope_info
+    st.session_state['_mo_use_filtered'] = use_filtered_scope
+
+    # =========================================================================
     # ACTION BUTTONS
     # =========================================================================
     btn_cols = st.columns([3, 1, 1])
@@ -104,8 +153,14 @@ def main():
             and config.is_ready
             and gap_available
         )
+        # Button label reflects scope
+        if scope_info['has_filter'] and use_filtered_scope:
+            btn_label = f"🔄 Generate MO Suggestions (filtered: {scope_info['scope_label']})"
+        else:
+            btn_label = "🔄 Generate MO Suggestions"
+
         run_clicked = st.button(
-            "🔄 Generate MO Suggestions",
+            btn_label,
             type="primary",
             use_container_width=True,
             disabled=not can_run,
@@ -149,7 +204,7 @@ def main():
 
     tab_labels = build_tab_labels(result, config_ready, gap_available)
 
-    tab_overview, tab_ready, tab_waiting, tab_blocked, tab_timeline, tab_settings = (
+    tab_overview, tab_ready, tab_waiting, tab_blocked, tab_settings = (
         st.tabs(tab_labels)
     )
 
@@ -167,7 +222,6 @@ def main():
             tab_ready: 'ready',
             tab_waiting: 'waiting',
             tab_blocked: 'blocked',
-            tab_timeline: 'timeline',
         }
         for tab, tab_name in tab_map.items():
             with tab:
@@ -177,13 +231,12 @@ def main():
             ready_tab_fragment,
             waiting_tab_fragment,
             blocked_tab_fragment,
-            timeline_tab_fragment,
             overview_tab_fragment,
             render_filter_warning_banner,
         )
 
         # Persistent filter banner on result tabs
-        for tab in [tab_ready, tab_waiting, tab_blocked, tab_timeline, tab_overview]:
+        for tab in [tab_ready, tab_waiting, tab_blocked, tab_overview]:
             with tab:
                 render_filter_warning_banner(result)
 
@@ -193,8 +246,6 @@ def main():
             waiting_tab_fragment(result)
         with tab_blocked:
             blocked_tab_fragment(result)
-        with tab_timeline:
-            timeline_tab_fragment(result)
         with tab_overview:
             overview_tab_fragment(result)
 
@@ -288,6 +339,25 @@ def _run_planning(config):
                 )
                 return
 
+            # ── Apply display filter scope (if filtered) ──
+            scope_info = st.session_state.get('_mo_scope_info', {})
+            use_filtered = st.session_state.get('_mo_use_filtered', True)
+            original_mo_suggestions = None  # track for restore
+
+            if scope_info.get('has_filter') and use_filtered:
+                filtered_ids = scope_info.get('filtered_product_ids', set())
+                if filtered_ids:
+                    original_mo_suggestions = getattr(gap_result, 'mo_suggestions', []) or []
+                    filtered_list = [
+                        a for a in original_mo_suggestions
+                        if getattr(a, 'product_id', None) in filtered_ids
+                    ]
+                    gap_result.mo_suggestions = filtered_list
+                    logger.info(
+                        f"Display filter applied: {len(filtered_list)}/{len(original_mo_suggestions)} "
+                        f"mo_suggestions kept ({scope_info.get('scope_label', '')})"
+                    )
+
             # Create planner with auto-loaded supplementary data
             planner = MOPlanner.create_with_data_loader(config)
             st.session_state['mo_planner'] = planner
@@ -300,12 +370,29 @@ def _run_planning(config):
                 gap_result=gap_result,
                 po_result=po_result,
             )
+
+            # Restore original mo_suggestions if we filtered them
+            if original_mo_suggestions is not None:
+                gap_result.mo_suggestions = original_mo_suggestions
+
+            # Store scope in result for UI display
+            if scope_info.get('has_filter'):
+                result.input_summary['display_filter'] = {
+                    'active': use_filtered,
+                    'scope_label': scope_info.get('scope_label', ''),
+                    'fg_filtered': scope_info.get('fg_filtered', 0),
+                    'fg_total': scope_info.get('fg_total', 0),
+                }
+
             st.session_state['mo_result'] = result
 
             m = result.get_summary()
             if result.has_lines():
+                scope_tag = ""
+                if scope_info.get('has_filter') and use_filtered:
+                    scope_tag = f" (filtered: {scope_info['scope_label']})"
                 st.success(
-                    f"✅ Generated {m['total_mo_lines']} MO suggestions "
+                    f"✅ Generated {m['total_mo_lines']} MO suggestions{scope_tag} "
                     f"({m.get('ready_count', 0)} ready, "
                     f"{m.get('waiting_count', 0)} waiting, "
                     f"{m.get('blocked_count', 0)} blocked)"

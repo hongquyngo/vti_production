@@ -137,7 +137,7 @@ def _format_bom_label(row, style: str = 'full') -> str:
 
 def _format_product_display(row) -> str:
     """
-    Format product column for overview table.
+    Format product column for BOM LT overview table (dict-based rows).
 
     Returns: "VTI006000156 · Băng keo OPP 48mm (Vietape)"
     Falls back to pt_code only if no extra info available.
@@ -156,6 +156,51 @@ def _format_product_display(row) -> str:
     if brand:
         desc = f"{desc} ({brand})"
     return f"{pt_code} · {desc}"
+
+
+# =============================================================================
+# MOLineItem / UnschedulableItem PRODUCT FORMATTERS
+#
+# Single source of truth for product display in all tabs:
+#   "Name Package_size (Brand)"         — for table "Product" column
+#   "Code · Name Package_size (Brand)"  — for schedule grid / compact labels
+# =============================================================================
+
+def _product_col(line) -> str:
+    """
+    Product column in Detail tables: "Name Package_size (Brand)".
+
+    Used alongside a separate "Code" column for pt_code.
+    Consistent across: Ready, Waiting, Blocked, Unschedulable, Top Urgent.
+    """
+    name = (getattr(line, 'product_name', '') or '')[:35]
+    pkg = getattr(line, 'package_size', '') or ''
+    brand = getattr(line, 'brand', '') or ''
+
+    if not name:
+        return ''
+
+    desc = f"{name} {pkg}".strip() if pkg else name
+    return f"{desc} ({brand})" if brand else desc
+
+
+def _product_full(line, max_name: int = 25) -> str:
+    """
+    Full product label: "Code · Name Package_size (Brand)".
+
+    Used in: Schedule grid rows, bottleneck affected list, single-column displays.
+    """
+    code = getattr(line, 'pt_code', '') or ''
+    name = (getattr(line, 'product_name', '') or '')[:max_name]
+    pkg = getattr(line, 'package_size', '') or ''
+    brand = getattr(line, 'brand', '') or ''
+
+    if not name:
+        return code
+
+    desc = f"{name} {pkg}".strip() if pkg else name
+    brand_suffix = f" ({brand})" if brand else ""
+    return f"{code} · {desc}{brand_suffix}"
 
 
 # =============================================================================
@@ -345,38 +390,19 @@ def build_tab_labels(
     gap_available: bool,
 ) -> list:
     """
-    Build tab labels with status indicators.
+    Build 5 tab labels with counts.
 
-    Dot colors:
-      🟢 = has data (result available)
-      🟡 = settings incomplete or GAP not run
-      ⚪ = not yet run (ready to generate)
+    Order: 📊 Overview → ✅ Ready → ⏳ Waiting → 🔴 Blocked → ⚙️ Settings
     """
     m = result.get_summary() if result and result.has_lines() else {}
     has_result = bool(m)
 
-    # Settings dot
-    if config_ready:
-        settings_dot = '🟢'
-    else:
-        settings_dot = '🟡'
-
-    # Result tabs dot
-    if has_result:
-        result_dot = '🟢'
-    elif not config_ready or not gap_available:
-        result_dot = '🟡'
-    else:
-        result_dot = '⚪'
-
-    # Order: Overview → Ready → Waiting → Blocked → Timeline → Settings
     labels = [
-        f"{result_dot} Overview",
-        f"{result_dot} Ready ({m.get('ready_count', 0)})" if has_result else f"{result_dot} Ready",
-        f"{result_dot} Waiting ({m.get('waiting_count', 0)})" if has_result else f"{result_dot} Waiting",
-        f"{result_dot} Blocked ({m.get('blocked_count', 0)})" if has_result else f"{result_dot} Blocked",
-        f"{result_dot} Timeline",
-        f"{settings_dot} Settings",
+        f"📊 Overview",
+        f"✅ Ready ({m.get('ready_count', 0)})" if has_result else "✅ Ready",
+        f"⏳ Waiting ({m.get('waiting_count', 0)})" if has_result else "⏳ Waiting",
+        f"🔴 Blocked ({m.get('blocked_count', 0)})" if has_result else "🔴 Blocked",
+        f"⚙️ Settings",
     ]
     return labels
 
@@ -426,19 +452,19 @@ def render_empty_state_for_tab(
             'title': 'Ready to produce',
             'desc': (
                 'MO suggestions where all BOM materials are available. '
-                'Each line shows product, suggested quantity, batch count, '
-                'priority score, and a "Create MO" action button.'
+                'View as Summary (by workshop/week), Schedule (Product × Date grid), '
+                'or Detail (full table with all columns).'
             ),
-            'columns': 'Priority · Code · Product · BOM · Shortage · Suggested Qty · Start Date · Action',
+            'columns': 'Summary · Schedule · Detail views',
         },
         'waiting': {
             'icon': '⏳',
             'title': 'Waiting for materials',
             'desc': (
-                'Items with partial material availability. Shows bottleneck material, '
-                'ETA for full coverage, max producible now, and contention alerts.'
+                'Items with partial material availability. Summary shows bottleneck materials '
+                'and ETA forecast. Schedule shows Product × Date grid. Detail shows all columns.'
             ),
-            'columns': 'Priority · Code · Readiness · Materials · Bottleneck · ETA · Max Now',
+            'columns': 'Summary · Schedule · Detail views',
         },
         'blocked': {
             'icon': '🔴',
@@ -447,27 +473,17 @@ def render_empty_state_for_tab(
                 'Items where materials are unavailable with no ETA, plus items '
                 'that cannot be scheduled (missing BOM config). Each shows a fix action.'
             ),
-            'columns': 'Code · Product · Reason · Blocked Materials · Fix Action',
-        },
-        'timeline': {
-            'icon': '📅',
-            'title': 'Production timeline',
-            'desc': (
-                'Gantt chart showing each MO suggestion as a bar from start to completion date. '
-                'Color-coded by readiness: green = ready, yellow = waiting, red = blocked. '
-                'Red dashed line marks today.'
-            ),
-            'columns': 'Gantt chart + weekly production schedule table',
+            'columns': 'Detail · Schedule views',
         },
         'overview': {
             'icon': '📊',
             'title': 'Overview & reconciliation',
             'desc': (
                 'KPI cards (ready/waiting/blocked counts + at-risk values), '
-                'urgency distribution bar, top 5 most urgent items, '
-                'BOM type breakdown, and data reconciliation check.'
+                'urgency distribution bar, urgency × readiness matrix, '
+                'top 5 most urgent items, BOM type breakdown, and data reconciliation.'
             ),
-            'columns': 'KPIs · Urgency bar · Top urgent · BOM breakdown · Reconciliation',
+            'columns': 'KPIs · Urgency bar · Matrix · Top urgent · BOM breakdown · Reconciliation',
         },
     }
 
@@ -1850,8 +1866,7 @@ def render_mo_lines_table(
             'priority': round(l.priority_score, 1),
             'urgency': f"{urgency_cfg.get('icon', '')} {urgency_cfg.get('label', l.urgency_level)}",
             'code': l.pt_code,
-            'product': l.product_name[:40] if l.product_name else '',
-            'brand': l.brand,
+            'product': _product_col(l),
             'bom_type': l.bom_type,
             'shortage': round(l.shortage_qty),
             'suggested': round(l.suggested_qty),
@@ -1892,9 +1907,8 @@ def render_mo_lines_table(
     col_config = {
         'priority': st.column_config.NumberColumn('Priority', format="%.1f", width='small'),
         'urgency': st.column_config.TextColumn('Urgency', width='medium'),
-        'code': st.column_config.TextColumn('Code', width='small'),
+        'code': st.column_config.TextColumn('Code', width='medium'),
         'product': st.column_config.TextColumn('Product', width='large'),
-        'brand': st.column_config.TextColumn('Brand', width='small'),
         'bom_type': st.column_config.TextColumn('BOM', width='small'),
         'shortage': st.column_config.NumberColumn('Shortage', format="%d"),
         'suggested': st.column_config.NumberColumn('Suggested Qty', format="%d"),
@@ -1948,8 +1962,7 @@ def render_unschedulable_panel(result: MOSuggestionResult):
         reason_cfg = UNSCHEDULABLE_REASONS.get(u.reason_code, {})
         rows.append({
             'code': u.pt_code,
-            'product': u.product_name[:40] if u.product_name else '',
-            'brand': u.brand,
+            'product': _product_col(u),
             'shortage': round(u.shortage_qty),
             'uom': u.uom,
             'reason': f"{reason_cfg.get('icon', '❓')} {reason_cfg.get('label', u.reason_code)}",
@@ -1961,9 +1974,10 @@ def render_unschedulable_panel(result: MOSuggestionResult):
     st.dataframe(
         df,
         column_config={
-            'code': st.column_config.TextColumn('Code', width='small'),
+            'code': st.column_config.TextColumn('Code', width='medium'),
             'product': st.column_config.TextColumn('Product', width='large'),
             'shortage': st.column_config.NumberColumn('Shortage', format="%d"),
+            'uom': st.column_config.TextColumn('UOM', width='small'),
             'reason': st.column_config.TextColumn('Reason', width='large'),
             'action': st.column_config.TextColumn('Fix', width='large'),
         },
@@ -2043,106 +2057,6 @@ def render_readiness_heatmap(result: MOSuggestionResult):
 
 
 # =============================================================================
-# TIMELINE CHART
-# =============================================================================
-
-def render_timeline_chart(result: MOSuggestionResult):
-    """Render Gantt-style timeline using Plotly."""
-    gantt_data = result.get_gantt_data()
-    if not gantt_data:
-        st.info("No timeline data available.")
-        return
-
-    st.markdown("##### 📅 Production Timeline")
-
-    try:
-        import plotly.figure_factory as ff
-        import plotly.graph_objects as go
-
-        # Build tasks for Plotly
-        tasks = []
-        annotations = []
-
-        color_map = {
-            'READY': '#2ecc71',
-            'USE_ALTERNATIVE': '#27ae60',
-            'PARTIAL_READY': '#f39c12',
-            'BLOCKED': '#e74c3c',
-        }
-
-        for entry in gantt_data:
-            if 'start' not in entry or 'end' not in entry:
-                continue
-
-            tasks.append({
-                'Task': entry['product'][:35],
-                'Start': entry['start'],
-                'Finish': entry['end'],
-                'Resource': entry.get('readiness', 'PLANNED'),
-            })
-
-        if not tasks:
-            st.info("No items with scheduled dates for timeline.")
-            return
-
-        # Sort by start date
-        tasks.sort(key=lambda t: t['Start'])
-
-        # Limit to top 30 for readability
-        if len(tasks) > 30:
-            st.caption(f"Showing top 30 of {len(tasks)} items (sorted by start date).")
-            tasks = tasks[:30]
-
-        fig = ff.create_gantt(
-            tasks,
-            colors=color_map,
-            index_col='Resource',
-            show_colorbar=True,
-            group_tasks=True,
-            showgrid_x=True,
-            showgrid_y=True,
-        )
-
-        # Add today line
-        today_str = date.today().isoformat()
-        fig.add_vline(
-            x=today_str, line_dash="dash",
-            line_color="red", line_width=2,
-            annotation_text="Today",
-        )
-
-        fig.update_layout(
-            height=max(300, len(tasks) * 28 + 100),
-            margin=dict(l=10, r=10, t=30, b=30),
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    except ImportError:
-        st.warning("Plotly not available. Install with: `pip install plotly`")
-        _render_timeline_fallback(gantt_data)
-    except Exception as e:
-        logger.warning(f"Plotly Gantt failed: {e}")
-        _render_timeline_fallback(gantt_data)
-
-
-def _render_timeline_fallback(gantt_data):
-    """Simple table fallback when Plotly unavailable."""
-    rows = []
-    for entry in gantt_data:
-        rows.append({
-            'product': entry.get('product', ''),
-            'bom': entry.get('bom_type', ''),
-            'readiness': entry.get('readiness', ''),
-            'start': entry.get('start', ''),
-            'end': entry.get('end', ''),
-            'demand': entry.get('demand_date', ''),
-        })
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True, height=400)
-
-
-# =============================================================================
 # RECONCILIATION PANEL
 # =============================================================================
 
@@ -2196,7 +2110,7 @@ def _render_top_urgent_items(result: MOSuggestionResult, top_n: int = 5):
         rows.append({
             'urgency': f"{urgency_cfg.get('icon', '')} {urgency_cfg.get('label', l.urgency_level)}",
             'code': l.pt_code,
-            'product': l.product_name[:35] if l.product_name else '',
+            'product': _product_col(l),
             'readiness': f"{readiness_cfg.get('icon', '')} {readiness_cfg.get('label', l.readiness_status)}",
             'qty': round(l.suggested_qty),
             'value': round(l.at_risk_value),
@@ -2209,7 +2123,7 @@ def _render_top_urgent_items(result: MOSuggestionResult, top_n: int = 5):
         styled,
         column_config={
             'urgency': st.column_config.TextColumn('Urgency', width='medium'),
-            'code': st.column_config.TextColumn('Code', width='small'),
+            'code': st.column_config.TextColumn('Code', width='medium'),
             'product': st.column_config.TextColumn('Product', width='large'),
             'readiness': st.column_config.TextColumn('Readiness', width='medium'),
             'qty': st.column_config.NumberColumn('Qty'),
@@ -2479,7 +2393,9 @@ def _pivot_waiting_bottleneck_materials(lines: List[MOLineItem]):
                 'contention_count': 0,
             }
         info = bottleneck_map[mat]
-        info['products'].append(l.pt_code)
+        info['products'].append(
+            f"{l.pt_code} ({l.brand})" if l.brand else l.pt_code
+        )
         info['total_value'] += l.at_risk_value
         if l.has_contention:
             info['contention_count'] += 1
@@ -2771,12 +2687,10 @@ def _render_production_schedule(lines: List[MOLineItem], key_prefix: str = "sche
         else:
             period_key = d.strftime('%Y-%m-%d')
 
-        # Product label: compact for readability
+        # Product label: consistent format with urgency icon
         urgency_cfg = URGENCY_LEVELS.get(l.urgency_level, {})
         urgency_icon = urgency_cfg.get('icon', '')
-        product_label = f"{urgency_icon} {l.pt_code} · {(l.product_name or '')[:25]}"
-        if l.brand:
-            product_label += f" ({l.brand})"
+        product_label = f"{urgency_icon} {_product_full(l)}"
 
         schedule_rows.append({
             '_product': product_label,
@@ -3095,65 +3009,6 @@ def _blocked_tab_content(lines: list):
             lines, title="Blocked",
             show_readiness=True, show_action=True,
         )
-
-
-def timeline_tab_fragment(result: MOSuggestionResult):
-    """Tab 4: Timeline — Gantt chart + weekly summary."""
-    render_timeline_chart(result)
-
-    # Weekly summary table
-    if result.has_lines():
-        _render_weekly_summary(result)
-
-
-def _render_weekly_summary(result: MOSuggestionResult):
-    """Group MO suggestions by week of expected start."""
-    st.markdown("##### 📊 Weekly Production Schedule")
-
-    rows = []
-    for line in result.all_lines:
-        if line.actual_start:
-            iso = line.actual_start.isocalendar()
-            week_key = f"W{iso[1]:02d}-{iso[0]}"
-            week_start = line.actual_start - timedelta(days=line.actual_start.weekday())
-        elif line.must_start_by:
-            iso = line.must_start_by.isocalendar()
-            week_key = f"W{iso[1]:02d}-{iso[0]}"
-            week_start = line.must_start_by - timedelta(days=line.must_start_by.weekday())
-        else:
-            week_key = "Unscheduled"
-            week_start = None
-
-        rows.append({
-            'week': week_key,
-            'week_start': week_start,
-            'readiness': line.readiness_status,
-            'value': line.at_risk_value,
-        })
-
-    if not rows:
-        return
-
-    df = pd.DataFrame(rows)
-    summary = df.groupby('week').agg(
-        mo_count=('week', 'size'),
-        ready=('readiness', lambda x: sum(1 for v in x if v in ('READY', 'USE_ALTERNATIVE'))),
-        value=('value', 'sum'),
-    ).reset_index()
-    summary['value'] = summary['value'].round(0)
-
-    styled = _styled_dataframe(summary, currency_cols=['value'])
-    st.dataframe(
-        styled,
-        column_config={
-            'week': st.column_config.TextColumn('Week', width='small'),
-            'mo_count': st.column_config.NumberColumn('MO Lines', format="%d"),
-            'ready': st.column_config.NumberColumn('Ready', format="%d"),
-            'value': st.column_config.NumberColumn('Value ($)'),
-        },
-        hide_index=True, use_container_width=True,
-        height=min(35 * len(summary) + 38, 400),
-    )
 
 
 def overview_tab_fragment(result: MOSuggestionResult):
