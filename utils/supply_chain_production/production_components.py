@@ -871,14 +871,26 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
                         h = hist_row.iloc[0]
                         avg = h.get('avg_lead_time_days')
                         mos = h.get('completed_mo_count', 0)
+                        h_min = h.get('min_lead_time_days')
+                        h_max = h.get('max_lead_time_days')
+                        h_std = h.get('stddev_lead_time_days')
                         if pd.notna(avg):
                             r['Hist Avg'] = f"{float(avg):.1f}d"
+                            r['Hist Min'] = f"{int(h_min)}d" if pd.notna(h_min) else '—'
+                            r['Hist Max'] = f"{int(h_max)}d" if pd.notna(h_max) else '—'
+                            r['Hist σ'] = f"{float(h_std):.1f}" if pd.notna(h_std) else '—'
                             r['MOs'] = int(mos) if pd.notna(mos) else 0
                         else:
                             r['Hist Avg'] = '—'
+                            r['Hist Min'] = '—'
+                            r['Hist Max'] = '—'
+                            r['Hist σ'] = '—'
                             r['MOs'] = 0
                     else:
                         r['Hist Avg'] = '—'
+                        r['Hist Min'] = '—'
+                        r['Hist Max'] = '—'
+                        r['Hist σ'] = '—'
                         r['MOs'] = 0
 
                 rows.append(r)
@@ -893,6 +905,9 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
                 seen_boms.add(bom_id)
                 avg = row.get('avg_lead_time_days')
                 mos = row.get('completed_mo_count', 0)
+                h_min = row.get('min_lead_time_days')
+                h_max = row.get('max_lead_time_days')
+                h_std = row.get('stddev_lead_time_days')
                 rows.append({
                     'BOM Code': row.get('bom_code', ''),
                     'Type': row.get('bom_type', ''),
@@ -903,11 +918,25 @@ def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = 
                     'Plant': '—',
                     'Source': '—',
                     'Hist Avg': f"{float(avg):.1f}d" if pd.notna(avg) else '—',
+                    'Hist Min': f"{int(h_min)}d" if pd.notna(h_min) else '—',
+                    'Hist Max': f"{int(h_max)}d" if pd.notna(h_max) else '—',
+                    'Hist σ': f"{float(h_std):.1f}" if pd.notna(h_std) else '—',
                     'MOs': int(mos) if pd.notna(mos) else 0,
                 })
 
         if rows:
             df = pd.DataFrame(rows)
+
+            # Drop all-dash columns when no BOM LT configured (noise)
+            if not has_bom_lt:
+                drop_cols = [c for c in ['Std LT', 'Min', 'Max', 'Plant', 'Source']
+                             if c in df.columns]
+                df = df.drop(columns=drop_cols)
+
+            # Sort by MOs descending (most data = most reliable)
+            if 'MOs' in df.columns:
+                df = df.sort_values('MOs', ascending=False).reset_index(drop=True)
+
             st.dataframe(df, hide_index=True, use_container_width=True,
                          height=min(35 * len(df) + 38, 400))
 
