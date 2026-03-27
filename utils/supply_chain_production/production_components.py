@@ -2967,6 +2967,17 @@ def _pivot_urgency_readiness_matrix(result: MOSuggestionResult):
 
 # =============================================================================
 # TAB FRAGMENTS
+#
+# Architecture:
+#   tab_entry_function(result)  → static cards (no rerun needed)
+#                               → calls @st.fragment for interactive content
+#
+#   @st.fragment _xxx_content() → radio toggle + pivot/table/summary
+#                               → changing radio or pivot controls only reruns
+#                                 this fragment, NOT the full page
+#
+# This avoids full page rerun (config reload, pipeline bar, DB queries)
+# when user simply switches between Summary / Detail / Pivot views.
 # =============================================================================
 
 def ready_tab_fragment(result: MOSuggestionResult):
@@ -2981,7 +2992,7 @@ def ready_tab_fragment(result: MOSuggestionResult):
     total_qty = sum(l.suggested_qty for l in lines)
     brands = set(l.brand for l in lines if l.brand)
 
-    # ── Summary Cards ──
+    # ── Summary Cards (static — outside fragment) ──
     kc = st.columns(5)
     with kc[0]:
         st.metric("MO Lines", f"{len(lines)}")
@@ -2994,7 +3005,13 @@ def ready_tab_fragment(result: MOSuggestionResult):
     with kc[4]:
         st.metric("Brands", f"{len(brands)}")
 
-    # ── View Toggle ──
+    # ── Interactive Content (fragment — isolated rerun) ──
+    _ready_tab_content(lines, total_value)
+
+
+@st.fragment
+def _ready_tab_content(lines: list, total_value: float):
+    """Fragment: Ready tab view toggle + content. Reruns only this on interaction."""
     view_mode = st.radio(
         "View mode",
         ['📊 Summary', '📋 Detail', '🔄 Pivot'],
@@ -3004,13 +3021,8 @@ def ready_tab_fragment(result: MOSuggestionResult):
     )
 
     if view_mode == '📊 Summary':
-        # R2: Group by BOM Type
         _pivot_ready_by_bom_type(lines)
-
-        # R4: Group by Start Week
         _pivot_ready_by_week(lines)
-
-        # R3: Group by Brand (collapsible — less important)
         with st.expander("🏷️ By Brand", expanded=False):
             _pivot_ready_by_brand(lines)
 
@@ -3041,7 +3053,7 @@ def waiting_tab_fragment(result: MOSuggestionResult):
     no_eta = len(lines) - has_eta
     almost_ready = sum(1 for l in lines if l.materials_ready_pct >= 80)
 
-    # ── Summary Cards ──
+    # ── Summary Cards (static — outside fragment) ──
     kc = st.columns(5)
     with kc[0]:
         st.metric("Waiting Items", f"{len(lines)}")
@@ -3055,7 +3067,13 @@ def waiting_tab_fragment(result: MOSuggestionResult):
         bottleneck_count = len(set(l.bottleneck_material for l in lines if l.bottleneck_material))
         st.metric("Bottleneck NVL", f"{bottleneck_count}")
 
-    # ── View Toggle ──
+    # ── Interactive Content (fragment — isolated rerun) ──
+    _waiting_tab_content(lines, total_value)
+
+
+@st.fragment
+def _waiting_tab_content(lines: list, total_value: float):
+    """Fragment: Waiting tab view toggle + content. Reruns only this on interaction."""
     view_mode = st.radio(
         "View mode",
         ['📊 Summary', '📋 Detail', '🔄 Pivot'],
@@ -3065,10 +3083,7 @@ def waiting_tab_fragment(result: MOSuggestionResult):
     )
 
     if view_mode == '📊 Summary':
-        # W1: Bottleneck Material Pivot (most important view)
         _pivot_waiting_bottleneck_materials(lines)
-
-        # W2: ETA Timeline + W3: Almost-ready highlight (inline)
         _pivot_waiting_eta_timeline(lines)
 
     elif view_mode == '🔄 Pivot':
@@ -3091,37 +3106,43 @@ def blocked_tab_fragment(result: MOSuggestionResult):
     lines = result.blocked_lines
 
     if lines:
-        total_value = sum(l.at_risk_value for l in lines)
+        # ── Interactive Content (fragment — isolated rerun) ──
+        _blocked_tab_content(lines)
 
-        # View toggle for blocked items
-        view_mode = st.radio(
-            "View mode",
-            ['📋 Detail', '🔄 Pivot'],
-            horizontal=True,
-            key="blocked_view_mode",
-            label_visibility="collapsed",
-        )
-
-        if view_mode == '🔄 Pivot':
-            st.markdown("##### 🔄 Pivot Table — Blocked Items")
-            _render_dynamic_pivot(lines, key_prefix="pv_blocked")
-        else:
-            st.markdown(
-                f"**{len(lines)} items** blocked — materials unavailable, no ETA. "
-                f"At-risk value: **${total_value:,.0f}**"
-            )
-            render_mo_lines_table(
-                lines, title="Blocked",
-                show_readiness=True, show_action=True,
-            )
-
-    # Unschedulable sub-section
+    # Unschedulable sub-section (static — outside fragment)
     if result.has_unschedulable():
         st.divider()
         render_unschedulable_panel(result)
 
     if not lines and not result.has_unschedulable():
         st.success("🎉 No blocked items!")
+
+
+@st.fragment
+def _blocked_tab_content(lines: list):
+    """Fragment: Blocked tab view toggle + content. Reruns only this on interaction."""
+    total_value = sum(l.at_risk_value for l in lines)
+
+    view_mode = st.radio(
+        "View mode",
+        ['📋 Detail', '🔄 Pivot'],
+        horizontal=True,
+        key="blocked_view_mode",
+        label_visibility="collapsed",
+    )
+
+    if view_mode == '🔄 Pivot':
+        st.markdown("##### 🔄 Pivot Table — Blocked Items")
+        _render_dynamic_pivot(lines, key_prefix="pv_blocked")
+    else:
+        st.markdown(
+            f"**{len(lines)} items** blocked — materials unavailable, no ETA. "
+            f"At-risk value: **${total_value:,.0f}**"
+        )
+        render_mo_lines_table(
+            lines, title="Blocked",
+            show_readiness=True, show_action=True,
+        )
 
 
 def timeline_tab_fragment(result: MOSuggestionResult):
@@ -3225,12 +3246,18 @@ def overview_tab_fragment(result: MOSuggestionResult):
     # BOM breakdown
     _render_bom_distribution(result)
 
-    # Dynamic Pivot — all lines
-    with st.expander("🔄 **Pivot Table** — All MO Lines", expanded=False):
-        _render_dynamic_pivot(result.all_lines, key_prefix="pv_overview")
+    # Dynamic Pivot — all lines (fragment — isolated rerun)
+    _overview_pivot_content(result.all_lines)
 
     # Reconciliation
     render_reconciliation_panel(result)
+
+
+@st.fragment
+def _overview_pivot_content(all_lines: list):
+    """Fragment: Overview pivot table. Changing controls only reruns this."""
+    with st.expander("🔄 **Pivot Table** — All MO Lines", expanded=False):
+        _render_dynamic_pivot(all_lines, key_prefix="pv_overview")
 
 
 # =============================================================================
