@@ -20,7 +20,7 @@ Usage:
 
 import streamlit as st
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 
 
 # =============================================================================
@@ -78,12 +78,19 @@ Tab Settings có 4 nhóm cấu hình:
 
 ---
 
-**📅 Lead Time Setup (Bắt buộc)**
+**📅 Lead Time Setup**
 
-Thời gian sản xuất tính bằng ngày cho mỗi loại BOM:
-- **Cutting** — Cắt cuộn lớn → nhiều cuộn nhỏ (ví dụ: tape rolls)
-- **Repacking** — Đóng gói lại format khác (ví dụ: bulk → retail)
-- **Kitting** — Lắp ráp nhiều thành phần → 1 sản phẩm (ví dụ: kit assembly)
+Thời gian sản xuất được quản lý ở **2 cấp độ**:
+
+**Cấp 1: Per-BOM Lead Time (bảng `bom_lead_times` — do Production team quản lý)**
+- Mỗi BOM có lead time riêng, map theo nhà máy (plant)
+- Xem trong panel **"🏭 BOM Lead Times"** ở đầu Settings
+- Đây là giá trị chính xác nhất — được ưu tiên dùng
+
+**Cấp 2: Fallback Defaults (khi BOM chưa setup)**
+- Lead time mặc định per BOM type: CUTTING, REPACKING, KITTING
+- Dùng khi BOM chưa có row trong bảng `bom_lead_times`
+- **Bắt buộc** — scheduling không chạy được nếu thiếu
 
 💡 Dưới mỗi ô nhập có **gợi ý lịch sử**: "📊 Historical: avg 2.5d from 992 MOs"
 — dùng để tham khảo khi điền giá trị.
@@ -301,6 +308,16 @@ Nếu **Balanced** ✅ = không có item nào bị mất trong quá trình xử 
 | 🔵 PLANNED | > 14 ngày | Có thời gian lập kế hoạch |
 
 **Backward Scheduling (Lên lịch ngược)**
+
+Lead time được giải quyết theo 4 tầng ưu tiên:
+```
+Tier 1a: BOM lead time cho nhà máy cụ thể (bom_lead_times + plant)
+Tier 1b: BOM lead time global (bom_lead_times, plant = NULL)
+Tier 1c: Fallback default per BOM type (production_planning_config)
+Tier 2:  Historical override (nếu bật + đủ dữ liệu)
+```
+
+Sau khi có lead time:
 ```
 demand_date        = Ngày cần hàng (từ GAP period data)
 must_start_by      = demand_date − lead_time

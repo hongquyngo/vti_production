@@ -1,10 +1,11 @@
 # utils/supply_chain_production/__init__.py
 
 """
-Supply Chain Production Planning Module — v1.0.0
+Supply Chain Production Planning Module — v1.1.0
 Layer 3 Phase 2: Manufacturing Order Suggestions
 
-ZERO ASSUMPTION: All parameters from production_planning_config table.
+ZERO ASSUMPTION: All parameters from production_planning_config table
++ bom_lead_times table (BOM-level lead time per plant).
 No hardcoded defaults. Missing config = system stops with clear message.
 """
 

@@ -134,20 +134,23 @@ class ProductionDataLoader:
         """
         Load historical production stats from production_lead_time_stats_view.
 
-        Returns per (bom_type, product_id):
+        Returns per (bom_header_id, bom_type, product_id):
         - completed_mo_count, avg/min/max/stddev lead_time_days
         - avg_schedule_deviation_days
         - avg_yield_pct
+        - configured_standard_lt (from bom_lead_times if set)
         - qc_pass_rate_pct, total_receipts
 
         Used by scheduling engine for historical override (Tier 2)
-        when config.lead_time_use_historical = true.
+        and by Settings UI for BOM Lead Time overview.
         """
         self._ensure_connection()
 
         query = """
         SELECT
+            bom_header_id,
             bom_type,
+            bom_code,
             product_id,
             pt_code,
             completed_mo_count,
@@ -157,6 +160,9 @@ class ProductionDataLoader:
             stddev_lead_time_days,
             avg_schedule_deviation_days,
             avg_yield_pct,
+            configured_standard_lt,
+            configured_min_lt,
+            configured_max_lt,
             qc_pass_rate_pct,
             total_receipts,
             last_completed_date
@@ -184,7 +190,41 @@ class ProductionDataLoader:
             )
             return df
         except Exception as e:
+            # Fallback: old view without bom_header_id columns
+            if 'Unknown column' in str(e) or 'bom_header_id' in str(e) or 'configured_' in str(e):
+                logger.warning("production_lead_time_stats_view missing new columns — using legacy query")
+                return self._load_lead_time_stats_legacy(bom_types, product_ids)
             logger.error(f"Failed to load lead time stats: {e}")
+            return pd.DataFrame()
+
+    def _load_lead_time_stats_legacy(
+        self,
+        bom_types: Optional[List[str]] = None,
+        product_ids: Optional[Tuple[int, ...]] = None,
+    ) -> pd.DataFrame:
+        """Fallback query for old view without bom_header_id columns."""
+        query = """
+        SELECT
+            bom_type, product_id, pt_code,
+            completed_mo_count, avg_lead_time_days,
+            min_lead_time_days, max_lead_time_days,
+            stddev_lead_time_days, avg_schedule_deviation_days,
+            avg_yield_pct, qc_pass_rate_pct, total_receipts,
+            last_completed_date
+        FROM production_lead_time_stats_view WHERE 1=1
+        """
+        params = {}
+        if bom_types:
+            query += " AND bom_type IN %(bom_types)s"
+            params['bom_types'] = tuple(bom_types)
+        if product_ids:
+            query += " AND product_id IN %(product_ids)s"
+            params['product_ids'] = product_ids
+        query += " ORDER BY bom_type, pt_code"
+        try:
+            return pd.read_sql(query, self._engine, params=params)
+        except Exception as e2:
+            logger.error(f"Legacy lead time stats query also failed: {e2}")
             return pd.DataFrame()
 
     # =========================================================================
@@ -247,6 +287,133 @@ class ProductionDataLoader:
             return df
         except Exception as e:
             logger.error(f"Failed to load MO material readiness: {e}")
+            return pd.DataFrame()
+
+    # =========================================================================
+    # BOM LEAD TIMES (from bom_lead_time_current_view)
+    # =========================================================================
+
+    def load_bom_lead_times(
+        self,
+        bom_header_ids: Optional[Tuple[int, ...]] = None,
+        plant_id: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Load current effective BOM lead times from bom_lead_time_current_view.
+
+        Returns per (bom_header_id, plant_id):
+        - standard_lead_time_days, minimum_lead_time_days, maximum_lead_time_days
+        - effective_date, source, bom_type, bom_code, pt_code
+
+        Used by scheduling engine for Tier 1a (plant-specific) and Tier 1b (global).
+        Returns empty DataFrame if table doesn't exist (backward compat).
+        """
+        self._ensure_connection()
+
+        query = """
+        SELECT
+            bom_header_id,
+            plant_id,
+            plant_code,
+            plant_name,
+            entity_id,
+            bom_type,
+            bom_code,
+            product_id,
+            pt_code,
+            product_name,
+            standard_lead_time_days,
+            minimum_lead_time_days,
+            maximum_lead_time_days,
+            effective_date,
+            source
+        FROM bom_lead_time_current_view
+        WHERE 1=1
+        """
+        params = {}
+
+        if bom_header_ids:
+            query += " AND bom_header_id IN %(bom_header_ids)s"
+            params['bom_header_ids'] = bom_header_ids
+
+        if plant_id is not None:
+            # Load both plant-specific AND global (plant_id IS NULL) rows
+            query += " AND (plant_id = %(plant_id)s OR plant_id IS NULL)"
+            params['plant_id'] = plant_id
+
+        try:
+            df = pd.read_sql(query, self._engine, params=params)
+            logger.info(
+                f"Loaded BOM lead times: {len(df)} rows "
+                f"({df['bom_header_id'].nunique() if not df.empty else 0} BOMs)"
+            )
+            return df
+        except Exception as e:
+            # Table may not exist yet (backward compat)
+            if 'doesn\'t exist' in str(e).lower() or 'no such table' in str(e).lower():
+                logger.info("bom_lead_time_current_view not found — using config defaults only")
+            else:
+                logger.warning(f"Could not load BOM lead times: {e}")
+            return pd.DataFrame()
+
+    # =========================================================================
+    # PRODUCTION PLANTS
+    # =========================================================================
+
+    def load_plants(
+        self,
+        entity_id: Optional[int] = None,
+        active_only: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Load production plants.
+
+        Returns: plant_id, plant_code, plant_name, plant_type, entity_id,
+                 plant_manager_id, material_warehouse_id, finished_goods_warehouse_id.
+        Returns empty DataFrame if table doesn't exist (backward compat).
+        """
+        self._ensure_connection()
+
+        query = """
+        SELECT
+            pp.id AS plant_id,
+            pp.plant_code,
+            pp.plant_name,
+            pp.plant_type,
+            pp.entity_id,
+            c.english_name AS entity_name,
+            pp.plant_manager_id,
+            CONCAT(COALESCE(e.first_name, ''), ' ', COALESCE(e.last_name, '')) AS manager_name,
+            pp.production_supervisor_id,
+            pp.material_warehouse_id,
+            pp.finished_goods_warehouse_id,
+            pp.address,
+            pp.is_active
+        FROM production_plants pp
+        LEFT JOIN companies c ON pp.entity_id = c.id
+        LEFT JOIN employees e ON pp.plant_manager_id = e.id
+        WHERE pp.delete_flag = 0
+        """
+        params = {}
+
+        if active_only:
+            query += " AND pp.is_active = 1"
+
+        if entity_id is not None:
+            query += " AND pp.entity_id = %(entity_id)s"
+            params['entity_id'] = entity_id
+
+        query += " ORDER BY pp.entity_id, pp.plant_code"
+
+        try:
+            df = pd.read_sql(query, self._engine, params=params)
+            logger.info(f"Loaded production plants: {len(df)} plants")
+            return df
+        except Exception as e:
+            if 'doesn\'t exist' in str(e).lower() or 'no such table' in str(e).lower():
+                logger.info("production_plants table not found — plants feature not yet deployed")
+            else:
+                logger.warning(f"Could not load plants: {e}")
             return pd.DataFrame()
 
     # =========================================================================

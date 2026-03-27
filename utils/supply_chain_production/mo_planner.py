@@ -58,6 +58,7 @@ class MOPlanner:
         lead_time_stats_df: Optional[pd.DataFrame] = None,
         existing_mo_df: Optional[pd.DataFrame] = None,
         so_linkage_df: Optional[pd.DataFrame] = None,
+        bom_lead_times_df: Optional[pd.DataFrame] = None,
     ):
         if not config.is_ready:
             raise ValueError(
@@ -68,7 +69,9 @@ class MOPlanner:
 
         self._config = config
         self._readiness_checker = MaterialReadinessChecker(config)
-        self._scheduling_engine = MOSchedulingEngine(config, lead_time_stats_df)
+        self._scheduling_engine = MOSchedulingEngine(
+            config, lead_time_stats_df, bom_lead_times_df,
+        )
 
         # Existing MO lookup: product_id → summary row
         self._existing_mos: Dict[int, Dict[str, Any]] = {}
@@ -191,9 +194,10 @@ class MOPlanner:
                 'so_linkage_loaded': len(self._so_linkage),
             },
             config_snapshot={
-                'lead_time_cutting': self._config.lead_time_cutting_days,
-                'lead_time_repacking': self._config.lead_time_repacking_days,
-                'lead_time_kitting': self._config.lead_time_kitting_days,
+                'lead_time_cutting_default': self._config.lead_time_cutting_days,
+                'lead_time_repacking_default': self._config.lead_time_repacking_days,
+                'lead_time_kitting_default': self._config.lead_time_kitting_days,
+                'bom_lead_times_loaded': len(self._scheduling_engine._bom_lt_index),
                 'use_historical_lt': self._config.lead_time_use_historical,
                 'use_historical_yield': self._config.yield_use_historical,
                 'planning_horizon': self._config.planning_horizon_days,
@@ -395,10 +399,12 @@ class MOPlanner:
         lt_stats = data_loader.load_lead_time_stats()
         existing_mos = data_loader.load_existing_mo_summary()
         so_linkage = data_loader.load_product_so_linkage()
+        bom_lead_times = data_loader.load_bom_lead_times()
 
         return cls(
             config=config,
             lead_time_stats_df=lt_stats,
             existing_mo_df=existing_mos,
             so_linkage_df=so_linkage,
+            bom_lead_times_df=bom_lead_times,
         )

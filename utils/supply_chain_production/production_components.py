@@ -510,18 +510,25 @@ def _render_quick_start(config: ProductionConfig, lt_stats_df, historical_summar
 
 
 def _build_historical_hint(lt_stats_df, bom_type: str) -> str:
-    """Build inline hint text from historical stats for a BOM type."""
+    """Build inline hint text from historical stats for a BOM type.
+    Aggregates across all BOMs of this type for the fallback hint."""
     if lt_stats_df is None or lt_stats_df.empty:
         return ""
     bom_rows = lt_stats_df[lt_stats_df['bom_type'] == bom_type] if 'bom_type' in lt_stats_df.columns else None
     if bom_rows is None or bom_rows.empty:
         return ""
 
-    row = bom_rows.iloc[0]
-    avg = row.get('avg_lead_time_days')
-    mos = row.get('completed_mo_count', 0)
-    if avg is not None and not pd.isna(avg):
-        return f"📊 Historical: avg {float(avg):.1f}d from {int(mos) if not pd.isna(mos) else 0} completed MOs"
+    total_mos = bom_rows['completed_mo_count'].sum()
+    if total_mos > 0:
+        weighted_avg = (
+            (bom_rows['avg_lead_time_days'] * bom_rows['completed_mo_count']).sum()
+            / total_mos
+        )
+        n_boms = len(bom_rows)
+        return (
+            f"📊 Historical: avg {weighted_avg:.1f}d from "
+            f"{int(total_mos)} MOs across {n_boms} BOM(s)"
+        )
     return ""
 
 
@@ -575,17 +582,23 @@ def render_settings_tab(config: ProductionConfig, lead_time_stats_df: Optional[p
     groups = progress['groups']
 
     # =====================================================================
-    # GROUP 1: Lead Time Setup
+    # BOM LEAD TIME OVERVIEW (read-only — from bom_lead_times table)
+    # =====================================================================
+    _render_bom_lead_time_overview(lead_time_stats_df)
+
+    # =====================================================================
+    # GROUP 1: Lead Time Fallback Defaults
     # =====================================================================
     lt_info = groups['lead_time']
     lt_badge = "✅ Complete" if lt_info['complete'] else f"⚠️ {lt_info['total'] - lt_info['configured']} remaining"
 
     with st.expander(
-        f"{lt_info['icon']} **{lt_info['label']}** — {lt_badge}",
+        f"{lt_info['icon']} **Lead Time — Fallback Defaults** — {lt_badge}",
         expanded=not lt_info['complete'],
     ):
         st.caption(
-            "Production lead time per BOM type in calendar days. "
+            "Default lead time per BOM type. Used as fallback when a BOM "
+            "does not have its own lead time set in the BOM Lead Times table above. "
             "These are required — scheduling cannot proceed without them."
         )
 
@@ -784,6 +797,141 @@ def _render_lead_time_reference(lt_stats_df: pd.DataFrame):
         use_container_width=True,
         height=min(35 * len(df) + 38, 180),
     )
+
+
+def _render_bom_lead_time_overview(lead_time_stats_df: Optional[pd.DataFrame] = None):
+    """
+    Show BOM-level lead time overview (from bom_lead_times table + historical).
+
+    Read-only panel showing:
+    - Which BOMs have standard_lead_time_days configured
+    - Historical avg from completed MOs
+    - How many BOMs are using fallback defaults
+
+    Gracefully handles missing bom_lead_times table (backward compat).
+    """
+    # Try loading BOM lead times from DB
+    bom_lt_df = pd.DataFrame()
+    plants_df = pd.DataFrame()
+    try:
+        from .production_data_loader import get_production_data_loader
+        loader = get_production_data_loader()
+        bom_lt_df = loader.load_bom_lead_times()
+        plants_df = loader.load_plants()
+    except Exception:
+        pass
+
+    # Build combined view: all active BOMs × their LT status
+    # Use historical stats to show BOMs even without configured LT
+    has_bom_lt = not bom_lt_df.empty
+    has_historical = (
+        lead_time_stats_df is not None
+        and not lead_time_stats_df.empty
+        and 'bom_header_id' in lead_time_stats_df.columns
+    )
+
+    if not has_bom_lt and not has_historical:
+        # Nothing to show — table not deployed or no data yet
+        return
+
+    with st.expander("🏭 **BOM Lead Times** — per-BOM overview", expanded=False):
+        st.caption(
+            "Lead time per BOM, managed by Production team. "
+            "BOMs without a configured lead time use the fallback defaults below."
+        )
+
+        # Plants info
+        if not plants_df.empty:
+            plant_names = plants_df['plant_name'].tolist()
+            st.caption(f"Plants: {', '.join(plant_names)}")
+
+        rows = []
+
+        if has_bom_lt:
+            # Show configured BOM lead times
+            for _, row in bom_lt_df.iterrows():
+                r = {
+                    'BOM Code': row.get('bom_code', ''),
+                    'Type': row.get('bom_type', ''),
+                    'Product': row.get('pt_code', ''),
+                    'Std LT': f"{int(row['standard_lead_time_days'])}d",
+                    'Min': f"{int(row['minimum_lead_time_days'])}d" if pd.notna(row.get('minimum_lead_time_days')) else '—',
+                    'Max': f"{int(row['maximum_lead_time_days'])}d" if pd.notna(row.get('maximum_lead_time_days')) else '—',
+                    'Plant': row.get('plant_name', 'Global') if pd.notna(row.get('plant_name')) else 'Global',
+                    'Source': row.get('source', ''),
+                }
+
+                # Merge historical if available
+                if has_historical:
+                    bom_id = row.get('bom_header_id')
+                    hist_row = lead_time_stats_df[
+                        lead_time_stats_df['bom_header_id'] == bom_id
+                    ]
+                    if not hist_row.empty:
+                        h = hist_row.iloc[0]
+                        avg = h.get('avg_lead_time_days')
+                        mos = h.get('completed_mo_count', 0)
+                        if pd.notna(avg):
+                            r['Hist Avg'] = f"{float(avg):.1f}d"
+                            r['MOs'] = int(mos) if pd.notna(mos) else 0
+                        else:
+                            r['Hist Avg'] = '—'
+                            r['MOs'] = 0
+                    else:
+                        r['Hist Avg'] = '—'
+                        r['MOs'] = 0
+
+                rows.append(r)
+
+        if has_historical and not has_bom_lt:
+            # No BOM LT configured yet — show historical data to guide setup
+            seen_boms = set()
+            for _, row in lead_time_stats_df.iterrows():
+                bom_id = row.get('bom_header_id')
+                if bom_id is None or pd.isna(bom_id) or bom_id in seen_boms:
+                    continue
+                seen_boms.add(bom_id)
+                avg = row.get('avg_lead_time_days')
+                mos = row.get('completed_mo_count', 0)
+                rows.append({
+                    'BOM Code': row.get('bom_code', ''),
+                    'Type': row.get('bom_type', ''),
+                    'Product': row.get('pt_code', ''),
+                    'Std LT': '— (not set)',
+                    'Min': '—',
+                    'Max': '—',
+                    'Plant': '—',
+                    'Source': '—',
+                    'Hist Avg': f"{float(avg):.1f}d" if pd.notna(avg) else '—',
+                    'MOs': int(mos) if pd.notna(mos) else 0,
+                })
+
+        if rows:
+            df = pd.DataFrame(rows)
+            st.dataframe(df, hide_index=True, use_container_width=True,
+                         height=min(35 * len(df) + 38, 400))
+
+            # Summary
+            configured = sum(1 for r in rows if '(not set)' not in str(r.get('Std LT', '')))
+            total = len(rows)
+            if configured == total and total > 0:
+                st.success(f"✅ {configured}/{total} BOMs have lead time configured")
+            elif configured > 0:
+                st.info(
+                    f"📊 {configured}/{total} BOMs configured · "
+                    f"**{total - configured}** using fallback defaults"
+                )
+            else:
+                st.warning(
+                    f"⚠️ No BOM-level lead times configured yet — "
+                    f"all {total} BOMs using fallback defaults below. "
+                    f"Set per-BOM lead times for more accurate scheduling."
+                )
+        else:
+            st.info(
+                "No BOM lead time data available yet. "
+                "Configure per-BOM lead times or use fallback defaults below."
+            )
 
 
 # =============================================================================

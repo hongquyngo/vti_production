@@ -61,7 +61,9 @@ class ConfigMissingError(Exception):
 class LeadTimeResolution:
     """Result of lead time resolution for one product."""
     lead_time_days: int
-    source: str                     # CONFIG, HISTORICAL_PRODUCT, HISTORICAL_BOM_TYPE
+    source: str                     # BOM_PLANT, BOM_GLOBAL, CONFIG_DEFAULT, HISTORICAL_BOM, etc.
+    min_days: Optional[int] = None  # from bom_lead_times if available
+    max_days: Optional[int] = None  # from bom_lead_times if available
     historical_info: Optional[Dict] = None   # avg, stddev, mo_count if historical
 
 
@@ -123,16 +125,26 @@ class MOSchedulingEngine:
         self,
         config: ProductionConfig,
         lead_time_stats_df: Optional[pd.DataFrame] = None,
+        bom_lead_times_df: Optional[pd.DataFrame] = None,
     ):
         self._config = config
         self._lt_stats = lead_time_stats_df if lead_time_stats_df is not None else pd.DataFrame()
+        self._bom_lt = bom_lead_times_df if bom_lead_times_df is not None else pd.DataFrame()
 
         # Pre-index historical stats
         self._lt_by_product: Dict[int, pd.Series] = {}
         self._lt_by_bom_type: Dict[str, Dict] = {}
+        # Pre-index per-BOM historical stats (keyed by bom_header_id)
+        self._lt_by_bom: Dict[int, pd.Series] = {}
 
         if not self._lt_stats.empty:
             self._build_historical_indexes()
+
+        # Pre-index BOM lead times: (bom_header_id, plant_id) → row
+        # plant_id=None stored as key -1 for dict compatibility
+        self._bom_lt_index: Dict[tuple, Dict] = {}
+        if not self._bom_lt.empty:
+            self._build_bom_lt_index()
 
     # =====================================================================
     # PUBLIC: Schedule one item
@@ -148,7 +160,7 @@ class MOSchedulingEngine:
         Full scheduling for one production item.
 
         Steps:
-        1. Resolve lead time (3-tier strict)
+        1. Resolve lead time (4-tier: BOM→Config→Historical)
         2. Resolve yield adjustment
         3. Calculate quantity (batch rounding + yield)
         4. Backward scheduling (demand_date → must_start_by)
@@ -161,8 +173,11 @@ class MOSchedulingEngine:
         if reference_date is None:
             reference_date = date.today()
 
-        # Step 1: Lead time
-        lt = self.resolve_lead_time(item.product_id, item.bom_type)
+        # Step 1: Lead time (4-tier)
+        lt = self.resolve_lead_time(
+            item.product_id, item.bom_type,
+            bom_header_id=item.bom_id,
+        )
 
         # Step 2: Yield
         yr = self.resolve_yield(item.product_id, item.bom_type)
@@ -255,25 +270,51 @@ class MOSchedulingEngine:
             return None, unschedulable
 
     # =====================================================================
-    # LEAD TIME RESOLUTION — 3-tier STRICT
+    # LEAD TIME RESOLUTION — 4-tier with BOM-level granularity
     # =====================================================================
 
     def resolve_lead_time(
         self,
         product_id: int,
         bom_type: str,
+        bom_header_id: Optional[int] = None,
+        plant_id: Optional[int] = None,
     ) -> LeadTimeResolution:
         """
-        Strict 3-tier lead time resolution.
+        4-tier lead time resolution with BOM-level granularity.
 
-        Tier 1: Config table value → REQUIRED
-        Tier 2: Historical override → only when USE_HISTORICAL + data ≥ threshold
-        Tier 3: No config → raise ConfigMissingError
+        Tier 1a: bom_lead_times — plant-specific (bom + plant)
+        Tier 1b: bom_lead_times — global default (bom + plant IS NULL)
+        Tier 1c: production_planning_config — BOM-type default (fallback)
+        Tier 2:  Historical override (only when USE_HISTORICAL + sufficient data)
+                 Level A: Per BOM (bom_header_id)
+                 Level B: Per product (product_id) → per BOM-type
 
-        Returns: LeadTimeResolution
-        Raises: ConfigMissingError if bom_type not configured
+        Raises: ConfigMissingError if no lead time found at any tier
         """
-        # Tier 1: Config must exist
+        # === Tier 1a: BOM + Plant specific ===
+        if bom_header_id and plant_id:
+            bom_lt = self._get_bom_lt(bom_header_id, plant_id)
+            if bom_lt is not None:
+                return LeadTimeResolution(
+                    lead_time_days=bom_lt['standard_lead_time_days'],
+                    source='BOM_PLANT',
+                    min_days=bom_lt.get('minimum_lead_time_days'),
+                    max_days=bom_lt.get('maximum_lead_time_days'),
+                )
+
+        # === Tier 1b: BOM global default (plant IS NULL) ===
+        if bom_header_id:
+            bom_lt_global = self._get_bom_lt(bom_header_id, None)
+            if bom_lt_global is not None:
+                return LeadTimeResolution(
+                    lead_time_days=bom_lt_global['standard_lead_time_days'],
+                    source='BOM_GLOBAL',
+                    min_days=bom_lt_global.get('minimum_lead_time_days'),
+                    max_days=bom_lt_global.get('maximum_lead_time_days'),
+                )
+
+        # === Tier 1c: Config BOM-type default ===
         config_days = self._config.get_lead_time_days(bom_type)
 
         if config_days is None:
@@ -281,20 +322,110 @@ class MOSchedulingEngine:
                 config_key=f'LEAD_TIME.{bom_type}.DAYS',
                 message=(
                     f"Lead time not configured for BOM type '{bom_type}'. "
-                    f"Go to Settings → Lead Time Setup."
+                    f"Set BOM-level lead time in bom_lead_times, "
+                    f"or set fallback default in Settings → Lead Time Setup."
                 ),
             )
 
-        # Tier 2: Historical override (only when enabled + data sufficient)
+        # === Tier 2: Historical override (only when enabled + data sufficient) ===
         if self._config.lead_time_use_historical:
+            # Level A: Per BOM
+            if bom_header_id:
+                hist_bom = self._try_historical_lead_time_bom(bom_header_id)
+                if hist_bom is not None:
+                    return hist_bom
+
+            # Level B: Per product → per BOM-type (existing logic)
             hist = self._try_historical_lead_time(product_id, bom_type)
             if hist is not None:
                 return hist
 
-        # Tier 1 value — config baseline
+        # Tier 1c value — config baseline
         return LeadTimeResolution(
             lead_time_days=config_days,
-            source='CONFIG',
+            source='CONFIG_DEFAULT',
+        )
+
+    # =====================================================================
+    # BOM LEAD TIME HELPERS
+    # =====================================================================
+
+    def _build_bom_lt_index(self):
+        """Pre-index BOM lead times for fast lookup.
+
+        Key: (bom_header_id, plant_id) where plant_id=-1 means global (NULL).
+        """
+        for _, row in self._bom_lt.iterrows():
+            bom_id = row.get('bom_header_id')
+            if bom_id is None or pd.isna(bom_id):
+                continue
+            plant = row.get('plant_id')
+            # Use -1 as sentinel for NULL plant_id (dict can't key on None reliably)
+            plant_key = int(plant) if plant is not None and not pd.isna(plant) else -1
+            key = (int(bom_id), plant_key)
+            self._bom_lt_index[key] = row.to_dict()
+
+        logger.info(
+            f"BOM lead time index built: {len(self._bom_lt_index)} entries"
+        )
+
+    def _get_bom_lt(
+        self,
+        bom_header_id: int,
+        plant_id: Optional[int],
+    ) -> Optional[Dict]:
+        """Lookup BOM lead time from pre-built index.
+
+        Args:
+            bom_header_id: BOM header ID
+            plant_id: Plant ID, or None for global default
+
+        Returns: Dict with standard_lead_time_days etc., or None
+        """
+        plant_key = int(plant_id) if plant_id is not None else -1
+        row = self._bom_lt_index.get((bom_header_id, plant_key))
+        if row is None:
+            return None
+        std_lt = row.get('standard_lead_time_days')
+        if std_lt is None or pd.isna(std_lt):
+            return None
+        return row
+
+    def _try_historical_lead_time_bom(
+        self,
+        bom_header_id: int,
+    ) -> Optional[LeadTimeResolution]:
+        """Try historical lead time override per BOM (not per product).
+
+        Uses bom_header_id-level stats from production_lead_time_stats_view.
+        """
+        min_count = self._config.lead_time_min_history_product or 5
+
+        bom_stats = self._lt_by_bom.get(bom_header_id)
+        if bom_stats is None:
+            return None
+
+        _mc = bom_stats.get('completed_mo_count', 0)
+        mo_count = int(_mc) if _mc is not None and not pd.isna(_mc) else 0
+        if mo_count < min_count:
+            return None
+
+        avg_days = bom_stats.get('avg_lead_time_days')
+        if avg_days is None or pd.isna(avg_days) or avg_days < 0:
+            return None
+
+        hist_days = max(1, int(round(float(avg_days))))
+        return LeadTimeResolution(
+            lead_time_days=hist_days,
+            source='HISTORICAL_BOM',
+            historical_info={
+                'avg_days': round(float(avg_days), 1),
+                'mo_count': mo_count,
+                'stddev': bom_stats.get('stddev_lead_time_days'),
+                'min_days': bom_stats.get('min_lead_time_days'),
+                'max_days': bom_stats.get('max_lead_time_days'),
+                'bom_code': bom_stats.get('bom_code', ''),
+            },
         )
 
     def _try_historical_lead_time(
@@ -678,6 +809,13 @@ class MOSchedulingEngine:
             if pid is not None and not pd.isna(pid):
                 self._lt_by_product[int(pid)] = row
 
+        # Per-BOM index (keyed by bom_header_id — new in v1.1)
+        if 'bom_header_id' in self._lt_stats.columns:
+            for _, row in self._lt_stats.iterrows():
+                bom_id = row.get('bom_header_id')
+                if bom_id is not None and not pd.isna(bom_id):
+                    self._lt_by_bom[int(bom_id)] = row
+
         # Per-BOM-type aggregation
         for bom_type in self._lt_stats['bom_type'].dropna().unique():
             bom_rows = self._lt_stats[self._lt_stats['bom_type'] == bom_type]
@@ -698,5 +836,6 @@ class MOSchedulingEngine:
 
         logger.info(
             f"Historical indexes built: {len(self._lt_by_product)} products, "
+            f"{len(self._lt_by_bom)} BOMs, "
             f"{len(self._lt_by_bom_type)} BOM types"
         )

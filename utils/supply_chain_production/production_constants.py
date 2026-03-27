@@ -11,7 +11,7 @@ production_planning_config table via production_config.py.
 # =============================================================================
 # VERSION
 # =============================================================================
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # =============================================================================
 # BOM TYPES — matches bom_headers.bom_type enum
@@ -163,7 +163,11 @@ MO_ACTION_TYPES = {
 # SCHEDULING — source labels
 # =============================================================================
 LEAD_TIME_SOURCE = {
-    'CONFIG': {'label': 'Config', 'icon': '⚙️'},
+    'BOM_PLANT': {'label': 'BOM (Plant)', 'icon': '🏭'},
+    'BOM_GLOBAL': {'label': 'BOM (Global)', 'icon': '📋'},
+    'CONFIG_DEFAULT': {'label': 'Config Default', 'icon': '⚙️'},
+    'CONFIG': {'label': 'Config', 'icon': '⚙️'},              # backward compat alias
+    'HISTORICAL_BOM': {'label': 'Historical (BOM)', 'icon': '📊'},
     'HISTORICAL_PRODUCT': {'label': 'Historical (Product)', 'icon': '📊'},
     'HISTORICAL_BOM_TYPE': {'label': 'Historical (BOM Type)', 'icon': '📈'},
 }
