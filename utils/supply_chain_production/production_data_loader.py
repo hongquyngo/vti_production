@@ -687,8 +687,8 @@ class ProductionDataLoader:
             p.pt_code,
             p.name AS product_name,
             COALESCE(p.package_size, '') AS package_size,
-            COALESCE(p.standard_uom, '') AS standard_uom,
-            COALESCE(b.name, '') AS brand,
+            p.uom AS standard_uom,
+            COALESCE(b.brand_name, '') AS brand,
             bh.output_qty,
             bh.status
         FROM bom_headers bh
@@ -719,7 +719,7 @@ class ProductionDataLoader:
             p.pt_code,
             p.name AS product_name,
             COALESCE(p.package_size, '') AS package_size,
-            COALESCE(p.standard_uom, '') AS standard_uom,
+            p.uom AS standard_uom,
             '' AS brand,
             bh.output_qty,
             bh.status
